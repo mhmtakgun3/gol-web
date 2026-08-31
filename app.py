@@ -1401,10 +1401,11 @@ def api_status():
 
 
 # ============================================================
-# RENDER İÇİN ARKA PLAN MOTORU
+# RENDER / GUNICORN OTOMATİK BAŞLATMA
 # ============================================================
 
 scanner_started = False
+
 
 def start_scanner():
 
@@ -1415,6 +1416,12 @@ def start_scanner():
 
     scanner_started = True
 
+    print("")
+    print("=" * 60)
+    print("🚀 SCANNER OTOMATİK OLARAK BAŞLATILIYOR")
+    print("=" * 60)
+    print("")
+
     scanner = threading.Thread(
         target=update_dashboard,
         daemon=True
@@ -1423,8 +1430,5 @@ def start_scanner():
     scanner.start()
 
 
-print("🔥 SCANNER KODU ÇALIŞTI!")
-
 start_scanner()
-print("🔥 SCANNER KODU ÇALIŞTI!")
 
