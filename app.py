@@ -806,62 +806,76 @@ def update_dashboard():
 
         print("❌ API_KEY: YOK")
 
-    while True:
+while True:
 
-        try:
+    cycle_start = time.time()
 
-            print("")
-            print("=" * 60)
-            print("📡 Canlı maçlar taranıyor...")
-            print("=" * 60)
+    try:
 
-            matches = get_live_matches()
+        print("")
+        print("=" * 60)
+        print("📡 CANLI MAÇLAR TARAMASI BAŞLADI")
+        print("=" * 60)
 
-            analyzed = []
+        matches = get_live_matches()
 
-            for match in matches:
+        analyzed = []
 
-                try:
+        for match in matches:
 
-                    result = analyze_match(match)
+            try:
 
-                    if result:
+                result = analyze_match(match)
 
-                        analyzed.append(result)
+                if result:
+                    analyzed.append(result)
 
-                except Exception as e:
+            except Exception as e:
 
-                    print(
-                        "❌ Maç analiz hatası:",
-                        e
-                    )
+                print(
+                    "❌ Maç analiz hatası:",
+                    repr(e)
+                )
 
-            dashboard_data = {
+        dashboard_data = {
 
-                "matches": analyzed,
+            "matches": analyzed,
 
-                "updated": time.strftime(
-                    "%H:%M:%S"
-                ),
+            "updated": time.strftime(
+                "%H:%M:%S"
+            ),
 
-                "error": None
-            }
+            "error": None
+        }
 
-            print(
-                f"📊 Analiz edilen maç: "
-                f"{len(analyzed)}"
-            )
+        print("")
+        print(
+            f"📊 Analiz edilen maç: "
+            f"{len(analyzed)}"
+        )
 
-        except Exception as e:
+        print(
+            f"⏱ Tarama süresi: "
+            f"{time.time() - cycle_start:.1f} saniye"
+        )
 
-            print(
-                "❌ Tarama hatası:",
-                e
-            )
+        print(
+            f"😴 {CHECK_SECONDS} saniye sonra "
+            f"yeni tarama başlayacak."
+        )
 
-            dashboard_data["error"] = str(e)
+    except Exception as e:
 
-        time.sleep(CHECK_SECONDS)
+        print("")
+        print("=" * 60)
+        print("❌ TARAMA MOTORU HATASI")
+        print("=" * 60)
+        print("HATA:", repr(e))
+        print("=" * 60)
+
+        dashboard_data["error"] = str(e)
+
+    time.sleep(CHECK_SECONDS)
 
 
 # ============================================================
@@ -1401,17 +1415,44 @@ def api_status():
 
 
 # ============================================================
-# RENDER / GUNICORN OTOMATİK BAŞLATMA
+# RENDER / GUNICORN SCANNER
 # ============================================================
 
 scanner_started = False
+scanner_thread = None
+
+
+def scanner_wrapper():
+
+    print("")
+    print("=" * 60)
+    print("🚀 SCANNER THREAD AKTİF")
+    print("=" * 60)
+    print("")
+
+    try:
+
+        update_dashboard()
+
+    except Exception as e:
+
+        print("")
+        print("=" * 60)
+        print("❌ SCANNER THREAD DURDU!")
+        print("=" * 60)
+        print("HATA:", repr(e))
+        print("=" * 60)
+        print("")
 
 
 def start_scanner():
 
     global scanner_started
+    global scanner_thread
 
     if scanner_started:
+
+        print("⚠️ Scanner zaten çalışıyor.")
         return
 
     scanner_started = True
@@ -1422,13 +1463,22 @@ def start_scanner():
     print("=" * 60)
     print("")
 
-    scanner = threading.Thread(
-        target=update_dashboard,
-        daemon=True
+    scanner_thread = threading.Thread(
+        target=scanner_wrapper,
+        name="FootballScanner",
+        daemon=False
     )
 
-    scanner.start()
+    scanner_thread.start()
 
+    print("")
+    print("✅ Scanner thread başlatıldı.")
+    print("")
+
+
+# ============================================================
+# UYGULAMA BAŞLARKEN SCANNER'I BAŞLAT
+# ============================================================
 
 start_scanner()
 
