@@ -786,7 +786,7 @@ def analyze_match(match):
 
 
 # ============================================================
-# ARKA PLAN TARAMA
+# ARKA PLAN TARAMA MOTORU
 # ============================================================
 
 def update_dashboard():
@@ -806,76 +806,76 @@ def update_dashboard():
 
         print("❌ API_KEY: YOK")
 
-while True:
+    while True:
 
-    cycle_start = time.time()
+        cycle_start = time.time()
 
-    try:
+        try:
 
-        print("")
-        print("=" * 60)
-        print("📡 CANLI MAÇLAR TARAMASI BAŞLADI")
-        print("=" * 60)
+            print("")
+            print("=" * 60)
+            print("📡 CANLI MAÇLAR TARAMASI BAŞLADI")
+            print("=" * 60)
 
-        matches = get_live_matches()
+            matches = get_live_matches()
 
-        analyzed = []
+            analyzed = []
 
-        for match in matches:
+            for match in matches:
 
-            try:
+                try:
 
-                result = analyze_match(match)
+                    result = analyze_match(match)
 
-                if result:
-                    analyzed.append(result)
+                    if result:
+                        analyzed.append(result)
 
-            except Exception as e:
+                except Exception as e:
 
-                print(
-                    "❌ Maç analiz hatası:",
-                    repr(e)
-                )
+                    print(
+                        "❌ Maç analiz hatası:",
+                        repr(e)
+                    )
 
-        dashboard_data = {
+            dashboard_data = {
 
-            "matches": analyzed,
+                "matches": analyzed,
 
-            "updated": time.strftime(
-                "%H:%M:%S"
-            ),
+                "updated": time.strftime(
+                    "%H:%M:%S"
+                ),
 
-            "error": None
-        }
+                "error": None
+            }
 
-        print("")
-        print(
-            f"📊 Analiz edilen maç: "
-            f"{len(analyzed)}"
-        )
+            print("")
+            print(
+                f"📊 Analiz edilen maç: "
+                f"{len(analyzed)}"
+            )
 
-        print(
-            f"⏱ Tarama süresi: "
-            f"{time.time() - cycle_start:.1f} saniye"
-        )
+            print(
+                f"⏱ Tarama süresi: "
+                f"{time.time() - cycle_start:.1f} saniye"
+            )
 
-        print(
-            f"😴 {CHECK_SECONDS} saniye sonra "
-            f"yeni tarama başlayacak."
-        )
+            print(
+                f"😴 {CHECK_SECONDS} saniye sonra "
+                f"yeni tarama başlayacak."
+            )
 
-    except Exception as e:
+        except Exception as e:
 
-        print("")
-        print("=" * 60)
-        print("❌ TARAMA MOTORU HATASI")
-        print("=" * 60)
-        print("HATA:", repr(e))
-        print("=" * 60)
+            print("")
+            print("=" * 60)
+            print("❌ TARAMA MOTORU HATASI")
+            print("=" * 60)
+            print("HATA:", repr(e))
+            print("=" * 60)
 
-        dashboard_data["error"] = str(e)
+            dashboard_data["error"] = str(e)
 
-    time.sleep(CHECK_SECONDS)
+        time.sleep(CHECK_SECONDS)
 
 
 # ============================================================
@@ -1415,7 +1415,7 @@ def api_status():
 
 
 # ============================================================
-# RENDER / GUNICORN SCANNER
+# SCANNER THREAD
 # ============================================================
 
 scanner_started = False
@@ -1453,6 +1453,7 @@ def start_scanner():
     if scanner_started:
 
         print("⚠️ Scanner zaten çalışıyor.")
+
         return
 
     scanner_started = True
@@ -1466,7 +1467,7 @@ def start_scanner():
     scanner_thread = threading.Thread(
         target=scanner_wrapper,
         name="FootballScanner",
-        daemon=False
+        daemon=True
     )
 
     scanner_thread.start()
@@ -1481,4 +1482,3 @@ def start_scanner():
 # ============================================================
 
 start_scanner()
-
