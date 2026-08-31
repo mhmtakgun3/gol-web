@@ -29,13 +29,6 @@ FIRST_HALF_LIMIT = 65
 
 
 # ============================================================
-# RENDER PORT
-# ============================================================
-
-PORT = int(os.getenv("PORT", "10000"))
-
-
-# ============================================================
 # İZİN VERİLEN LİGLER
 # ============================================================
 
@@ -149,17 +142,24 @@ ALLOWED_LEAGUES = {
 match_memory = {}
 
 dashboard_data = {
-    "matches": [],
-    "updated": None,
-    "error": None,
-    "scanner_running": False
-}
 
-dashboard_lock = threading.Lock()
+    "matches": [],
+
+    "updated": None,
+
+    "error": None,
+
+    "scanner_running": False,
+
+    "last_scan_started": None,
+
+    "last_scan_finished": None
+
+}
 
 
 # ============================================================
-# API
+# API İSTEĞİ
 # ============================================================
 
 def api_get(endpoint, params=None):
@@ -171,27 +171,40 @@ def api_get(endpoint, params=None):
         return None
 
     headers = {
+
         "x-apisports-key": API_KEY
+
     }
 
     try:
 
         response = requests.get(
+
             f"{API_URL}/{endpoint}",
+
             headers=headers,
+
             params=params,
+
             timeout=15
+
         )
 
         print(
-            f"API -> {endpoint} | HTTP {response.status_code}"
+
+            f"API -> {endpoint} | "
+            f"HTTP {response.status_code}"
+
         )
 
         if response.status_code != 200:
 
             print(
+
                 "❌ API HTTP hatası:",
+
                 response.status_code
+
             )
 
             print(response.text[:500])
@@ -203,8 +216,11 @@ def api_get(endpoint, params=None):
         if data.get("errors"):
 
             print(
+
                 "❌ API hatası:",
+
                 data.get("errors")
+
             )
 
             return None
@@ -214,8 +230,11 @@ def api_get(endpoint, params=None):
     except Exception as e:
 
         print(
+
             "❌ API bağlantı hatası:",
+
             repr(e)
+
         )
 
         return None
@@ -228,10 +247,15 @@ def api_get(endpoint, params=None):
 def get_live_matches():
 
     data = api_get(
+
         "fixtures",
+
         {
+
             "live": "all"
+
         }
+
     )
 
     if not data:
@@ -241,7 +265,10 @@ def get_live_matches():
     matches = data.get("response", [])
 
     print(
-        f"📡 API canlı maç sayısı: {len(matches)}"
+
+        f"📡 API canlı maç sayısı: "
+        f"{len(matches)}"
+
     )
 
     result = []
@@ -249,9 +276,11 @@ def get_live_matches():
     for match in matches:
 
         league_id = (
+
             match
             .get("league", {})
             .get("id")
+
         )
 
         if league_id in ALLOWED_LEAGUES:
@@ -259,7 +288,10 @@ def get_live_matches():
             result.append(match)
 
     print(
-        f"✅ Uygun liglerde canlı maç: {len(result)}"
+
+        f"✅ Uygun liglerde canlı maç: "
+        f"{len(result)}"
+
     )
 
     return result
@@ -272,10 +304,15 @@ def get_live_matches():
 def get_stats(fixture_id):
 
     data = api_get(
+
         "fixtures/statistics",
+
         {
+
             "fixture": fixture_id
+
         }
+
     )
 
     if not data:
@@ -286,7 +323,7 @@ def get_stats(fixture_id):
 
 
 # ============================================================
-# STAT DEĞERİ
+# İSTATİSTİK DEĞERİ
 # ============================================================
 
 def stat_value(stats, name):
@@ -329,67 +366,51 @@ def get_team_stats(stats):
         return None
 
     home = stats[0].get(
+
         "statistics",
+
         []
+
     )
 
     away = stats[1].get(
+
         "statistics",
+
         []
+
     )
 
     home_data = {
 
         "shots":
-            stat_value(
-                home,
-                "Total Shots"
-            ),
+            stat_value(home, "Total Shots"),
 
         "target":
-            stat_value(
-                home,
-                "Shots on Goal"
-            ),
+            stat_value(home, "Shots on Goal"),
 
         "corners":
-            stat_value(
-                home,
-                "Corner Kicks"
-            ),
+            stat_value(home, "Corner Kicks"),
 
         "inside":
-            stat_value(
-                home,
-                "Shots insidebox"
-            )
+            stat_value(home, "Shots insidebox")
+
     }
 
     away_data = {
 
         "shots":
-            stat_value(
-                away,
-                "Total Shots"
-            ),
+            stat_value(away, "Total Shots"),
 
         "target":
-            stat_value(
-                away,
-                "Shots on Goal"
-            ),
+            stat_value(away, "Shots on Goal"),
 
         "corners":
-            stat_value(
-                away,
-                "Corner Kicks"
-            ),
+            stat_value(away, "Corner Kicks"),
 
         "inside":
-            stat_value(
-                away,
-                "Shots insidebox"
-            )
+            stat_value(away, "Shots insidebox")
+
     }
 
     return home_data, away_data
@@ -426,6 +447,7 @@ def get_total_stats(stats):
         "inside":
             home["inside"] +
             away["inside"]
+
     }
 
 
@@ -444,30 +466,40 @@ def calculate_signal(match, current_stats):
     total_inside = current_stats["inside"]
 
     minute = (
+
         match
         .get("fixture", {})
         .get("status", {})
         .get("elapsed")
+
         or 0
+
     )
 
     goals_home = (
+
         match
         .get("goals", {})
         .get("home")
+
         or 0
+
     )
 
     goals_away = (
+
         match
         .get("goals", {})
         .get("away")
+
         or 0
+
     )
 
     score = 0
 
     reasons = []
+
 
     if total_shots >= 15:
 
@@ -551,8 +583,14 @@ def calculate_signal(match, current_stats):
 
 
     if (
-        goals_home + goals_away == 0
-        and minute >= 55
+
+        goals_home +
+        goals_away == 0
+
+        and
+
+        minute >= 55
+
     ):
 
         score += 8
@@ -561,12 +599,18 @@ def calculate_signal(match, current_stats):
             "55+ dakika ve skor 0-0"
         )
 
+
     elif (
+
         abs(
             goals_home -
             goals_away
         ) == 1
-        and minute >= 60
+
+        and
+
+        minute >= 60
+
     ):
 
         score += 5
@@ -574,6 +618,7 @@ def calculate_signal(match, current_stats):
         reasons.append(
             "Maç tek farklı"
         )
+
 
     return min(score, 100), reasons
 
@@ -583,8 +628,10 @@ def calculate_signal(match, current_stats):
 # ============================================================
 
 def calculate_first_half_signal(
+
     match,
     team_stats
+
 ):
 
     if not team_stats:
@@ -594,39 +641,54 @@ def calculate_first_half_signal(
     home, away = team_stats
 
     minute = (
+
         match
         .get("fixture", {})
         .get("status", {})
         .get("elapsed")
+
         or 0
+
     )
 
     goals_home = (
+
         match
         .get("goals", {})
         .get("home")
+
         or 0
+
     )
 
     goals_away = (
+
         match
         .get("goals", {})
         .get("away")
+
         or 0
+
     )
+
 
     if minute < 15 or minute > 45:
 
         return 0, [], "Belirsiz"
 
+
     score = 0
 
     reasons = []
 
+
     total_shots = (
+
         home["shots"] +
         away["shots"]
+
     )
+
 
     if total_shots >= 12:
 
@@ -650,9 +712,12 @@ def calculate_first_half_signal(
 
 
     total_target = (
+
         home["target"] +
         away["target"]
+
     )
+
 
     if total_target >= 6:
 
@@ -676,9 +741,12 @@ def calculate_first_half_signal(
 
 
     total_corners = (
+
         home["corners"] +
         away["corners"]
+
     )
+
 
     if total_corners >= 6:
 
@@ -694,9 +762,12 @@ def calculate_first_half_signal(
 
 
     total_inside = (
+
         home["inside"] +
         away["inside"]
+
     )
+
 
     if total_inside >= 7:
 
@@ -711,7 +782,12 @@ def calculate_first_half_signal(
         score += 9
 
 
-    if goals_home + goals_away == 0:
+    if (
+
+        goals_home +
+        goals_away == 0
+
+    ):
 
         score += 8
 
@@ -729,6 +805,7 @@ def calculate_first_half_signal(
         home["corners"] * 1.2 +
 
         home["inside"] * 1.5
+
     )
 
 
@@ -741,21 +818,28 @@ def calculate_first_half_signal(
         away["corners"] * 1.2 +
 
         away["inside"] * 1.5
+
     )
 
 
     if home_pressure > away_pressure * 1.20:
 
         expected_team = (
+
             "🏠 " +
+
             match["teams"]["home"]["name"]
+
         )
 
     elif away_pressure > home_pressure * 1.20:
 
         expected_team = (
+
             "✈️ " +
+
             match["teams"]["away"]["name"]
+
         )
 
     else:
@@ -764,9 +848,13 @@ def calculate_first_half_signal(
 
 
     return (
+
         min(score, 100),
+
         reasons,
+
         expected_team
+
     )
 
 
@@ -779,60 +867,78 @@ def analyze_match(match):
     fixture_id = match["fixture"]["id"]
 
     minute = (
+
         match
         .get("fixture", {})
         .get("status", {})
         .get("elapsed")
+
         or 0
+
     )
+
 
     if minute < 15:
 
         return None
 
-    home = (
-        match["teams"]["home"]["name"]
-    )
 
-    away = (
-        match["teams"]["away"]["name"]
-    )
+    home = match["teams"]["home"]["name"]
+
+    away = match["teams"]["away"]["name"]
+
 
     league_name = (
+
         match
         .get("league", {})
-        .get(
-            "name",
-            "Bilinmeyen Lig"
-        )
+        .get("name", "Bilinmeyen Lig")
+
     )
 
+
     goals_home = (
+
         match
         .get("goals", {})
         .get("home")
+
         or 0
+
     )
 
+
     goals_away = (
+
         match
         .get("goals", {})
         .get("away")
+
         or 0
+
     )
+
 
     current_score = (
+
         goals_home,
         goals_away
+
     )
+
 
     print(
-        f"🔎 Analiz: {home} - {away} | "
+
+        f"🔎 Analiz: "
+        f"{home} - {away} | "
         f"{minute}' | "
         f"{goals_home}-{goals_away}"
+
     )
 
+
     stats = get_stats(fixture_id)
+
 
     if not stats:
 
@@ -842,18 +948,13 @@ def analyze_match(match):
 
         return None
 
-    current_stats = get_total_stats(
-        stats
-    )
 
-    team_stats = get_team_stats(
-        stats
-    )
+    current_stats = get_total_stats(stats)
 
-    if (
-        not current_stats
-        or not team_stats
-    ):
+    team_stats = get_team_stats(stats)
+
+
+    if not current_stats or not team_stats:
 
         print(
             "⚠️ Eksik istatistik."
@@ -874,20 +975,22 @@ def analyze_match(match):
 
             "first_half_sent":
                 False
+
         }
 
 
-    memory = match_memory[
-        fixture_id
-    ]
+    memory = match_memory[fixture_id]
 
 
     if current_score != memory["score"]:
 
         print(
-            f"⚽ GOL: {home} - {away} "
+
+            f"⚽ GOL: "
+            f"{home} - {away} "
             f"{memory['score']} -> "
             f"{current_score}"
+
         )
 
         memory["score"] = current_score
@@ -896,8 +999,11 @@ def analyze_match(match):
 
 
     signal, reasons = calculate_signal(
+
         match,
+
         current_stats
+
     )
 
 
@@ -911,12 +1017,19 @@ def analyze_match(match):
     if 15 <= minute <= 45:
 
         (
+
             first_signal,
+
             first_reasons,
+
             expected_team
+
         ) = calculate_first_half_signal(
+
             match,
+
             team_stats
+
         )
 
 
@@ -932,6 +1045,7 @@ def analyze_match(match):
         home_stats["corners"] * 1.2 +
 
         home_stats["inside"] * 1.5
+
     )
 
 
@@ -944,6 +1058,7 @@ def analyze_match(match):
         away_stats["corners"] * 1.2 +
 
         away_stats["inside"] * 1.5
+
     )
 
 
@@ -1021,93 +1136,20 @@ def analyze_match(match):
 
         "strong_first_half":
             first_signal >= FIRST_HALF_LIMIT
+
     }
+
 
     return result
 
 
 # ============================================================
-# TEK TARAMA
+# TARAMA MOTORU
 # ============================================================
-
-def scan_once():
-
-    cycle_start = time.time()
-
-    print("")
-    print("=" * 60)
-    print("📡 CANLI MAÇLAR TARAMASI BAŞLADI")
-    print("=" * 60)
-
-    matches = get_live_matches()
-
-    analyzed = []
-
-    for match in matches:
-
-        try:
-
-            result = analyze_match(
-                match
-            )
-
-            if result:
-
-                analyzed.append(
-                    result
-                )
-
-        except Exception as e:
-
-            print(
-                "❌ Maç analiz hatası:",
-                repr(e)
-            )
-
-
-    with dashboard_lock:
-
-        dashboard_data["matches"] = (
-            analyzed
-        )
-
-        dashboard_data["updated"] = (
-            time.strftime("%H:%M:%S")
-        )
-
-        dashboard_data["error"] = None
-
-
-    print("")
-
-    print(
-        f"📊 Analiz edilen maç: "
-        f"{len(analyzed)}"
-    )
-
-    print(
-        f"⏱ Tarama süresi: "
-        f"{time.time() - cycle_start:.1f} saniye"
-    )
-
-    print(
-        f"😴 {CHECK_SECONDS} saniye sonra "
-        f"yeni tarama başlayacak."
-    )
-
-
-# ============================================================
-# ARKA PLAN SCANNER
-# ============================================================
-
-scanner_started = False
-
-scanner_thread = None
-
-scanner_lock = threading.Lock()
-
 
 def scanner_loop():
+
+    global dashboard_data
 
     print("")
     print("=" * 60)
@@ -1116,29 +1158,84 @@ def scanner_loop():
 
     if API_KEY:
 
-        print(
-            "🔑 API_KEY: OK"
-        )
+        print("🔑 API_KEY: OK")
 
     else:
 
-        print(
-            "❌ API_KEY: YOK"
-        )
-
-
-    with dashboard_lock:
-
-        dashboard_data[
-            "scanner_running"
-        ] = True
+        print("❌ API_KEY: YOK")
 
 
     while True:
 
+        cycle_start = time.time()
+
+        dashboard_data["scanner_running"] = True
+
+        dashboard_data["last_scan_started"] = (
+            time.strftime("%H:%M:%S")
+        )
+
+
         try:
 
-            scan_once()
+            print("")
+            print("=" * 60)
+            print("📡 CANLI MAÇLAR TARAMASI BAŞLADI")
+            print("=" * 60)
+
+
+            matches = get_live_matches()
+
+            analyzed = []
+
+
+            for match in matches:
+
+                try:
+
+                    result = analyze_match(match)
+
+                    if result:
+
+                        analyzed.append(result)
+
+                except Exception as e:
+
+                    print(
+                        "❌ Maç analiz hatası:",
+                        repr(e)
+                    )
+
+
+            dashboard_data["matches"] = analyzed
+
+            dashboard_data["updated"] = (
+                time.strftime("%H:%M:%S")
+            )
+
+            dashboard_data["last_scan_finished"] = (
+                time.strftime("%H:%M:%S")
+            )
+
+            dashboard_data["error"] = None
+
+
+            print("")
+            print(
+                f"📊 Analiz edilen maç: "
+                f"{len(analyzed)}"
+            )
+
+            print(
+                f"⏱ Tarama süresi: "
+                f"{time.time() - cycle_start:.1f} saniye"
+            )
+
+            print(
+                f"😴 {CHECK_SECONDS} saniye sonra "
+                f"yeni tarama başlayacak."
+            )
+
 
         except Exception as e:
 
@@ -1146,43 +1243,36 @@ def scanner_loop():
             print("=" * 60)
             print("❌ TARAMA MOTORU HATASI")
             print("=" * 60)
+
             print(
                 "HATA:",
                 repr(e)
             )
+
             print("=" * 60)
 
 
-            with dashboard_lock:
-
-                dashboard_data[
-                    "error"
-                ] = str(e)
-
-                dashboard_data[
-                    "scanner_running"
-                ] = True
+            dashboard_data["error"] = str(e)
 
 
-        time.sleep(
-            CHECK_SECONDS
-        )
+        time.sleep(CHECK_SECONDS)
 
 
 # ============================================================
-# SCANNER BAŞLAT
+# SCANNER THREAD
 # ============================================================
+
+scanner_thread = None
+
 
 def start_scanner():
-
-    global scanner_started
 
     global scanner_thread
 
 
-    with scanner_lock:
+    if scanner_thread is not None:
 
-        if scanner_started:
+        if scanner_thread.is_alive():
 
             print(
                 "⚠️ Scanner zaten çalışıyor."
@@ -1191,34 +1281,32 @@ def start_scanner():
             return
 
 
-        scanner_started = True
+    print("")
+    print("=" * 60)
+    print("🚀 SCANNER OTOMATİK OLARAK BAŞLATILIYOR")
+    print("=" * 60)
+    print("")
 
 
-        print("")
-        print("=" * 60)
-        print(
-            "🚀 SCANNER OTOMATİK OLARAK BAŞLATILIYOR"
-        )
-        print("=" * 60)
-        print("")
+    scanner_thread = threading.Thread(
+
+        target=scanner_loop,
+
+        name="FootballScanner",
+
+        daemon=True
+
+    )
 
 
-        scanner_thread = threading.Thread(
-
-            target=scanner_loop,
-
-            name="FootballScanner",
-
-            daemon=True
-        )
+    scanner_thread.start()
 
 
-        scanner_thread.start()
+    print(
+        "✅ Scanner thread başlatıldı."
+    )
 
-
-        print(
-            "✅ Scanner thread başlatıldı."
-        )
+    print("")
 
 
 # ============================================================
@@ -1434,13 +1522,18 @@ Canlı maçlar otomatik analiz ediliyor
 
 <br>
 
-<b>Scanner:</b>
+<b>Tarama motoru:</b>
 <span id="scanner">-</span>
 
 <br>
 
 <b>Son güncelleme:</b>
 <span id="updated">-</span>
+
+<br>
+
+<b>Son tarama:</b>
+<span id="lastscan">-</span>
 
 <br>
 
@@ -1496,6 +1589,7 @@ function createMatch(match) {
 
     let className = "match";
 
+
     if (strong) {
 
         className += " signal";
@@ -1503,6 +1597,7 @@ function createMatch(match) {
     } else if (firstStrong) {
 
         className += " first-signal";
+
     }
 
 
@@ -1595,7 +1690,9 @@ function createMatch(match) {
             <b>%${match.signal}</b>
 
         </div>
+
         `;
+
     }
 
 
@@ -1610,6 +1707,7 @@ function createMatch(match) {
         ${escapeHtml(match.expected_team)}
 
     </div>
+
     `;
 
 
@@ -1647,12 +1745,14 @@ function createMatch(match) {
         </div>
 
         `;
+
     }
 
 
     html += "</div>";
 
     return html;
+
 }
 
 
@@ -1669,26 +1769,40 @@ async function loadMatches() {
             await response.json();
 
 
-        document
-            .getElementById("status")
-            .textContent =
+        document.getElementById(
+            "status"
+        ).textContent =
+
             data.error
-            ? "🔴 API Hatası"
+
+            ? "🔴 Hata"
+
             : "🟢 Çalışıyor";
 
 
-        document
-            .getElementById("scanner")
-            .textContent =
+        document.getElementById(
+            "scanner"
+        ).textContent =
+
             data.scanner_running
+
             ? "🟢 Aktif"
-            : "🔴 Kapalı";
+
+            : "🔴 Durdu";
 
 
-        document
-            .getElementById("updated")
-            .textContent =
+        document.getElementById(
+            "updated"
+        ).textContent =
+
             data.updated || "-";
+
+
+        document.getElementById(
+            "lastscan"
+        ).textContent =
+
+            data.last_scan_finished || "-";
 
 
         const container =
@@ -1725,27 +1839,27 @@ async function loadMatches() {
             `;
 
             return;
+
         }
 
 
         container.innerHTML =
+
             data.matches
             .map(createMatch)
             .join("");
 
+    }
 
-    } catch (error) {
+    catch (error) {
 
-        document
-            .getElementById("status")
-            .textContent =
+        document.getElementById(
+            "status"
+        ).textContent =
             "🔴 Sunucu bağlantı hatası";
 
-        document
-            .getElementById("scanner")
-            .textContent =
-            "⚠️ Kontrol edilemiyor";
     }
+
 }
 
 
@@ -1765,7 +1879,7 @@ setInterval(
 
 
 # ============================================================
-# ROUTES
+# ROUTE: ANA SAYFA
 # ============================================================
 
 @app.route("/")
@@ -1776,60 +1890,73 @@ def index():
     )
 
 
+# ============================================================
+# ROUTE: MAÇLAR
+# ============================================================
+
 @app.route("/api/matches")
 def api_matches():
 
-    with dashboard_lock:
+    return jsonify(
+        dashboard_data
+    )
 
-        return jsonify(
-            dashboard_data
-        )
 
+# ============================================================
+# ROUTE: DURUM
+# ============================================================
 
 @app.route("/api/status")
 def api_status():
 
-    with dashboard_lock:
+    return jsonify({
 
-        return jsonify({
+        "running":
+            True,
 
-            "running":
-                True,
+        "api_key":
+            bool(API_KEY),
 
-            "api_key":
-                bool(API_KEY),
+        "scanner":
+            dashboard_data[
+                "scanner_running"
+            ],
 
-            "scanner":
+        "league_count":
+            len(ALLOWED_LEAGUES),
+
+        "match_count":
+            len(
                 dashboard_data[
-                    "scanner_running"
-                ],
-
-            "league_count":
-                len(
-                    ALLOWED_LEAGUES
-                ),
-
-            "match_count":
-                len(
-                    dashboard_data[
-                        "matches"
-                    ]
-                ),
-
-            "updated":
-                dashboard_data[
-                    "updated"
-                ],
-
-            "error":
-                dashboard_data[
-                    "error"
+                    "matches"
                 ]
-        })
+            ),
+
+        "updated":
+            dashboard_data[
+                "updated"
+            ],
+
+        "last_scan_started":
+            dashboard_data[
+                "last_scan_started"
+            ],
+
+        "last_scan_finished":
+            dashboard_data[
+                "last_scan_finished"
+            ],
+
+        "error":
+            dashboard_data[
+                "error"
+            ]
+
+    })
 
 
 # ============================================================
-# SCANNER'I OTOMATİK BAŞLAT
+# SCANNER'I BAŞLAT
 # ============================================================
 
 start_scanner()
@@ -1841,21 +1968,33 @@ start_scanner()
 
 if __name__ == "__main__":
 
+    port = int(
+        os.getenv(
+            "PORT",
+            "10000"
+        )
+    )
+
     print("")
     print("=" * 60)
     print("🌐 FLASK WEB SUNUCUSU BAŞLIYOR")
     print("=" * 60)
+
     print(
-        f"🌐 Port: {PORT}"
+        f"🌐 PORT: {port}"
     )
-    print(
-        "🌐 Host: 0.0.0.0"
-    )
+
     print("=" * 60)
     print("")
 
     app.run(
+
         host="0.0.0.0",
-        port=PORT,
-        threaded=True
+
+        port=port,
+
+        debug=False,
+
+        use_reloader=False
+
     )
