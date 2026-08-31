@@ -1482,3 +1482,26 @@ def start_scanner():
 # ============================================================
 
 start_scanner()
+
+
+# ============================================================
+# RENDER WEB SERVER
+# ============================================================
+
+if __name__ == "__main__":
+
+    port = int(os.environ.get("PORT", 10000))
+
+    print("")
+    print("=" * 60)
+    print("🌐 FLASK WEB SUNUCUSU BAŞLATILIYOR")
+    print("=" * 60)
+    print(f"🌐 PORT: {port}")
+    print("=" * 60)
+    print("")
+
+    app.run(
+        host="0.0.0.0",
+        port=port,
+        threaded=True
+    )
