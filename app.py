@@ -5,10 +5,6 @@ import sqlite3
 import requests
 import fcntl
 import json
-
-from datetime import datetime
-from zoneinfo import ZoneInfo
-
 from flask import Flask, jsonify, render_template_string
 
 
@@ -27,27 +23,34 @@ API_KEY = os.getenv("API_KEY", "").strip()
 
 API_URL = "https://v3.football.api-sports.io"
 
+# Her tarama arasındaki süre
 CHECK_SECONDS = 30
 
-# Scanner 90 saniyeden uzun süredir tarama bitirmediyse
-# watchdog bunu sağlıksız kabul eder.
-WATCHDOG_LIMIT = 90
-
+# Normal güçlü sinyal
 SIGNAL_LIMIT = 65
 
+# İlk yarı güçlü sinyal
 FIRST_HALF_LIMIT = 65
 
-# Türkiye saati
-TURKEY_TZ = ZoneInfo("Europe/Istanbul")
+# Watchdog
+# Bu süreden daha uzun başarılı tarama olmazsa scanner sağlıksız kabul edilir.
+WATCHDOG_TIMEOUT = 90
 
-
-# ============================================================
-# DOSYALAR
-# ============================================================
-
+# Veritabanı
 DB_FILE = "/tmp/gol_scanner.db"
 
+# Scanner lock
 LOCK_FILE = "/tmp/gol_scanner.lock"
+
+
+# ============================================================
+# SCANNER LOCK HANDLE
+# ============================================================
+
+# ÖNEMLİ:
+# Lock dosyasını global tutuyoruz.
+# Yoksa Python garbage collector dosyayı kapatıp flock'u bırakabilir.
+SCANNER_LOCK_HANDLE = None
 
 
 # ============================================================
@@ -158,56 +161,7 @@ ALLOWED_LEAGUES = {
 
 
 # ============================================================
-# TÜRKİYE SAATİ
-# ============================================================
-
-def turkey_now():
-
-    return datetime.now(
-        TURKEY_TZ
-    )
-
-
-def turkey_time():
-
-    return turkey_now().strftime(
-        "%H:%M:%S"
-    )
-
-
-def timestamp_to_seconds(timestamp):
-
-    if not timestamp:
-
-        return None
-
-    try:
-
-        dt = datetime.strptime(
-            timestamp,
-            "%Y-%m-%d %H:%M:%S"
-        )
-
-        dt = dt.replace(
-            tzinfo=TURKEY_TZ
-        )
-
-        return dt.timestamp()
-
-    except Exception:
-
-        return None
-
-
-def make_timestamp():
-
-    return turkey_now().strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
-
-
-# ============================================================
-# VERİTABANI
+# DB
 # ============================================================
 
 def db_connect():
@@ -257,14 +211,30 @@ def init_database():
 
                 last_scan_finished TEXT,
 
+                last_scan_timestamp REAL,
+
                 error TEXT
 
             )
         """)
 
+        # Eski DB varsa yeni kolon eksik olabilir.
+        columns = [
+            row["name"]
+            for row in conn.execute(
+                "PRAGMA table_info(system_state)"
+            ).fetchall()
+        ]
+
+        if "last_scan_timestamp" not in columns:
+
+            conn.execute("""
+                ALTER TABLE system_state
+                ADD COLUMN last_scan_timestamp REAL
+            """)
+
         conn.execute("""
             INSERT OR IGNORE INTO system_state (
-
                 id,
                 running,
                 scanner,
@@ -278,12 +248,10 @@ def init_database():
                 updated,
                 last_scan_started,
                 last_scan_finished,
+                last_scan_timestamp,
                 error
-
             )
-
             VALUES (
-
                 1,
                 1,
                 0,
@@ -294,17 +262,15 @@ def init_database():
                 0,
                 0,
                 ?,
+                NULL,
                 NULL,
                 NULL,
                 NULL,
                 NULL
-
             )
         """, (
-
             1 if API_KEY else 0,
             len(ALLOWED_LEAGUES)
-
         ))
 
         conn.commit()
@@ -317,7 +283,6 @@ def init_database():
 def update_state(**kwargs):
 
     if not kwargs:
-
         return
 
     conn = db_connect()
@@ -325,7 +290,6 @@ def update_state(**kwargs):
     try:
 
         allowed = {
-
             "running",
             "scanner",
             "scan_in_progress",
@@ -338,8 +302,8 @@ def update_state(**kwargs):
             "updated",
             "last_scan_started",
             "last_scan_finished",
+            "last_scan_timestamp",
             "error"
-
         }
 
         fields = []
@@ -348,16 +312,13 @@ def update_state(**kwargs):
         for key, value in kwargs.items():
 
             if key not in allowed:
-
                 continue
 
             fields.append(
                 f"{key} = ?"
             )
 
-            values.append(
-                value
-            )
+            values.append(value)
 
         if not fields:
 
@@ -366,15 +327,12 @@ def update_state(**kwargs):
         values.append(1)
 
         conn.execute(
-
             f"""
             UPDATE system_state
             SET {", ".join(fields)}
             WHERE id = ?
             """,
-
             values
-
         )
 
         conn.commit()
@@ -391,35 +349,28 @@ def get_state():
     try:
 
         row = conn.execute("""
-
             SELECT *
             FROM system_state
             WHERE id = 1
-
         """).fetchone()
 
         if not row:
 
             return {
-
                 "running": True,
                 "scanner": False,
                 "scan_in_progress": False,
                 "api_key": bool(API_KEY),
-
                 "live_match_count": 0,
                 "eligible_match_count": 0,
                 "analyzed_match_count": 0,
                 "match_count": 0,
-
-                "league_count":
-                    len(ALLOWED_LEAGUES),
-
+                "league_count": len(ALLOWED_LEAGUES),
                 "updated": None,
                 "last_scan_started": None,
                 "last_scan_finished": None,
+                "last_scan_timestamp": None,
                 "error": None
-
             }
 
         result = dict(row)
@@ -448,7 +399,7 @@ def get_state():
 
 
 # ============================================================
-# MAÇ KAYDET / OKU
+# MAÇ VERİLERİ
 # ============================================================
 
 def save_matches(matches):
@@ -458,7 +409,6 @@ def save_matches(matches):
     try:
 
         conn.execute("""
-
             CREATE TABLE IF NOT EXISTS matches_data (
 
                 id INTEGER PRIMARY KEY,
@@ -466,33 +416,24 @@ def save_matches(matches):
                 data TEXT NOT NULL
 
             )
-
         """)
 
         conn.execute("""
-
             DELETE FROM matches_data
-
         """)
 
         conn.execute("""
-
             INSERT INTO matches_data (
                 id,
                 data
             )
-
             VALUES (?, ?)
-
         """, (
-
             1,
-
             json.dumps(
                 matches,
                 ensure_ascii=False
             )
-
         ))
 
         conn.commit()
@@ -509,11 +450,9 @@ def load_matches():
     try:
 
         row = conn.execute("""
-
             SELECT data
             FROM matches_data
             WHERE id = 1
-
         """).fetchone()
 
         if not row:
@@ -536,7 +475,7 @@ def load_matches():
 
 
 # ============================================================
-# DATABASE BAŞLAT
+# BAŞLANGIÇ
 # ============================================================
 
 init_database()
@@ -547,15 +486,13 @@ update_state(
 
     api_key=1 if API_KEY else 0,
 
-    league_count=len(
-        ALLOWED_LEAGUES
-    )
+    league_count=len(ALLOWED_LEAGUES)
 
 )
 
 
 # ============================================================
-# API İSTEĞİ
+# API
 # ============================================================
 
 def api_get(endpoint, params=None):
@@ -569,10 +506,7 @@ def api_get(endpoint, params=None):
         return None
 
     headers = {
-
-        "x-apisports-key":
-            API_KEY
-
+        "x-apisports-key": API_KEY
     }
 
     try:
@@ -590,10 +524,8 @@ def api_get(endpoint, params=None):
         )
 
         print(
-
             f"API -> {endpoint} | "
             f"HTTP {response.status_code}"
-
         )
 
         if response.status_code != 200:
@@ -639,13 +571,10 @@ def api_get(endpoint, params=None):
 def get_live_matches():
 
     data = api_get(
-
         "fixtures",
-
         {
             "live": "all"
         }
-
     )
 
     if not data:
@@ -667,18 +596,14 @@ def get_live_matches():
     for match in matches:
 
         league_id = (
-
             match
             .get("league", {})
             .get("id")
-
         )
 
         if league_id in ALLOWED_LEAGUES:
 
-            result.append(
-                match
-            )
+            result.append(match)
 
     print(
         f"✅ Uygun liglerde canlı maç: "
@@ -689,7 +614,7 @@ def get_live_matches():
 
 
 # ============================================================
-# İSTATİSTİKLER
+# İSTATİSTİK
 # ============================================================
 
 def get_stats(fixture_id):
@@ -699,8 +624,7 @@ def get_stats(fixture_id):
         "fixtures/statistics",
 
         {
-            "fixture":
-                fixture_id
+            "fixture": fixture_id
         }
 
     )
@@ -715,10 +639,6 @@ def get_stats(fixture_id):
     )
 
 
-# ============================================================
-# İSTATİSTİK DEĞERİ
-# ============================================================
-
 def stat_value(stats, name):
 
     for item in stats:
@@ -727,18 +647,13 @@ def stat_value(stats, name):
 
             continue
 
-        value = item.get(
-            "value"
-        )
+        value = item.get("value")
 
         if value is None:
 
             return 0
 
-        if isinstance(
-            value,
-            str
-        ):
+        if isinstance(value, str):
 
             value = value.replace(
                 "%",
@@ -747,9 +662,7 @@ def stat_value(stats, name):
 
         try:
 
-            return float(
-                value
-            )
+            return float(value)
 
         except Exception:
 
@@ -803,7 +716,6 @@ def get_team_stats(stats):
                 home,
                 "Shots insidebox"
             )
-
     }
 
     away_data = {
@@ -831,18 +743,10 @@ def get_team_stats(stats):
                 away,
                 "Shots insidebox"
             )
-
     }
 
-    return (
-        home_data,
-        away_data
-    )
+    return home_data, away_data
 
-
-# ============================================================
-# TOPLAM İSTATİSTİK
-# ============================================================
 
 def get_total_stats(stats):
 
@@ -873,7 +777,6 @@ def get_total_stats(stats):
         "inside":
             home["inside"] +
             away["inside"]
-
     }
 
 
@@ -886,51 +789,31 @@ def calculate_signal(
     current_stats
 ):
 
-    total_shots = (
-        current_stats["shots"]
-    )
-
-    total_target = (
-        current_stats["target"]
-    )
-
-    total_corners = (
-        current_stats["corners"]
-    )
-
-    total_inside = (
-        current_stats["inside"]
-    )
+    total_shots = current_stats["shots"]
+    total_target = current_stats["target"]
+    total_corners = current_stats["corners"]
+    total_inside = current_stats["inside"]
 
     minute = (
-
         match
         .get("fixture", {})
         .get("status", {})
         .get("elapsed")
-
         or 0
-
     )
 
     goals_home = (
-
         match
         .get("goals", {})
         .get("home")
-
         or 0
-
     )
 
     goals_away = (
-
         match
         .get("goals", {})
         .get("away")
-
         or 0
-
     )
 
     score = 0
@@ -1014,14 +897,10 @@ def calculate_signal(
         score += 8
 
     if (
-
         goals_home +
         goals_away == 0
-
         and
-
         minute >= 55
-
     ):
 
         score += 8
@@ -1031,16 +910,12 @@ def calculate_signal(
         )
 
     elif (
-
         abs(
             goals_home -
             goals_away
         ) == 1
-
         and
-
         minute >= 60
-
     ):
 
         score += 5
@@ -1049,14 +924,14 @@ def calculate_signal(
             "Maç tek farklı"
         )
 
-    return (
-        min(score, 100),
-        reasons
-    )
+    return min(
+        score,
+        100
+    ), reasons
 
 
 # ============================================================
-# İLK YARI SİNYAL
+# İLK YARI SİNYALİ
 # ============================================================
 
 def calculate_first_half_signal(
@@ -1075,34 +950,25 @@ def calculate_first_half_signal(
     home, away = team_stats
 
     minute = (
-
         match
         .get("fixture", {})
         .get("status", {})
         .get("elapsed")
-
         or 0
-
     )
 
     goals_home = (
-
         match
         .get("goals", {})
         .get("home")
-
         or 0
-
     )
 
     goals_away = (
-
         match
         .get("goals", {})
         .get("away")
-
         or 0
-
     )
 
     if minute < 15 or minute > 45:
@@ -1118,10 +984,8 @@ def calculate_first_half_signal(
     reasons = []
 
     total_shots = (
-
         home["shots"] +
         away["shots"]
-
     )
 
     if total_shots >= 12:
@@ -1145,10 +1009,8 @@ def calculate_first_half_signal(
         score += 9
 
     total_target = (
-
         home["target"] +
         away["target"]
-
     )
 
     if total_target >= 6:
@@ -1172,10 +1034,8 @@ def calculate_first_half_signal(
         score += 9
 
     total_corners = (
-
         home["corners"] +
         away["corners"]
-
     )
 
     if total_corners >= 6:
@@ -1191,10 +1051,8 @@ def calculate_first_half_signal(
         score += 9
 
     total_inside = (
-
         home["inside"] +
         away["inside"]
-
     )
 
     if total_inside >= 7:
@@ -1210,10 +1068,8 @@ def calculate_first_half_signal(
         score += 9
 
     if (
-
         goals_home +
         goals_away == 0
-
     ):
 
         score += 8
@@ -1223,21 +1079,17 @@ def calculate_first_half_signal(
         )
 
     home_pressure = (
-
         home["shots"] * 1.0 +
         home["target"] * 2.5 +
         home["corners"] * 1.2 +
         home["inside"] * 1.5
-
     )
 
     away_pressure = (
-
         away["shots"] * 1.0 +
         away["target"] * 2.5 +
         away["corners"] * 1.2 +
         away["inside"] * 1.5
-
     )
 
     if home_pressure > away_pressure * 1.20:
@@ -1278,14 +1130,11 @@ def analyze_match(match):
     )
 
     minute = (
-
         match
         .get("fixture", {})
         .get("status", {})
         .get("elapsed")
-
         or 0
-
     )
 
     if minute < 15:
@@ -1301,43 +1150,33 @@ def analyze_match(match):
     )
 
     league_name = (
-
         match
         .get("league", {})
         .get(
             "name",
             "Bilinmeyen Lig"
         )
-
     )
 
     goals_home = (
-
         match
         .get("goals", {})
         .get("home")
-
         or 0
-
     )
 
     goals_away = (
-
         match
         .get("goals", {})
         .get("away")
-
         or 0
-
     )
 
     print(
-
         f"🔎 Analiz: "
         f"{home} - {away} | "
         f"{minute}' | "
         f"{goals_home}-{goals_away}"
-
     )
 
     stats = get_stats(
@@ -1379,23 +1218,18 @@ def analyze_match(match):
     )
 
     first_signal = 0
-
     first_reasons = []
-
-    first_expected_team = "Belirsiz"
+    expected_team = "Belirsiz"
 
     if 15 <= minute <= 45:
 
         (
             first_signal,
             first_reasons,
-            first_expected_team
-
+            expected_team
         ) = calculate_first_half_signal(
-
             match,
             team_stats
-
         )
 
     home_stats, away_stats = (
@@ -1403,21 +1237,17 @@ def analyze_match(match):
     )
 
     home_pressure = (
-
         home_stats["shots"] * 1.0 +
         home_stats["target"] * 2.5 +
         home_stats["corners"] * 1.2 +
         home_stats["inside"] * 1.5
-
     )
 
     away_pressure = (
-
         away_stats["shots"] * 1.0 +
         away_stats["target"] * 2.5 +
         away_stats["corners"] * 1.2 +
         away_stats["inside"] * 1.5
-
     )
 
     if home_pressure > away_pressure * 1.20:
@@ -1438,36 +1268,41 @@ def analyze_match(match):
             "⚽ Her iki takım"
         )
 
-    # Öncelik puanı
-    #
-    # Ana sinyal daha önemli.
-    # İlk yarı sinyali de sıralamaya dahil.
-    #
+    # ========================================================
+    # ÖNCELİK SİSTEMİ
+    # ========================================================
+
+    # Normal sinyal ana puan.
+    # İlk yarı sinyali de varsa güçlü şekilde dikkate alınır.
+
     priority = max(
         signal,
         first_signal
     )
 
-    # Güçlü sinyal bonusu
-    if signal >= SIGNAL_LIMIT:
+    # Çok güçlü sinyal
+    very_strong = (
+        signal >= 80
+        or
+        first_signal >= 80
+    )
+
+    # Öncelik bonusları
+    if very_strong:
+
+        priority += 20
+
+    elif signal >= SIGNAL_LIMIT:
 
         priority += 10
 
-    if first_signal >= FIRST_HALF_LIMIT:
+    elif first_signal >= FIRST_HALF_LIMIT:
 
         priority += 8
 
     priority = min(
         priority,
-        100
-    )
-
-    very_strong = (
-
-        signal >= 80
-        or
-        first_signal >= 80
-
+        120
     )
 
     return {
@@ -1520,77 +1355,19 @@ def analyze_match(match):
         "first_half_reasons":
             first_reasons,
 
-        "first_half_expected_team":
-            first_expected_team,
-
         "strong_signal":
             signal >= SIGNAL_LIMIT,
 
         "strong_first_half":
             first_signal >= FIRST_HALF_LIMIT,
 
-        "priority":
-            int(priority),
-
         "very_strong":
-            very_strong
+            very_strong,
+
+        "priority":
+            int(priority)
 
     }
-
-
-# ============================================================
-# MAÇLARI ÖNCELİĞE GÖRE SIRALA
-# ============================================================
-
-def sort_matches(matches):
-
-    return sorted(
-
-        matches,
-
-        key=lambda m: (
-
-            bool(
-                m.get(
-                    "very_strong",
-                    False
-                )
-            ),
-
-            bool(
-                m.get(
-                    "strong_signal",
-                    False
-                )
-            ),
-
-            bool(
-                m.get(
-                    "strong_first_half",
-                    False
-                )
-            ),
-
-            m.get(
-                "priority",
-                0
-            ),
-
-            m.get(
-                "signal",
-                0
-            ),
-
-            m.get(
-                "first_half_signal",
-                0
-            )
-
-        ),
-
-        reverse=True
-
-    )
 
 
 # ============================================================
@@ -1598,6 +1375,12 @@ def sort_matches(matches):
 # ============================================================
 
 def acquire_scanner_lock():
+
+    global SCANNER_LOCK_HANDLE
+
+    if SCANNER_LOCK_HANDLE is not None:
+
+        return SCANNER_LOCK_HANDLE
 
     try:
 
@@ -1607,35 +1390,129 @@ def acquire_scanner_lock():
         )
 
         fcntl.flock(
-
             lock_file.fileno(),
-
             fcntl.LOCK_EX |
             fcntl.LOCK_NB
-
         )
+
+        # Global tutuluyor.
+        SCANNER_LOCK_HANDLE = lock_file
 
         return lock_file
 
-    except Exception:
+    except Exception as e:
+
+        print(
+            "ℹ️ Scanner lock alınamadı:",
+            repr(e)
+        )
+
+        try:
+
+            lock_file.close()
+
+        except Exception:
+
+            pass
 
         return None
 
 
 # ============================================================
-# SCANNER
+# WATCHDOG
 # ============================================================
 
-scanner_thread = None
+def watchdog_loop():
 
-scanner_lock_handle = None
+    print(
+        "🐕 Watchdog başlatıldı."
+    )
 
+    while True:
+
+        try:
+
+            state = get_state()
+
+            last_timestamp = (
+                state.get(
+                    "last_scan_timestamp"
+                )
+            )
+
+            if last_timestamp:
+
+                seconds_since = max(
+                    0,
+                    int(
+                        time.time() -
+                        float(last_timestamp)
+                    )
+                )
+
+                if seconds_since > WATCHDOG_TIMEOUT:
+
+                    # Tarama uzun süredir yok.
+                    update_state(
+                        scanner=0,
+                        error=(
+                            "Watchdog: "
+                            "uzun süredir başarılı tarama yok."
+                        )
+                    )
+
+                    print(
+                        f"🐕 ⚠️ Scanner sağlıksız: "
+                        f"{seconds_since} saniyedir "
+                        f"başarılı tarama yok."
+                    )
+
+                else:
+
+                    # Scanner hâlâ sağlıklı.
+                    update_state(
+                        scanner=1
+                    )
+
+            else:
+
+                # İlk başarılı tarama henüz gerçekleşmedi.
+                # Scanner thread çalışıyor olabilir.
+                if state.get(
+                    "scan_in_progress"
+                ):
+
+                    update_state(
+                        scanner=1
+                    )
+
+                else:
+
+                    update_state(
+                        scanner=1
+                    )
+
+        except Exception as e:
+
+            print(
+                "🐕 Watchdog hatası:",
+                repr(e)
+            )
+
+        time.sleep(10)
+
+
+# ============================================================
+# TARAMA MOTORU
+# ============================================================
 
 def scanner_loop():
 
     print("")
     print("=" * 60)
-    print("🚀 ARKA PLAN MAÇ TARAMA MOTORU BAŞLADI")
+    print(
+        "🚀 ARKA PLAN MAÇ TARAMA MOTORU BAŞLADI"
+    )
     print("=" * 60)
 
     if API_KEY:
@@ -1654,7 +1531,11 @@ def scanner_loop():
 
         cycle_start = time.time()
 
-        start_time = turkey_time()
+        start_timestamp = time.time()
+
+        start_time = time.strftime(
+            "%H:%M:%S"
+        )
 
         update_state(
 
@@ -1685,11 +1566,9 @@ def scanner_loop():
 
             update_state(
 
-                live_match_count=
-                    live_count,
+                live_match_count=live_count,
 
-                eligible_match_count=
-                    live_count
+                eligible_match_count=live_count
 
             )
 
@@ -1716,17 +1595,20 @@ def scanner_loop():
                         repr(e)
                     )
 
-            # Öncelik sıralaması
-            analyzed = sort_matches(
-                analyzed
-            )
+            # =================================================
+            # ÖNEMLİ:
+            # SADECE BAŞARILI TARAMADA MATCHES GÜNCELLENİR.
+            # =================================================
 
-            # Ortak DB'ye kaydet
             save_matches(
                 analyzed
             )
 
-            finish_time = turkey_time()
+            finish_timestamp = time.time()
+
+            finish_time = time.strftime(
+                "%H:%M:%S"
+            )
 
             update_state(
 
@@ -1734,17 +1616,20 @@ def scanner_loop():
 
                 scan_in_progress=0,
 
-                analyzed_match_count=
-                    len(analyzed),
+                analyzed_match_count=len(
+                    analyzed
+                ),
 
-                match_count=
-                    len(analyzed),
+                match_count=len(
+                    analyzed
+                ),
 
-                updated=
-                    finish_time,
+                updated=finish_time,
 
-                last_scan_finished=
-                    finish_time,
+                last_scan_finished=finish_time,
+
+                # WATCHDOG İÇİN GERÇEK ZAMAN
+                last_scan_timestamp=finish_timestamp,
 
                 error=None
 
@@ -1758,13 +1643,8 @@ def scanner_loop():
 
             print(
                 f"⏱ Tarama süresi: "
-                f"{time.time() - cycle_start:.1f}"
+                f"{finish_timestamp - start_timestamp:.1f}"
                 f" saniye"
-            )
-
-            print(
-                f"🕐 Türkiye saati: "
-                f"{finish_time}"
             )
 
             print(
@@ -1796,8 +1676,9 @@ def scanner_loop():
 
                 error=str(e),
 
-                last_scan_finished=
-                    turkey_time()
+                last_scan_finished=time.strftime(
+                    "%H:%M:%S"
+                )
 
             )
 
@@ -1807,34 +1688,33 @@ def scanner_loop():
 
 
 # ============================================================
-# SCANNER BAŞLAT
+# SCANNER'I BAŞLAT
 # ============================================================
+
+scanner_thread = None
+watchdog_thread = None
+
 
 def start_scanner():
 
     global scanner_thread
-    global scanner_lock_handle
+    global watchdog_thread
 
     if (
-
         scanner_thread is not None
-
         and
-
         scanner_thread.is_alive()
-
     ):
 
         return
 
-    scanner_lock_handle = (
-        acquire_scanner_lock()
-    )
+    lock = acquire_scanner_lock()
 
-    if scanner_lock_handle is None:
+    if lock is None:
 
         print(
-            "ℹ️ Bu worker scanner lock alamadı."
+            "ℹ️ Bu Gunicorn worker "
+            "scanner lock alamadı."
         )
 
         return
@@ -1863,97 +1743,37 @@ def start_scanner():
         "✅ Scanner thread başlatıldı."
     )
 
+    # Watchdog
+    if (
+        watchdog_thread is None
+        or
+        not watchdog_thread.is_alive()
+    ):
+
+        watchdog_thread = threading.Thread(
+
+            target=watchdog_loop,
+
+            name="ScannerWatchdog",
+
+            daemon=True
+
+        )
+
+        watchdog_thread.start()
+
+        print(
+            "🐕 Watchdog thread başlatıldı."
+        )
+
     print("")
-
-
-# ============================================================
-# WATCHDOG
-# ============================================================
-
-def get_watchdog_info(state):
-
-    now = time.time()
-
-    last_finished = (
-        state.get(
-            "last_scan_finished"
-        )
-    )
-
-    last_timestamp = (
-        timestamp_to_seconds(
-            last_finished
-        )
-    )
-
-    if last_timestamp is None:
-
-        return {
-
-            "scanner_healthy": False,
-
-            "seconds_since_scan": None,
-
-            "next_scan_in": None,
-
-            "watchdog_message":
-                "Henüz başarılı tarama yok."
-
-        }
-
-    elapsed = int(
-        max(
-            0,
-            now - last_timestamp
-        )
-    )
-
-    healthy = (
-        elapsed <= WATCHDOG_LIMIT
-    )
-
-    next_scan = max(
-        0,
-        CHECK_SECONDS - (
-            elapsed % CHECK_SECONDS
-        )
-    )
-
-    if healthy:
-
-        message = (
-            "Scanner güncel."
-        )
-
-    else:
-
-        message = (
-            "⚠️ Scanner son taramayı "
-            f"{elapsed} saniye önce yaptı."
-        )
-
-    return {
-
-        "scanner_healthy":
-            healthy,
-
-        "seconds_since_scan":
-            elapsed,
-
-        "next_scan_in":
-            next_scan,
-
-        "watchdog_message":
-            message
-
-    }
 
 
 # ============================================================
 # WEB PANELİ
 # ============================================================
 
-HTML = r"""
+HTML = """
 <!DOCTYPE html>
 
 <html lang="tr">
@@ -1979,16 +1799,19 @@ body {
 
     font-family:
         Arial,
-        Helvetica,
         sans-serif;
 
     background:
-        #07111f;
+        #020617;
 
     color:
-        #f8fafc;
-
+        white;
 }
+
+
+/* =========================================================
+   HEADER
+   ========================================================= */
 
 .header {
 
@@ -2000,13 +1823,20 @@ body {
         );
 
     padding:
-        20px 15px;
+        20px;
 
     text-align:
         center;
 
     border-bottom:
-        1px solid #263449;
+        1px solid #334155;
+
+    position:
+        sticky;
+
+    top: 0;
+
+    z-index: 20;
 
 }
 
@@ -2016,7 +1846,7 @@ body {
         0;
 
     font-size:
-        27px;
+        25px;
 
 }
 
@@ -2030,10 +1860,15 @@ body {
 
 }
 
+
+/* =========================================================
+   CONTAINER
+   ========================================================= */
+
 .container {
 
     max-width:
-        1100px;
+        1050px;
 
     margin:
         auto;
@@ -2044,26 +1879,26 @@ body {
 }
 
 
-/* ============================================================
-   DURUM PANELİ
-   ============================================================ */
+/* =========================================================
+   STATUS
+   ========================================================= */
 
 .status {
 
     background:
-        #111c2d;
-
-    border:
-        1px solid #263449;
-
-    border-radius:
-        15px;
+        #111827;
 
     padding:
         16px;
 
+    border-radius:
+        14px;
+
     margin-bottom:
-        18px;
+        15px;
+
+    border:
+        1px solid #1e293b;
 
 }
 
@@ -2076,90 +1911,174 @@ body {
         repeat(
             auto-fit,
             minmax(
-                135px,
+                140px,
                 1fr
             )
         );
 
     gap:
-        9px;
-
-    margin-top:
-        12px;
+        8px;
 
 }
 
-.status-card {
+.status-item {
 
     background:
-        #0b1525;
-
-    border:
-        1px solid #233149;
-
-    border-radius:
-        11px;
+        #0f172a;
 
     padding:
-        11px;
+        10px;
+
+    border-radius:
+        9px;
 
 }
 
-.status-card small {
+.status-label {
 
     display:
         block;
 
     color:
-        #94a3b8;
+        #64748b;
 
     font-size:
         11px;
 
-    margin-bottom:
-        5px;
+    text-transform:
+        uppercase;
 
 }
 
-.status-card strong {
+.status-value {
+
+    display:
+        block;
 
     font-size:
-        17px;
+        15px;
 
-}
-
-.status-title {
-
-    font-size:
-        18px;
+    margin-top:
+        4px;
 
     font-weight:
         bold;
 
 }
 
-.healthy {
+
+/* =========================================================
+   WATCHDOG
+   ========================================================= */
+
+.watchdog {
+
+    margin-top:
+        12px;
+
+    padding:
+        10px 12px;
+
+    border-radius:
+        9px;
+
+    background:
+        #0f172a;
 
     color:
-        #4ade80;
+        #cbd5e1;
 
 }
 
-.unhealthy {
+.watchdog.ok {
 
-    color:
-        #f87171;
-
-}
-
-.warning {
-
-    color:
-        #fbbf24;
+    border:
+        1px solid #166534;
 
 }
 
-.refresh {
+.watchdog.bad {
+
+    border:
+        1px solid #991b1b;
+
+    background:
+        #450a0a;
+
+}
+
+
+/* =========================================================
+   BUTTON
+   ========================================================= */
+
+.notify-button {
+
+    margin-top:
+        10px;
+
+    padding:
+        9px 14px;
+
+    border:
+        none;
+
+    border-radius:
+        8px;
+
+    background:
+        #2563eb;
+
+    color:
+        white;
+
+    cursor:
+        pointer;
+
+    font-weight:
+        bold;
+
+}
+
+.notify-button:hover {
+
+    background:
+        #1d4ed8;
+
+}
+
+
+/* =========================================================
+   SECTION
+   ========================================================= */
+
+.section-title {
+
+    display:
+        flex;
+
+    justify-content:
+        space-between;
+
+    align-items:
+        center;
+
+    margin:
+        18px 2px 10px;
+
+}
+
+.section-title h2 {
+
+    font-size:
+        17px;
+
+    margin:
+        0;
+
+}
+
+.section-title span {
 
     color:
         #64748b;
@@ -2167,140 +2086,98 @@ body {
     font-size:
         12px;
 
-    margin-top:
-        12px;
-
 }
 
 
-/* ============================================================
-   ÖNE ÇIKAN ALAN
-   ============================================================ */
-
-.featured-title {
-
-    display:
-        flex;
-
-    justify-content:
-        space-between;
-
-    align-items:
-        center;
-
-    margin:
-        20px 0 10px;
-
-}
-
-.featured-title h2 {
-
-    margin:
-        0;
-
-    font-size:
-        20px;
-
-}
-
-.featured-title span {
-
-    font-size:
-        12px;
-
-    color:
-        #94a3b8;
-
-}
-
-
-/* ============================================================
-   MAÇ
-   ============================================================ */
+/* =========================================================
+   MATCH
+   ========================================================= */
 
 .match {
 
     background:
-        #111c2d;
+        #111827;
 
     border:
-        1px solid #263449;
+        1px solid #1e293b;
 
     border-radius:
-        13px;
+        12px;
 
     padding:
-        14px;
+        13px;
 
     margin-bottom:
-        10px;
+        9px;
 
     transition:
-        0.2s;
+        transform .15s,
+        border .15s;
 
 }
 
 .match:hover {
+
+    transform:
+        translateY(-1px);
 
     border-color:
         #475569;
 
 }
 
+
+/* Güçlü */
+
 .match.signal {
 
     border:
-        2px solid #22c55e;
+        1px solid #22c55e;
 
     background:
         linear-gradient(
             135deg,
-            #10291d,
-            #111c2d
-        );
-
-    box-shadow:
-        0 0 17px
-        rgba(
-            34,
-            197,
-            94,
-            0.13
+            #0f2418,
+            #111827
         );
 
 }
+
+
+/* Çok güçlü */
 
 .match.very-strong {
 
     border:
-        2px solid #16a34a;
+        2px solid #22c55e;
 
     box-shadow:
-        0 0 25px
+        0 0 18px
         rgba(
-            22,
-            163,
-            74,
-            0.20
+            34,
+            197,
+            94,
+            .20
         );
 
 }
 
+
+/* İlk yarı */
+
 .match.first-signal {
 
     border:
-        2px solid #f59e0b;
+        1px solid #f59e0b;
 
 }
 
-.match.compact {
 
-    padding:
-        12px;
+/* =========================================================
+   MATCH TOP
+   ========================================================= */
 
-}
-
-.top-row {
+.match-top {
 
     display:
         flex;
@@ -2308,11 +2185,11 @@ body {
     justify-content:
         space-between;
 
-    align-items:
-        center;
-
     gap:
         10px;
+
+    align-items:
+        center;
 
 }
 
@@ -2322,74 +2199,7 @@ body {
         #60a5fa;
 
     font-size:
-        12px;
-
-    font-weight:
-        bold;
-
-    white-space:
-        nowrap;
-
-    overflow:
-        hidden;
-
-    text-overflow:
-        ellipsis;
-
-}
-
-.priority {
-
-    background:
-        #1e293b;
-
-    border-radius:
-        20px;
-
-    padding:
-        4px 9px;
-
-    font-size:
         11px;
-
-    color:
-        #cbd5e1;
-
-}
-
-.teams {
-
-    font-size:
-        19px;
-
-    font-weight:
-        bold;
-
-    margin-top:
-        8px;
-
-}
-
-.score-line {
-
-    display:
-        flex;
-
-    align-items:
-        center;
-
-    justify-content:
-        space-between;
-
-    margin-top:
-        4px;
-
-}
-
-.score {
-
-    font-size:
-        27px;
 
     font-weight:
         bold;
@@ -2402,14 +2212,70 @@ body {
         #94a3b8;
 
     font-size:
-        13px;
+        12px;
 
 }
 
 
-/* ============================================================
-   İSTATİSTİKLER
-   ============================================================ */
+/* =========================================================
+   TEAMS
+   ========================================================= */
+
+.teams-row {
+
+    display:
+        grid;
+
+    grid-template-columns:
+        1fr
+        auto
+        1fr;
+
+    gap:
+        10px;
+
+    align-items:
+        center;
+
+    margin-top:
+        9px;
+
+}
+
+.team {
+
+    font-size:
+        16px;
+
+    font-weight:
+        bold;
+
+}
+
+.team.away {
+
+    text-align:
+        right;
+
+}
+
+.score {
+
+    font-size:
+        24px;
+
+    font-weight:
+        bold;
+
+    white-space:
+        nowrap;
+
+}
+
+
+/* =========================================================
+   STATS
+   ========================================================= */
 
 .stats {
 
@@ -2423,29 +2289,29 @@ body {
         );
 
     gap:
-        7px;
+        5px;
 
     margin-top:
-        11px;
+        10px;
 
 }
 
 .stat {
 
     background:
-        #0a1424;
-
-    border-radius:
-        8px;
+        #020617;
 
     padding:
-        8px 4px;
+        7px;
+
+    border-radius:
+        7px;
 
     text-align:
         center;
 
     color:
-        #94a3b8;
+        #64748b;
 
     font-size:
         10px;
@@ -2457,131 +2323,132 @@ body {
     display:
         block;
 
-    font-size:
-        18px;
-
-    margin-top:
-        3px;
-
     color:
         white;
 
+    font-size:
+        16px;
+
+    margin-top:
+        2px;
+
 }
 
 
-/* ============================================================
-   SİNYALLER
-   ============================================================ */
+/* =========================================================
+   SIGNAL
+   ========================================================= */
 
-.signal-box {
+.signal-row {
+
+    display:
+        flex;
+
+    flex-wrap:
+        wrap;
+
+    gap:
+        7px;
 
     margin-top:
         10px;
 
-    padding:
-        11px;
-
-    background:
-        #14532d;
-
-    border-radius:
-        9px;
-
 }
 
-.first-box {
-
-    margin-top:
-        8px;
+.signal-badge {
 
     padding:
-        11px;
-
-    background:
-        #713f12;
+        6px 9px;
 
     border-radius:
-        9px;
-
-}
-
-.expected-box {
-
-    margin-top:
-        9px;
-
-    padding:
-        10px;
+        7px;
 
     background:
-        #172554;
-
-    border-radius:
-        9px;
-
-    font-size:
-        13px;
-
-}
-
-.normal-score {
-
-    margin-top:
-        9px;
-
-    padding:
-        9px;
-
-    background:
-        #0b1525;
-
-    border-radius:
-        8px;
-
-    font-size:
-        13px;
-
-}
-
-.reason {
-
-    margin-top:
-        3px;
+        #052e16;
 
     color:
-        #d1d5db;
+        #86efac;
+
+    font-weight:
+        bold;
 
     font-size:
         12px;
 
 }
 
-.badge {
-
-    display:
-        inline-block;
-
-    padding:
-        4px 8px;
-
-    border-radius:
-        20px;
+.signal-badge.orange {
 
     background:
-        #334155;
+        #451a03;
 
-    font-size:
-        10px;
+    color:
+        #fdba74;
 
-    margin-left:
-        4px;
+}
+
+.signal-badge.blue {
+
+    background:
+        #172554;
+
+    color:
+        #93c5fd;
 
 }
 
 
-/* ============================================================
-   BOŞ
-   ============================================================ */
+/* =========================================================
+   EXPECTED
+   ========================================================= */
+
+.expected {
+
+    margin-top:
+        8px;
+
+    padding:
+        8px;
+
+    background:
+        #0f172a;
+
+    border-radius:
+        7px;
+
+    font-size:
+        12px;
+
+    color:
+        #cbd5e1;
+
+}
+
+
+/* =========================================================
+   REASONS
+   ========================================================= */
+
+.reasons {
+
+    margin-top:
+        8px;
+
+    color:
+        #94a3b8;
+
+    font-size:
+        11px;
+
+    line-height:
+        1.5;
+
+}
+
+
+/* =========================================================
+   EMPTY
+   ========================================================= */
 
 .empty {
 
@@ -2589,86 +2456,79 @@ body {
         center;
 
     padding:
-        50px 20px;
+        45px 15px;
 
     color:
-        #94a3b8;
+        #64748b;
 
     background:
-        #111c2d;
+        #111827;
 
     border-radius:
-        13px;
+        12px;
 
 }
 
 
-/* ============================================================
-   MOBİL
-   ============================================================ */
+/* =========================================================
+   MOBILE
+   ========================================================= */
 
 @media (max-width: 600px) {
-
-    .header h1 {
-
-        font-size:
-            22px;
-
-    }
 
     .container {
 
         padding:
-            10px;
+            8px;
 
     }
 
-    .status {
+    .header {
 
         padding:
-            12px;
+            14px;
 
     }
 
-    .teams {
+    .header h1 {
 
         font-size:
-            16px;
+            20px;
+
+    }
+
+    .team {
+
+        font-size:
+            13px;
 
     }
 
     .score {
 
         font-size:
-            24px;
+            20px;
 
     }
 
     .stats {
 
         gap:
-            5px;
+            3px;
 
     }
 
     .stat {
 
         padding:
-            7px 2px;
+            6px 2px;
 
     }
 
     .stat b {
 
         font-size:
-            16px;
-
-    }
-
-    .match {
-
-        padding:
-            11px;
+            14px;
 
     }
 
@@ -2677,6 +2537,7 @@ body {
 </style>
 
 </head>
+
 
 <body>
 
@@ -2697,160 +2558,182 @@ body {
 <div class="container">
 
 
-<div class="status">
+    <!-- =====================================================
+         STATUS
+         ===================================================== -->
 
-    <div class="status-title">
-        📡 Sistem Durumu
+    <div class="status">
+
+        <div class="status-grid">
+
+            <div class="status-item">
+
+                <span class="status-label">
+                    Sistem
+                </span>
+
+                <span
+                    class="status-value"
+                    id="status">
+                    Bağlanıyor...
+                </span>
+
+            </div>
+
+
+            <div class="status-item">
+
+                <span class="status-label">
+                    Scanner
+                </span>
+
+                <span
+                    class="status-value"
+                    id="scanner">
+                    -
+                </span>
+
+            </div>
+
+
+            <div class="status-item">
+
+                <span class="status-label">
+                    Canlı
+                </span>
+
+                <span
+                    class="status-value"
+                    id="livecount">
+                    0
+                </span>
+
+            </div>
+
+
+            <div class="status-item">
+
+                <span class="status-label">
+                    Analiz
+                </span>
+
+                <span
+                    class="status-value"
+                    id="analyzedcount">
+                    0
+                </span>
+
+            </div>
+
+
+            <div class="status-item">
+
+                <span class="status-label">
+                    Son Tarama
+                </span>
+
+                <span
+                    class="status-value"
+                    id="scanfinish">
+                    -
+                </span>
+
+            </div>
+
+
+            <div class="status-item">
+
+                <span class="status-label">
+                    Sonraki Tarama
+                </span>
+
+                <span
+                    class="status-value"
+                    id="nextscan">
+                    -
+                </span>
+
+            </div>
+
+        </div>
+
+
+        <div
+            id="watchdog"
+            class="watchdog">
+
+            🐕 Watchdog:
+            <span id="watchdogtext">
+                Kontrol ediliyor...
+            </span>
+
+        </div>
+
+
+        <button
+            class="notify-button"
+            onclick="enableNotifications()">
+
+            🔔 Bildirimleri Aç
+
+        </button>
+
+
+        <div
+            style="
+                margin-top:8px;
+                color:#64748b;
+                font-size:11px;
+            ">
+
+            Normal güçlü sinyal:
+            %65+
+
+            &nbsp; | &nbsp;
+
+            Çok güçlü:
+            %80+
+
+            &nbsp; | &nbsp;
+
+            Panel:
+            5 saniyede yenilenir
+
+        </div>
+
     </div>
 
 
-    <div class="status-grid">
+    <!-- =====================================================
+         MAÇLAR
+         ===================================================== -->
 
+    <div class="section-title">
 
-        <div class="status-card">
+        <h2>
+            🔥 Öncelikli Maçlar
+        </h2>
 
-            <small>SİSTEM</small>
-
-            <strong
-                id="status"
-            >
-                Bağlanıyor...
-            </strong>
-
-        </div>
-
-
-        <div class="status-card">
-
-            <small>SCANNER</small>
-
-            <strong
-                id="scanner"
-            >
-                -
-            </strong>
-
-        </div>
-
-
-        <div class="status-card">
-
-            <small>CANLI</small>
-
-            <strong
-                id="livecount"
-            >
-                0
-            </strong>
-
-        </div>
-
-
-        <div class="status-card">
-
-            <small>ANALİZ</small>
-
-            <strong
-                id="analyzedcount"
-            >
-                0
-            </strong>
-
-        </div>
-
-
-        <div class="status-card">
-
-            <small>SON TARAMA</small>
-
-            <strong
-                id="updated"
-            >
-                -
-            </strong>
-
-        </div>
-
-
-        <div class="status-card">
-
-            <small>GEÇEN SÜRE</small>
-
-            <strong
-                id="secondsSince"
-            >
-                -
-            </strong>
-
-        </div>
-
-
-        <div class="status-card">
-
-            <small>SONRAKİ TARAMA</small>
-
-            <strong
-                id="nextScan"
-            >
-                -
-            </strong>
-
-        </div>
-
-
-        <div class="status-card">
-
-            <small>SAAT DİLİMİ</small>
-
-            <strong>
-                🇹🇷 Türkiye
-            </strong>
-
-        </div>
-
+        <span id="matchcount">
+            0 maç
+        </span>
 
     </div>
 
 
-    <div
-        id="watchdogMessage"
-        class="refresh"
-    >
-        Scanner kontrol ediliyor...
-    </div>
+    <div id="matches">
 
+        <div class="empty">
 
-    <div class="refresh">
+            ⚽
 
-        Panel:
-        <b>10 saniyede</b>
-        yenilenir.
+            <br><br>
 
-        Scanner:
-        <b>30 saniyede</b>
-        tarama yapar.
+            Maçlar yükleniyor...
+
+        </div>
 
     </div>
-
-</div>
-
-
-<div
-    class="featured-title"
->
-
-    <h2>
-        🔥 En Yüksek Gol Sinyalleri
-    </h2>
-
-    <span id="matchCount">
-        0 maç
-    </span>
-
-</div>
-
-
-<div id="matches"></div>
 
 
 </div>
@@ -2860,151 +2743,40 @@ body {
 
 
 // ============================================================
-// BİLDİRİM SİSTEMİ
+// BİLDİRİM
 // ============================================================
 
-let notifiedMatches =
-    new Set();
+async function enableNotifications() {
 
-let notificationInitialized =
-    false;
+    if (!("Notification" in window)) {
 
-
-function notificationSupported() {
-
-    return (
-        "Notification" in window
-    );
-
-}
-
-
-async function requestNotificationPermission() {
-
-    if (
-        !notificationSupported()
-    ) {
+        alert(
+            "Tarayıcınız bildirimleri desteklemiyor."
+        );
 
         return;
 
     }
 
-    if (
-        Notification.permission ===
-        "default"
-    ) {
+    try {
 
-        try {
-
+        const permission =
             await Notification.requestPermission();
 
-        } catch (error) {
+        if (
+            permission === "granted"
+        ) {
 
-            console.log(
-                "Bildirim izni alınamadı:",
-                error
+            alert(
+                "🔔 Bildirimler aktif edildi."
             );
 
         }
 
-    }
-
-}
-
-
-function notificationKey(match) {
-
-    return String(
-        match.fixture_id
-    );
-
-}
-
-
-function notifyStrongMatch(match) {
-
-    if (
-        !notificationSupported()
-    ) {
-
-        return;
-
-    }
-
-    if (
-        Notification.permission !==
-        "granted"
-    ) {
-
-        return;
-
-    }
-
-    const key =
-        notificationKey(match);
-
-
-    if (
-        notifiedMatches.has(key)
-    ) {
-
-        return;
-
-    }
-
-
-    notifiedMatches.add(key);
-
-
-    let title =
-        "🔥 YÜKSEK GOL SİNYALİ";
-
-
-    let body =
-
-        match.home
-        + " - "
-        + match.away
-        + "\n"
-        + match.minute
-        + "' | "
-        + match.score_home
-        + "-"
-        + match.score_away
-        + "\n"
-        + "Gol sinyali: %"
-        + match.signal;
-
-
-    try {
-
-        const notification =
-            new Notification(
-                title,
-                {
-                    body:
-                        body,
-
-                    tag:
-                        "gol-"
-                        + key
-                }
-            );
-
-
-        notification.onclick =
-            function() {
-
-                window.focus();
-
-                notification.close();
-
-            };
-
     } catch (error) {
 
         console.log(
-            "Bildirim gönderilemedi:",
+            "Bildirim izni alınamadı:",
             error
         );
 
@@ -3014,18 +2786,18 @@ function notifyStrongMatch(match) {
 
 
 // ============================================================
-// HTML GÜVENLİĞİ
+// HTML ESCAPE
 // ============================================================
 
 function escapeHtml(text) {
 
     const div =
-        document.createElement(
-            "div"
-        );
+        document.createElement("div");
 
     div.textContent =
-        text;
+        text == null
+        ? ""
+        : String(text);
 
     return div.innerHTML;
 
@@ -3033,41 +2805,176 @@ function escapeHtml(text) {
 
 
 // ============================================================
-// MAÇ OLUŞTUR
+// YENİ SİNYAL BİLDİRİMİ
+// ============================================================
+
+function notifyStrongMatches(matches) {
+
+    if (
+        !("Notification" in window)
+    ) {
+
+        return;
+
+    }
+
+    if (
+        Notification.permission !== "granted"
+    ) {
+
+        return;
+
+    }
+
+    let notified =
+        JSON.parse(
+            localStorage.getItem(
+                "gol_notified_matches"
+            ) || "{}"
+        );
+
+
+    matches.forEach(match => {
+
+        const strong =
+            match.signal >= 65
+            ||
+            match.first_half_signal >= 65;
+
+        if (!strong) {
+
+            return;
+
+        }
+
+
+        const key =
+            String(match.fixture_id);
+
+
+        // Daha önce bu tarayıcıda
+        // bildirim gönderilmişse tekrar gönderme.
+        if (notified[key]) {
+
+            return;
+
+        }
+
+
+        const score =
+            Math.max(
+                match.signal || 0,
+                match.first_half_signal || 0
+            );
+
+
+        const title =
+            score >= 80
+            ? "🔥 ÇOK GÜÇLÜ GOL SİNYALİ"
+            : "⚽ GÜÇLÜ GOL SİNYALİ";
+
+
+        const body =
+            match.home +
+            " - " +
+            match.away +
+            " | " +
+            match.minute +
+            "' | " +
+            "%" +
+            score;
+
+
+        try {
+
+            new Notification(
+                title,
+                {
+                    body:
+                        body,
+
+                    tag:
+                        "gol-" +
+                        key
+                }
+            );
+
+            notified[key] =
+                Date.now();
+
+        } catch (error) {
+
+            console.log(
+                "Notification hatası:",
+                error
+            );
+
+        }
+
+    });
+
+
+    // Çok büyümesini engelle
+    const keys =
+        Object.keys(
+            notified
+        );
+
+    if (keys.length > 300) {
+
+        const sorted =
+            keys.sort(
+                (a, b) =>
+                    notified[a] -
+                    notified[b]
+            );
+
+        sorted
+            .slice(
+                0,
+                keys.length - 200
+            )
+            .forEach(
+                key =>
+                    delete notified[key]
+            );
+
+    }
+
+
+    localStorage.setItem(
+        "gol_notified_matches",
+        JSON.stringify(notified)
+    );
+
+}
+
+
+// ============================================================
+// MAÇ HTML
 // ============================================================
 
 function createMatch(match) {
-
-    let html = "";
-
-
-    const strong =
-        match.strong_signal;
-
-
-    const firstStrong =
-        match.strong_first_half;
-
-
-    const veryStrong =
-        match.very_strong;
-
 
     let className =
         "match";
 
 
-    if (veryStrong) {
+    if (match.very_strong) {
 
         className +=
             " very-strong";
 
-    } else if (strong) {
+    } else if (
+        match.strong_signal
+    ) {
 
         className +=
             " signal";
 
-    } else if (firstStrong) {
+    } else if (
+        match.strong_first_half
+    ) {
 
         className +=
             " first-signal";
@@ -3075,272 +2982,268 @@ function createMatch(match) {
     }
 
 
-    html += `
-
-    <div class="${className}">
-
-
-        <div class="top-row">
-
-            <div class="league">
-
-                🏆
-                ${escapeHtml(
-                    match.league
-                )}
-
-            </div>
+    const maxSignal =
+        Math.max(
+            match.signal || 0,
+            match.first_half_signal || 0
+        );
 
 
-            <div class="priority">
-
-                Öncelik
-                %${match.priority || 0}
-
-            </div>
-
-        </div>
-
-
-        <div class="teams">
-
-            ${escapeHtml(
-                match.home
-            )}
-
-            -
-
-            ${escapeHtml(
-                match.away
-            )}
-
-        </div>
-
-
-        <div class="score-line">
-
-            <div class="score">
-
-                ${match.score_home}
-                -
-                ${match.score_away}
-
-            </div>
-
-
-            <div class="minute">
-
-                ⏱
-                ${match.minute}'
-
-            </div>
-
-        </div>
-
-
-        <div class="stats">
-
-
-            <div class="stat">
-
-                ŞUT
-
-                <b>
-                    ${match.shots}
-                </b>
-
-            </div>
-
-
-            <div class="stat">
-
-                İSABETLİ
-
-                <b>
-                    ${match.target}
-                </b>
-
-            </div>
-
-
-            <div class="stat">
-
-                KORNER
-
-                <b>
-                    ${match.corners}
-                </b>
-
-            </div>
-
-
-            <div class="stat">
-
-                CEZA SAHASI
-
-                <b>
-                    ${match.inside}
-                </b>
-
-            </div>
-
-
-        </div>
-    `;
+    let signalBadge = "";
 
 
     if (
+        match.very_strong
+    ) {
+
+        signalBadge += `
+
+            <div class="signal-badge">
+
+                🔥 ÇOK GÜÇLÜ
+                %${maxSignal}
+
+            </div>
+
+        `;
+
+    } else if (
         match.strong_signal
     ) {
 
-        html += `
+        signalBadge += `
 
-        <div class="signal-box">
+            <div class="signal-badge">
 
-            🔥
-
-            <b>
-
-                GOL SİNYALİ:
+                ⚽ GOL SİNYALİ
                 %${match.signal}
 
-            </b>
-
-            <br><br>
-
-
-            ${match.signal_reasons
-
-                .map(
-
-                    r =>
-
-                    `<div
-                        class="reason"
-                    >
-                        •
-                        ${escapeHtml(r)}
-                    </div>`
-
-                )
-
-                .join("")
-
-            }
-
-        </div>
+            </div>
 
         `;
 
     } else {
 
-        html += `
+        signalBadge += `
 
-        <div class="normal-score">
+            <div class="signal-badge blue">
 
-            📊
-
-            Gol sinyali:
-
-            <b>
+                📊 Sinyal
                 %${match.signal}
-            </b>
 
-        </div>
+            </div>
 
         `;
 
     }
-
-
-    html += `
-
-    <div class="expected-box">
-
-        ⚽
-
-        <b>
-            Gol beklenen taraf:
-        </b>
-
-        <br><br>
-
-        ${escapeHtml(
-            match.expected_team
-        )}
-
-    </div>
-
-    `;
 
 
     if (
         match.first_half_signal >= 65
     ) {
 
-        html += `
+        signalBadge += `
 
-        <div class="first-box">
+            <div class="signal-badge orange">
 
-            ⚡
-
-            <b>
-
-                İLK YARI GOL SİNYALİ:
+                ⚡ İLK YARI
                 %${match.first_half_signal}
 
-            </b>
-
-            <br><br>
-
-            ⚽
-
-            <b>
-                Gol beklenen taraf:
-            </b>
-
-            <br><br>
-
-            ${escapeHtml(
-                match.first_half_expected_team
-                ||
-                match.expected_team
-            )}
-
-            <br><br>
-
-
-            ${match.first_half_reasons
-
-                .map(
-
-                    r =>
-
-                    `<div
-                        class="reason"
-                    >
-                        •
-                        ${escapeHtml(r)}
-                    </div>`
-
-                )
-
-                .join("")
-
-            }
-
-        </div>
+            </div>
 
         `;
 
     }
 
 
-    html +=
-        "</div>";
+    let reasons = [];
 
 
-    return html;
+    if (
+        match.signal_reasons
+        &&
+        match.signal_reasons.length
+    ) {
+
+        reasons =
+            reasons.concat(
+                match.signal_reasons
+            );
+
+    }
+
+
+    if (
+        match.first_half_reasons
+        &&
+        match.first_half_reasons.length
+    ) {
+
+        reasons =
+            reasons.concat(
+                match.first_half_reasons
+            );
+
+    }
+
+
+    reasons =
+        [...new Set(reasons)];
+
+
+    return `
+
+        <div class="${className}">
+
+
+            <div class="match-top">
+
+                <div class="league">
+
+                    🏆
+                    ${escapeHtml(match.league)}
+
+                </div>
+
+                <div class="minute">
+
+                    ⏱
+                    ${match.minute}'
+
+                </div>
+
+            </div>
+
+
+            <div class="teams-row">
+
+                <div class="team">
+
+                    ${escapeHtml(match.home)}
+
+                </div>
+
+
+                <div class="score">
+
+                    ${match.score_home}
+                    -
+                    ${match.score_away}
+
+                </div>
+
+
+                <div class="team away">
+
+                    ${escapeHtml(match.away)}
+
+                </div>
+
+            </div>
+
+
+            <div class="stats">
+
+
+                <div class="stat">
+
+                    ŞUT
+
+                    <b>
+                        ${match.shots}
+                    </b>
+
+                </div>
+
+
+                <div class="stat">
+
+                    İSABET
+
+                    <b>
+                        ${match.target}
+                    </b>
+
+                </div>
+
+
+                <div class="stat">
+
+                    KORNER
+
+                    <b>
+                        ${match.corners}
+                    </b>
+
+                </div>
+
+
+                <div class="stat">
+
+                    CEZA SAHASI
+
+                    <b>
+                        ${match.inside}
+                    </b>
+
+                </div>
+
+
+            </div>
+
+
+            <div class="signal-row">
+
+                ${signalBadge}
+
+            </div>
+
+
+            <div class="expected">
+
+                ⚽
+
+                <b>
+                    Gol beklenen taraf:
+                </b>
+
+                ${escapeHtml(
+                    match.expected_team
+                )}
+
+            </div>
+
+
+            ${
+                reasons.length
+                ?
+
+                `
+
+                <div class="reasons">
+
+                    ${reasons
+                        .map(
+                            reason =>
+                                "• " +
+                                escapeHtml(reason)
+                        )
+                        .join("<br>")
+                    }
+
+                </div>
+
+                `
+
+                :
+
+                ""
+            }
+
+
+        </div>
+
+    `;
 
 }
 
@@ -3367,69 +3270,32 @@ async function loadStatus() {
             await response.json();
 
 
-        const statusElement =
-            document.getElementById(
-                "status"
-            );
+        document.getElementById(
+            "status"
+        ).textContent =
 
-
-        const scannerElement =
-            document.getElementById(
-                "scanner"
-            );
-
-
-        if (
             data.error
-        ) {
 
-            statusElement.textContent =
-                "🔴 Hata";
+            ? "🔴 Hata"
 
-            statusElement.className =
-                "unhealthy";
-
-        } else {
-
-            statusElement.textContent =
-                "🟢 Çalışıyor";
-
-            statusElement.className =
-                "healthy";
-
-        }
+            : "🟢 Çalışıyor";
 
 
-        if (
+        document.getElementById(
+            "scanner"
+        ).textContent =
+
             data.scanner_healthy
-        ) {
 
-            if (
+            ? (
                 data.scan_in_progress
-            ) {
 
-                scannerElement.textContent =
-                    "🟢 Tarıyor";
+                ? "🟢 Tarıyor"
 
-            } else {
+                : "🟢 Hazır"
+            )
 
-                scannerElement.textContent =
-                    "🟢 Hazır";
-
-            }
-
-            scannerElement.className =
-                "healthy";
-
-        } else {
-
-            scannerElement.textContent =
-                "🔴 Gecikmiş";
-
-            scannerElement.className =
-                "unhealthy";
-
-        }
+            : "🔴 Sağlıksız";
 
 
         document.getElementById(
@@ -3445,64 +3311,40 @@ async function loadStatus() {
 
 
         document.getElementById(
-            "updated"
+            "scanfinish"
         ).textContent =
-            data.updated || "-";
+            data.last_scan_finished || "-";
 
 
-        if (
-            data.seconds_since_scan !== null
-            &&
-            data.seconds_since_scan !== undefined
-        ) {
-
-            document.getElementById(
-                "secondsSince"
-            ).textContent =
-                data.seconds_since_scan
-                + " sn";
-
-        } else {
-
-            document.getElementById(
-                "secondsSince"
-            ).textContent =
-                "-";
-
-        }
+        const next =
+            data.next_scan_in;
 
 
-        if (
-            data.next_scan_in !== null
-            &&
-            data.next_scan_in !== undefined
-        ) {
+        document.getElementById(
+            "nextscan"
+        ).textContent =
 
-            document.getElementById(
-                "nextScan"
-            ).textContent =
-                data.next_scan_in
-                + " sn";
+            next == null
 
-        } else {
+            ? "-"
 
-            document.getElementById(
-                "nextScan"
-            ).textContent =
-                "-";
-
-        }
+            : (
+                next <= 0
+                ? "Şimdi"
+                : next + " sn"
+            );
 
 
         const watchdog =
             document.getElementById(
-                "watchdogMessage"
+                "watchdog"
             );
 
 
-        watchdog.textContent =
-            data.watchdog_message
-            || "";
+        const watchdogText =
+            document.getElementById(
+                "watchdogtext"
+            );
 
 
         if (
@@ -3510,12 +3352,37 @@ async function loadStatus() {
         ) {
 
             watchdog.className =
-                "refresh healthy";
+                "watchdog ok";
+
+
+            let text =
+                "🟢 Scanner sağlıklı";
+
+
+            if (
+                data.seconds_since_scan != null
+            ) {
+
+                text +=
+                    " | Son başarılı tarama " +
+                    data.seconds_since_scan +
+                    " sn önce";
+
+            }
+
+
+            watchdogText.textContent =
+                text;
 
         } else {
 
             watchdog.className =
-                "refresh unhealthy";
+                "watchdog bad";
+
+
+            watchdogText.textContent =
+                data.watchdog_message ||
+                "Scanner kontrol ediliyor...";
 
         }
 
@@ -3527,18 +3394,13 @@ async function loadStatus() {
         ).textContent =
             "🔴 Sunucu bağlantı hatası";
 
-        document.getElementById(
-            "status"
-        ).className =
-            "unhealthy";
-
     }
 
 }
 
 
 // ============================================================
-// MAÇLAR
+// MAÇLARI YÜKLE
 // ============================================================
 
 async function loadMatches() {
@@ -3565,15 +3427,15 @@ async function loadMatches() {
             );
 
 
-        const matches =
+        let matches =
             data.matches || [];
 
 
         document.getElementById(
-            "matchCount"
+            "matchcount"
         ).textContent =
-            matches.length
-            + " maç";
+            matches.length +
+            " maç";
 
 
         if (
@@ -3589,10 +3451,8 @@ async function loadMatches() {
                     <br><br>
 
                     <b>
-
                         Şu anda analiz edilen
                         uygun canlı maç yok.
-
                     </b>
 
                     <br><br>
@@ -3609,36 +3469,82 @@ async function loadMatches() {
         }
 
 
-        // ====================================================
-        // YENİ YÜKSEK SİNYAL BİLDİRİMİ
-        // ====================================================
+        // =====================================================
+        // SIRALAMA
+        // =====================================================
 
-        for (
-            const match of matches
-        ) {
+        matches.sort(
+            (a, b) => {
 
-            if (
-                match.signal >= 65
-                ||
-                match.first_half_signal >= 65
-            ) {
+                // Önce çok güçlü
+                if (
+                    Boolean(b.very_strong)
+                    !==
+                    Boolean(a.very_strong)
+                ) {
 
-                notifyStrongMatch(
-                    match
+                    return (
+                        Number(b.very_strong)
+                        -
+                        Number(a.very_strong)
+                    );
+
+                }
+
+
+                // Sonra priority
+                if (
+                    (b.priority || 0)
+                    !==
+                    (a.priority || 0)
+                ) {
+
+                    return (
+                        (b.priority || 0)
+                        -
+                        (a.priority || 0)
+                    );
+
+                }
+
+
+                // Sonra normal sinyal
+                if (
+                    (b.signal || 0)
+                    !==
+                    (a.signal || 0)
+                ) {
+
+                    return (
+                        (b.signal || 0)
+                        -
+                        (a.signal || 0)
+                    );
+
+                }
+
+
+                // Sonra ilk yarı
+                return (
+                    (b.first_half_signal || 0)
+                    -
+                    (a.first_half_signal || 0)
                 );
 
             }
+        );
 
-        }
+
+        // Yeni güçlü maç bildirimi
+        notifyStrongMatches(
+            matches
+        );
 
 
         container.innerHTML =
-
             matches
-            .map(
-                createMatch
-            )
-            .join("");
+                .map(createMatch)
+                .join("");
 
 
     } catch (error) {
@@ -3654,30 +3560,7 @@ async function loadMatches() {
 
 
 // ============================================================
-// YENİ MAÇ BİLDİRİM İZNİ
-// ============================================================
-
-async function initializeNotifications() {
-
-    if (
-        notificationInitialized
-    ) {
-
-        return;
-
-    }
-
-    notificationInitialized =
-        true;
-
-
-    await requestNotificationPermission();
-
-}
-
-
-// ============================================================
-// HEPSİNİ YENİLE
+// REFRESH
 // ============================================================
 
 async function refreshAll() {
@@ -3689,21 +3572,14 @@ async function refreshAll() {
 }
 
 
-// ============================================================
-// BAŞLANGIÇ
-// ============================================================
-
-initializeNotifications();
-
+// İlk yükleme
 refreshAll();
 
 
+// Her 5 saniyede panel güncelle
 setInterval(
-
     refreshAll,
-
-    10000
-
+    5000
 );
 
 
@@ -3735,17 +3611,12 @@ def index():
 @app.route("/api/matches")
 def api_matches():
 
-    state = get_state()
+    state =
+        get_state()
 
-    matches = load_matches()
+    matches =
+        load_matches()
 
-    matches = sort_matches(
-        matches
-    )
-
-    watchdog = get_watchdog_info(
-        state
-    )
 
     return jsonify({
 
@@ -3768,22 +3639,7 @@ def api_matches():
             state["last_scan_started"],
 
         "last_scan_finished":
-            state["last_scan_finished"],
-
-        "scanner_healthy":
-            watchdog[
-                "scanner_healthy"
-            ],
-
-        "seconds_since_scan":
-            watchdog[
-                "seconds_since_scan"
-            ],
-
-        "next_scan_in":
-            watchdog[
-                "next_scan_in"
-            ]
+            state["last_scan_finished"]
 
     })
 
@@ -3795,11 +3651,105 @@ def api_matches():
 @app.route("/api/status")
 def api_status():
 
-    state = get_state()
+    state =
+        get_state()
 
-    watchdog = get_watchdog_info(
-        state
+
+    now =
+        time.time()
+
+
+    last_timestamp =
+        state.get(
+            "last_scan_timestamp"
+        )
+
+
+    # ========================================================
+    # GERÇEK WATCHDOG HESABI
+    # ========================================================
+
+    seconds_since_scan = None
+
+    scanner_healthy = False
+
+    watchdog_message = (
+        "Henüz başarılı tarama yok."
     )
+
+
+    if last_timestamp is not None:
+
+        try:
+
+            seconds_since_scan = max(
+                0,
+                int(
+                    now -
+                    float(last_timestamp)
+                )
+            )
+
+
+            scanner_healthy = (
+                seconds_since_scan
+                <=
+                WATCHDOG_TIMEOUT
+            )
+
+
+            if scanner_healthy:
+
+                watchdog_message = (
+                    "Scanner sağlıklı."
+                )
+
+            else:
+
+                watchdog_message = (
+                    "⚠️ Son başarılı taramadan "
+                    f"{seconds_since_scan} saniye geçti."
+                )
+
+        except Exception:
+
+            seconds_since_scan = None
+
+            scanner_healthy = False
+
+            watchdog_message = (
+                "Watchdog zaman bilgisi okunamadı."
+            )
+
+
+    # ========================================================
+    # SONRAKİ TARAMA
+    # ========================================================
+
+    next_scan_in = None
+
+
+    if last_timestamp is not None:
+
+        try:
+
+            elapsed =
+                now -
+                float(last_timestamp)
+
+
+            next_scan_in = max(
+                0,
+                int(
+                    CHECK_SECONDS -
+                    elapsed
+                )
+            )
+
+        except Exception:
+
+            next_scan_in = None
+
 
     return jsonify({
 
@@ -3812,28 +3762,11 @@ def api_status():
         "scanner":
             state["scanner"],
 
+        "scanner_healthy":
+            scanner_healthy,
+
         "scan_in_progress":
             state["scan_in_progress"],
-
-        "scanner_healthy":
-            watchdog[
-                "scanner_healthy"
-            ],
-
-        "seconds_since_scan":
-            watchdog[
-                "seconds_since_scan"
-            ],
-
-        "next_scan_in":
-            watchdog[
-                "next_scan_in"
-            ],
-
-        "watchdog_message":
-            watchdog[
-                "watchdog_message"
-            ],
 
         "league_count":
             state["league_count"],
@@ -3859,6 +3792,18 @@ def api_status():
         "last_scan_finished":
             state["last_scan_finished"],
 
+        "last_scan_timestamp":
+            last_timestamp,
+
+        "seconds_since_scan":
+            seconds_since_scan,
+
+        "next_scan_in":
+            next_scan_in,
+
+        "watchdog_message":
+            watchdog_message,
+
         "error":
             state["error"]
 
@@ -3866,26 +3811,25 @@ def api_status():
 
 
 # ============================================================
-# SCANNER'I BAŞLAT
+# SCANNER BAŞLAT
 # ============================================================
 
 start_scanner()
 
 
 # ============================================================
-# LOCAL ÇALIŞTIRMA
+# LOCAL
 # ============================================================
 
 if __name__ == "__main__":
 
     port = int(
-
         os.getenv(
             "PORT",
             "10000"
         )
-
     )
+
 
     print("")
     print("=" * 60)
@@ -3894,16 +3838,15 @@ if __name__ == "__main__":
     )
     print("=" * 60)
 
+
     print(
         f"🌐 PORT: {port}"
     )
 
-    print(
-        "🇹🇷 SAAT DİLİMİ: Europe/Istanbul"
-    )
 
     print("=" * 60)
     print("")
+
 
     app.run(
 
