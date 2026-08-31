@@ -1421,6 +1421,7 @@ def start_scanner():
     )
 
     scanner.start()
+    print("🔥 SCANNER KODU ÇALIŞTI!")
 
 
 # Gunicorn "app:app" dediğinde burası çalışır.
