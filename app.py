@@ -1429,4 +1429,3 @@ start_scanner()
 
 print("🔥 SCANNER KODU ÇALIŞTI!")
 
-start_scanner()
