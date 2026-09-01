@@ -925,6 +925,50 @@ def check_all_league_statistics_coverage():
 # GEÇİCİ COVERAGE TEST ROUTE
 # ============================================================
 
+# ============================================================
+# TEK MAÇ STATISTICS TEST
+# ============================================================
+
+@app.route("/api/stats-test/<int:fixture_id>")
+def api_stats_test(fixture_id):
+
+    print("")
+    print("=" * 70)
+    print(f"🧪 TEK MAÇ STATISTICS TESTİ | fixture={fixture_id}")
+    print("=" * 70)
+
+    fixture_detail = api_get("fixtures", {"id": fixture_id})
+    fixture_response = (fixture_detail.get("response", []) or []) if fixture_detail else []
+    fixture_info = fixture_response[0] if fixture_response else None
+
+    embedded_stats = (fixture_info.get("statistics", []) or []) if fixture_info else []
+
+    dedicated = api_get("fixtures/statistics", {"fixture": fixture_id})
+    dedicated_response = (dedicated.get("response", []) or []) if dedicated else []
+
+    print(f"📦 Fixture response: {len(fixture_response)}")
+    print(f"📊 Embedded statistics blocks: {len(embedded_stats)}")
+    print(f"📊 Dedicated statistics blocks: {len(dedicated_response)}")
+    print("📋 Fixture API results:", fixture_detail.get("results") if fixture_detail else None)
+    print("⚠️ Fixture API errors:", fixture_detail.get("errors") if fixture_detail else None)
+    print("📋 Statistics API results:", dedicated.get("results") if dedicated else None)
+    print("⚠️ Statistics API errors:", dedicated.get("errors") if dedicated else None)
+
+    return jsonify({
+        "fixture_id": fixture_id,
+        "fixture_found": bool(fixture_response),
+        "embedded_blocks": len(embedded_stats),
+        "dedicated_blocks": len(dedicated_response),
+        "fixture_results": fixture_detail.get("results") if fixture_detail else None,
+        "fixture_errors": fixture_detail.get("errors") if fixture_detail else None,
+        "statistics_results": dedicated.get("results") if dedicated else None,
+        "statistics_errors": dedicated.get("errors") if dedicated else None,
+        "stats_found": len(embedded_stats) >= 2 or len(dedicated_response) >= 2,
+        "embedded_statistics": embedded_stats,
+        "dedicated_statistics": dedicated_response
+    })
+
+
 @app.route("/api/coverage-test")
 def api_coverage_test():
 
