@@ -589,9 +589,7 @@ def get_stats(fixture_id):
 
     print(f"🧪 STATS v4 | fixture={fixture_id}")
 
-    # 1) Önce fixture detayından gömülü istatistikleri dene.
-    # API-Sports bazı maçlarda istatistikleri fixtures cevabının
-    # içinde doğrudan verebiliyor.
+    # 1) Önce fixture detayındaki gömülü istatistikleri dene.
     for param_name in ("id", "ids"):
 
         print(
@@ -642,8 +640,7 @@ def get_stats(fixture_id):
 
                     return embedded
 
-    # 2) Fixture detayında istatistik yoksa,
-    # mevcut statistics endpoint'ini yedek olarak kullan.
+    # 2) Gömülü istatistik yoksa dedicated endpoint.
     data = api_get(
         "fixtures/statistics",
         {
@@ -680,26 +677,41 @@ def get_stats(fixture_id):
     )
 
     return []
-    def check_all_league_statistics_coverage():
 
-    print("\n" + "=" * 70)
+
+# ============================================================
+# 65 LİG STATISTICS COVERAGE TESTİ
+# ============================================================
+
+def check_all_league_statistics_coverage():
+
+    print("")
+    print("=" * 70)
     print("🔬 65 LİG STATISTICS COVERAGE TESTİ BAŞLADI")
     print("=" * 70)
 
     results = []
 
-    for index, league_id in enumerate(sorted(ALLOWED_LEAGUES), start=1):
+    league_ids = list(ALLOWED_LEAGUES)
 
+    for index, league_id in enumerate(
+        league_ids,
+        start=1
+    ):
+
+        print("")
         print(
-            f"\n🔄 {index}/{len(ALLOWED_LEAGUES)} "
+            f"🔄 {index}/{len(league_ids)} "
             f"| League ID: {league_id}"
         )
 
+        # Sezonu sabitlemiyoruz.
+        # API'den ligin sezonlarını alıp
+        # current=True olan sezonu buluyoruz.
         data = api_get(
             "leagues",
             {
-                "id": league_id,
-                "season": 2026
+                "id": league_id
             }
         )
 
@@ -712,7 +724,7 @@ def get_stats(fixture_id):
 
             results.append({
                 "league_id": league_id,
-                "season": 2026,
+                "season": None,
                 "league_name": "BİLİNMİYOR",
                 "country": "BİLİNMİYOR",
                 "statistics_fixtures": None,
@@ -735,7 +747,7 @@ def get_stats(fixture_id):
 
             results.append({
                 "league_id": league_id,
-                "season": 2026,
+                "season": None,
                 "league_name": "BULUNAMADI",
                 "country": "BULUNAMADI",
                 "statistics_fixtures": None,
@@ -771,31 +783,46 @@ def get_stats(fixture_id):
             []
         ) or []
 
-        current_season = None
+        # Önce current=True sezonunu bul.
+        current_season = next(
+            (
+                season
+                for season in seasons
+                if season.get("current") is True
+            ),
+            None
+        )
 
-        for season_info in seasons:
+        # current=True bulunamazsa en yeni yılı kullan.
+        if current_season is None and seasons:
 
-            if season_info.get("year") == 2026:
-                current_season = season_info
-                break
+            current_season = max(
+                seasons,
+                key=lambda x: x.get("year", 0)
+            )
 
-        if not current_season:
+        if current_season is None:
 
             print(
-                f"⚠️ {country_name} - {league_name} "
-                f"| 2026 sezonu bulunamadı"
+                f"⚠️ {country_name} - "
+                f"{league_name} | "
+                f"Sezon bulunamadı"
             )
 
             results.append({
                 "league_id": league_id,
-                "season": 2026,
+                "season": None,
                 "league_name": league_name,
                 "country": country_name,
                 "statistics_fixtures": None,
-                "status": "2026 SEZONU YOK"
+                "status": "SEZON BULUNAMADI"
             })
 
             continue
+
+        season_year = current_season.get(
+            "year"
+        )
 
         coverage = current_season.get(
             "coverage",
@@ -807,9 +834,11 @@ def get_stats(fixture_id):
             {}
         ) or {}
 
-        statistics_fixtures = fixtures_coverage.get(
-            "statistics_fixtures",
-            None
+        statistics_fixtures = (
+            fixtures_coverage.get(
+                "statistics_fixtures",
+                None
+            )
         )
 
         if statistics_fixtures is True:
@@ -826,76 +855,96 @@ def get_stats(fixture_id):
 
         print(
             f"{status} | "
-            f"{country_name} - {league_name} | "
+            f"{country_name} - "
+            f"{league_name} | "
             f"ID={league_id} | "
-            f"statistics_fixtures={statistics_fixtures}"
+            f"SEZON={season_year} | "
+            f"statistics_fixtures="
+            f"{statistics_fixtures}"
         )
 
         results.append({
             "league_id": league_id,
-            "season": 2026,
+            "season": season_year,
             "league_name": league_name,
             "country": country_name,
             "statistics_fixtures": statistics_fixtures,
             "status": status
         })
 
-    print("\n" + "=" * 70)
-    print("📊 SONUÇ")
+    # ========================================================
+    # SONUÇ
+    # ========================================================
+
+    print("")
+    print("=" * 70)
+    print("📊 65 LİG COVERAGE SONUCU")
     print("=" * 70)
 
     available = [
-        item for item in results
+        item
+        for item in results
         if item["statistics_fixtures"] is True
     ]
 
     unavailable = [
-        item for item in results
+        item
+        for item in results
         if item["statistics_fixtures"] is False
     ]
 
     unknown = [
-        item for item in results
+        item
+        for item in results
         if item["statistics_fixtures"] is None
     ]
 
     print(
-        f"✅ İstatistik VAR : {len(available)}"
+        f"✅ İstatistik VAR : "
+        f"{len(available)}"
     )
 
     print(
-        f"❌ İstatistik YOK : {len(unavailable)}"
+        f"❌ İstatistik YOK : "
+        f"{len(unavailable)}"
     )
 
     print(
-        f"⚠️ Bilinmiyor     : {len(unknown)}"
+        f"⚠️ Bilinmiyor     : "
+        f"{len(unknown)}"
     )
 
     print(
-        f"📊 Toplam         : {len(results)}"
+        f"📊 Toplam         : "
+        f"{len(results)}"
     )
 
-    print("\n--- İSTATİSTİK VAR ---")
+    print("")
+    print("--- İSTATİSTİK VAR ---")
 
     for item in available:
 
         print(
             f"✅ {item['league_id']} | "
             f"{item['country']} | "
-            f"{item['league_name']}"
+            f"{item['league_name']} | "
+            f"Sezon {item['season']}"
         )
 
-    print("\n--- İSTATİSTİK YOK ---")
+    print("")
+    print("--- İSTATİSTİK YOK ---")
 
     for item in unavailable:
 
         print(
             f"❌ {item['league_id']} | "
             f"{item['country']} | "
-            f"{item['league_name']}"
+            f"{item['league_name']} | "
+            f"Sezon {item['season']}"
         )
 
-    print("\n--- BİLİNMEYEN ---")
+    print("")
+    print("--- BİLİNMEYEN ---")
 
     for item in unknown:
 
