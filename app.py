@@ -49,105 +49,52 @@ API_CACHE_LOCK = threading.RLock()
 
 ALLOWED_LEAGUES = {
 
-    # İngiltere
-    39, 40, 41, 42,
+    # 1. İngiltere - Premier League
+    39,
 
-    # İspanya
-    140, 141, 435,
+    # 2. İspanya - La Liga
+    140,
 
-    # İtalya
-    135, 136, 137,
+    # 3. İtalya - Serie A
+    135,
 
-    # Almanya
-    78, 79, 80,
+    # 4. Almanya - Bundesliga
+    78,
 
-    # Fransa
-    61, 62, 63,
+    # 5. Fransa - Ligue 1
+    61,
 
-    # Türkiye
-    203, 204, 205, 206,
+    # 6. Türkiye - Süper Lig
+    203,
 
-    # Hollanda
-    88, 89,
+    # 7. Hollanda - Eredivisie
+    88,
 
-    # Belçika
-    144, 145,
+    # 8. Belçika - Pro League
+    144,
 
-    # Portekiz
-    94, 95,
+    # 9. Portekiz - Primeira Liga
+    94,
 
-    # İskoçya
-    179, 180, 181, 182,
+    # 10. İskoçya - Premiership
+    179,
 
-    # Avusturya
-    218, 219,
+    # 11. Avusturya - Bundesliga
+    218,
 
-    # İsviçre
-    207, 208,
+    # 12. İsviçre - Super League
+    207,
 
-    # Yunanistan
+    # 13. Yunanistan - Super League
     197,
 
-    # Polonya
-    106, 107,
+    # 14. Polonya - Ekstraklasa
+    106,
 
-    # Çekya
-    345, 346,
-
-    # Danimarka
-    119, 120,
-
-    # Norveç
-    103, 104,
-
-    # İsveç
-    113, 114,
-
-    # ABD
-    253,
-
-    # Brezilya
-    71, 72,
-
-    # Arjantin
-    128,
-
-    # Meksika
-    262, 263,
-
-    # Japonya
-    98, 99,
-
-    # Güney Kore
-    292, 293,
-
-    # Avustralya
-    188,
-
-    # Romanya
-    283, 284,
-
-    # Sırbistan
-    286,
-
-    # Hırvatistan
-    210,
-
-    # Bulgaristan
-    172,
-
-    # İrlanda
-    357,
-
-    # Finlandiya
-    244,
-
-    # İzlanda
-    164,
-
-    # Güney Afrika
-    288
+    # 15. Çekya - First League
+    345
 }
+
 
 
 # ============================================================
