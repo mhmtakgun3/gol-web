@@ -680,6 +680,235 @@ def get_stats(fixture_id):
     )
 
     return []
+    def check_all_league_statistics_coverage():
+
+    print("\n" + "=" * 70)
+    print("🔬 65 LİG STATISTICS COVERAGE TESTİ BAŞLADI")
+    print("=" * 70)
+
+    results = []
+
+    for index, league_id in enumerate(sorted(ALLOWED_LEAGUES), start=1):
+
+        print(
+            f"\n🔄 {index}/{len(ALLOWED_LEAGUES)} "
+            f"| League ID: {league_id}"
+        )
+
+        data = api_get(
+            "leagues",
+            {
+                "id": league_id,
+                "season": 2026
+            }
+        )
+
+        if not data:
+
+            print(
+                f"❌ League {league_id}: "
+                f"API cevabı alınamadı"
+            )
+
+            results.append({
+                "league_id": league_id,
+                "season": 2026,
+                "league_name": "BİLİNMİYOR",
+                "country": "BİLİNMİYOR",
+                "statistics_fixtures": None,
+                "status": "API HATASI"
+            })
+
+            continue
+
+        response = data.get(
+            "response",
+            []
+        ) or []
+
+        if not response:
+
+            print(
+                f"⚠️ League {league_id}: "
+                f"response boş"
+            )
+
+            results.append({
+                "league_id": league_id,
+                "season": 2026,
+                "league_name": "BULUNAMADI",
+                "country": "BULUNAMADI",
+                "statistics_fixtures": None,
+                "status": "LİG BULUNAMADI"
+            })
+
+            continue
+
+        league_data = response[0]
+
+        league_info = league_data.get(
+            "league",
+            {}
+        ) or {}
+
+        country_info = league_data.get(
+            "country",
+            {}
+        ) or {}
+
+        league_name = league_info.get(
+            "name",
+            "Bilinmiyor"
+        )
+
+        country_name = country_info.get(
+            "name",
+            "Bilinmiyor"
+        )
+
+        seasons = league_data.get(
+            "seasons",
+            []
+        ) or []
+
+        current_season = None
+
+        for season_info in seasons:
+
+            if season_info.get("year") == 2026:
+                current_season = season_info
+                break
+
+        if not current_season:
+
+            print(
+                f"⚠️ {country_name} - {league_name} "
+                f"| 2026 sezonu bulunamadı"
+            )
+
+            results.append({
+                "league_id": league_id,
+                "season": 2026,
+                "league_name": league_name,
+                "country": country_name,
+                "statistics_fixtures": None,
+                "status": "2026 SEZONU YOK"
+            })
+
+            continue
+
+        coverage = current_season.get(
+            "coverage",
+            {}
+        ) or {}
+
+        fixtures_coverage = coverage.get(
+            "fixtures",
+            {}
+        ) or {}
+
+        statistics_fixtures = fixtures_coverage.get(
+            "statistics_fixtures",
+            None
+        )
+
+        if statistics_fixtures is True:
+
+            status = "✅ VAR"
+
+        elif statistics_fixtures is False:
+
+            status = "❌ YOK"
+
+        else:
+
+            status = "⚠️ BİLİNMİYOR"
+
+        print(
+            f"{status} | "
+            f"{country_name} - {league_name} | "
+            f"ID={league_id} | "
+            f"statistics_fixtures={statistics_fixtures}"
+        )
+
+        results.append({
+            "league_id": league_id,
+            "season": 2026,
+            "league_name": league_name,
+            "country": country_name,
+            "statistics_fixtures": statistics_fixtures,
+            "status": status
+        })
+
+    print("\n" + "=" * 70)
+    print("📊 SONUÇ")
+    print("=" * 70)
+
+    available = [
+        item for item in results
+        if item["statistics_fixtures"] is True
+    ]
+
+    unavailable = [
+        item for item in results
+        if item["statistics_fixtures"] is False
+    ]
+
+    unknown = [
+        item for item in results
+        if item["statistics_fixtures"] is None
+    ]
+
+    print(
+        f"✅ İstatistik VAR : {len(available)}"
+    )
+
+    print(
+        f"❌ İstatistik YOK : {len(unavailable)}"
+    )
+
+    print(
+        f"⚠️ Bilinmiyor     : {len(unknown)}"
+    )
+
+    print(
+        f"📊 Toplam         : {len(results)}"
+    )
+
+    print("\n--- İSTATİSTİK VAR ---")
+
+    for item in available:
+
+        print(
+            f"✅ {item['league_id']} | "
+            f"{item['country']} | "
+            f"{item['league_name']}"
+        )
+
+    print("\n--- İSTATİSTİK YOK ---")
+
+    for item in unavailable:
+
+        print(
+            f"❌ {item['league_id']} | "
+            f"{item['country']} | "
+            f"{item['league_name']}"
+        )
+
+    print("\n--- BİLİNMEYEN ---")
+
+    for item in unknown:
+
+        print(
+            f"⚠️ {item['league_id']} | "
+            f"{item['country']} | "
+            f"{item['league_name']} | "
+            f"{item['status']}"
+        )
+
+    print("=" * 70)
+
+    return results
 # ============================================================
 # İSTATİSTİK DEĞERİ
 # ============================================================
