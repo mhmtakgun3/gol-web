@@ -585,6 +585,7 @@ def get_live_matches():
 # ============================================================
 # İSTATİSTİKLER
 # ============================================================
+
 def get_stats(fixture_id):
 
     print(f"🧪 STATS v4 | fixture={fixture_id}")
@@ -705,9 +706,6 @@ def check_all_league_statistics_coverage():
             f"| League ID: {league_id}"
         )
 
-        # Sezonu sabitlemiyoruz.
-        # API'den ligin sezonlarını alıp
-        # current=True olan sezonu buluyoruz.
         data = api_get(
             "leagues",
             {
@@ -783,7 +781,6 @@ def check_all_league_statistics_coverage():
             []
         ) or []
 
-        # Önce current=True sezonunu bul.
         current_season = next(
             (
                 season
@@ -793,7 +790,6 @@ def check_all_league_statistics_coverage():
             None
         )
 
-        # current=True bulunamazsa en yeni yılı kullan.
         if current_season is None and seasons:
 
             current_season = max(
@@ -834,23 +830,16 @@ def check_all_league_statistics_coverage():
             {}
         ) or {}
 
-        statistics_fixtures = (
-            fixtures_coverage.get(
-                "statistics_fixtures",
-                None
-            )
+        statistics_fixtures = fixtures_coverage.get(
+            "statistics_fixtures",
+            None
         )
 
         if statistics_fixtures is True:
-
             status = "✅ VAR"
-
         elif statistics_fixtures is False:
-
             status = "❌ YOK"
-
         else:
-
             status = "⚠️ BİLİNMİYOR"
 
         print(
@@ -872,58 +861,34 @@ def check_all_league_statistics_coverage():
             "status": status
         })
 
-    # ========================================================
-    # SONUÇ
-    # ========================================================
-
     print("")
     print("=" * 70)
     print("📊 65 LİG COVERAGE SONUCU")
     print("=" * 70)
 
     available = [
-        item
-        for item in results
+        item for item in results
         if item["statistics_fixtures"] is True
     ]
 
     unavailable = [
-        item
-        for item in results
+        item for item in results
         if item["statistics_fixtures"] is False
     ]
 
     unknown = [
-        item
-        for item in results
+        item for item in results
         if item["statistics_fixtures"] is None
     ]
 
-    print(
-        f"✅ İstatistik VAR : "
-        f"{len(available)}"
-    )
-
-    print(
-        f"❌ İstatistik YOK : "
-        f"{len(unavailable)}"
-    )
-
-    print(
-        f"⚠️ Bilinmiyor     : "
-        f"{len(unknown)}"
-    )
-
-    print(
-        f"📊 Toplam         : "
-        f"{len(results)}"
-    )
+    print(f"✅ İstatistik VAR : {len(available)}")
+    print(f"❌ İstatistik YOK : {len(unavailable)}")
+    print(f"⚠️ Bilinmiyor     : {len(unknown)}")
+    print(f"📊 Toplam         : {len(results)}")
 
     print("")
     print("--- İSTATİSTİK VAR ---")
-
     for item in available:
-
         print(
             f"✅ {item['league_id']} | "
             f"{item['country']} | "
@@ -933,9 +898,7 @@ def check_all_league_statistics_coverage():
 
     print("")
     print("--- İSTATİSTİK YOK ---")
-
     for item in unavailable:
-
         print(
             f"❌ {item['league_id']} | "
             f"{item['country']} | "
@@ -945,9 +908,7 @@ def check_all_league_statistics_coverage():
 
     print("")
     print("--- BİLİNMEYEN ---")
-
     for item in unknown:
-
         print(
             f"⚠️ {item['league_id']} | "
             f"{item['country']} | "
@@ -958,6 +919,35 @@ def check_all_league_statistics_coverage():
     print("=" * 70)
 
     return results
+
+
+# ============================================================
+# GEÇİCİ COVERAGE TEST ROUTE
+# ============================================================
+
+@app.route("/api/coverage-test")
+def api_coverage_test():
+
+    results = check_all_league_statistics_coverage()
+
+    return jsonify({
+        "total": len(results),
+        "available": sum(
+            x["statistics_fixtures"] is True
+            for x in results
+        ),
+        "unavailable": sum(
+            x["statistics_fixtures"] is False
+            for x in results
+        ),
+        "unknown": sum(
+            x["statistics_fixtures"] is None
+            for x in results
+        ),
+        "results": results
+    })
+
+
 # ============================================================
 # İSTATİSTİK DEĞERİ
 # ============================================================
@@ -1717,297 +1707,235 @@ def scanner_loop():
     print("=" * 60)
 
     if API_KEY:
-        print("🔑 API_KEY: OK")
+
+        print(
+            "🔑 API_KEY: OK"
+        )
+
     else:
-        print("❌ API_KEY: YOK")
 
-    try:
-        while True:
+        print(
+            "❌ API_KEY: YOK"
+        )
 
-            cycle_start = time.time()
-            start_time = time.strftime("%H:%M:%S")
+    while True:
 
-            try:
-                update_state(
-                    scanner=1,
-                    scan_in_progress=1,
-                    last_scan_started=start_time,
-                    error=None
-                )
+        cycle_start = time.time()
 
-                print("")
-                print("=" * 60)
-                print("📡 CANLI MAÇLAR TARAMASI BAŞLADI")
-                print("=" * 60)
+        start_time = time.strftime(
+            "%H:%M:%S"
+        )
 
-                matches = get_live_matches()
-                live_count = len(matches)
+        update_state(
 
-                update_state(
-                    live_match_count=live_count,
-                    eligible_match_count=live_count,
-                    analyzed_match_count=0,
-                    match_count=0
-                )
+            scanner=1,
 
-                # Eski taramanın maçlarını temizle. Yeni sonuçlar
-                # analiz edildikçe aşağıda anlık olarak kaydedilecek.
-                analyzed = []
-                save_matches(analyzed)
+            scan_in_progress=1,
 
-                for index, match in enumerate(matches, start=1):
+            last_scan_started=start_time,
 
-                    try:
-                        fixture_id = match.get("fixture", {}).get("id")
-                        home = match.get("teams", {}).get("home", {}).get("name", "?")
-                        away = match.get("teams", {}).get("away", {}).get("name", "?")
+            error=None
 
-                        print(
-                            f"🔄 Maç {index}/{live_count}: "
-                            f"{home} - {away} | fixture={fixture_id}"
-                        )
-
-                        result = analyze_match(match)
-
-                        if result:
-                            analyzed.append(result)
-
-                            # Her başarılı analizden sonra DB'ye yaz.
-                            # Böylece scanner sonraki maçta durursa bile
-                            # daha önce analiz edilen maçlar panelde kalır.
-                            analyzed.sort(
-                                key=lambda x: (
-                                    x.get("very_strong", False),
-                                    x.get("strong_signal", False),
-                                    x.get("strong_first_half", False),
-                                    x.get("priority", 0),
-                                    x.get("signal", 0),
-                                    x.get("first_half_signal", 0)
-                                ),
-                                reverse=True
-                            )
-
-                            save_matches(analyzed)
-
-                            update_state(
-                                analyzed_match_count=len(analyzed),
-                                match_count=len(analyzed),
-                                updated=time.strftime("%H:%M:%S")
-                            )
-
-                            print(
-                                f"💾 Kaydedildi: {len(analyzed)} analiz"
-                            )
-                        else:
-                            print(
-                                f"⚪ Analiz sonucu yok: {home} - {away}"
-                            )
-
-                    except Exception as e:
-                        # Tek maçtaki hata bütün taramayı durdurmasın.
-                        print(
-                            f"❌ Maç analiz hatası "
-                            f"({home} - {away}):",
-                            repr(e)
-                        )
-                        continue
-
-                # Tarama sonunda son kez sırala ve kaydet.
-                analyzed.sort(
-                    key=lambda x: (
-                        x.get("very_strong", False),
-                        x.get("strong_signal", False),
-                        x.get("strong_first_half", False),
-                        x.get("priority", 0),
-                        x.get("signal", 0),
-                        x.get("first_half_signal", 0)
-                    ),
-                    reverse=True
-                )
-
-                save_matches(analyzed)
-
-                finish_time = time.strftime("%H:%M:%S")
-
-                update_state(
-                    scanner=1,
-                    scan_in_progress=0,
-                    analyzed_match_count=len(analyzed),
-                    match_count=len(analyzed),
-                    updated=finish_time,
-                    last_scan_finished=finish_time,
-                    error=None
-                )
-
-                print("")
-                print(
-                    f"📊 Analiz edilen maç: {len(analyzed)}"
-                )
-                print(
-                    f"⏱ Tarama süresi: "
-                    f"{time.time() - cycle_start:.1f} saniye"
-                )
-                print(
-                    f"😴 {CHECK_SECONDS} saniye sonra "
-                    f"yeni tarama başlayacak."
-                )
-
-                time.sleep(CHECK_SECONDS)
-
-            except Exception as e:
-                print("")
-                print("=" * 60)
-                print("❌ TARAMA DÖNGÜSÜ HATASI")
-                print("=" * 60)
-                print("HATA:", repr(e))
-                print("=" * 60)
-
-                try:
-                    update_state(
-                        scanner=1,
-                        scan_in_progress=0,
-                        error=str(e),
-                        last_scan_finished=time.strftime("%H:%M:%S")
-                    )
-                except Exception as state_error:
-                    print(
-                        "❌ Hata durumu DB'ye yazılamadı:",
-                        repr(state_error)
-                    )
-
-                # Döngü tamamen ölmesin; kısa bekleyip yeniden dene.
-                time.sleep(5)
-
-    except Exception as e:
-        # Beklenmeyen bir thread ölümü watchdog tarafından görülebilsin.
-        print("")
-        print("=" * 60)
-        print("💥 SCANNER THREAD BEKLENMEDİK ŞEKİLDE SONLANDI")
-        print("=" * 60)
-        print("HATA:", repr(e))
-        print("=" * 60)
+        )
 
         try:
+
+            print("")
+            print("=" * 60)
+            print("📡 CANLI MAÇLAR TARAMASI BAŞLADI")
+            print("=" * 60)
+
+            matches = get_live_matches()
+
+            live_count = len(matches)
+
             update_state(
-                scanner=0,
-                scan_in_progress=0,
-                error=f"Scanner thread durdu: {e}",
-                updated=time.strftime("%H:%M:%S")
+
+                live_match_count=live_count,
+
+                eligible_match_count=live_count
+
             )
-        except Exception:
-            pass
+
+            analyzed = []
+
+            for match in matches:
+
+                try:
+
+                    result = analyze_match(
+                        match
+                    )
+
+                    if result:
+
+                        analyzed.append(
+                            result
+                        )
+
+                except Exception as e:
+
+                    print(
+                        "❌ Maç analiz hatası:",
+                        repr(e)
+                    )
+
+            # ==================================================
+            # MAÇLARI ÖNCELİĞE GÖRE SIRALA
+            # ==================================================
+
+            analyzed.sort(
+                key=lambda x: (
+                    x.get("very_strong", False),
+                    x.get("strong_signal", False),
+                    x.get("strong_first_half", False),
+                    x.get("priority", 0),
+                    x.get("signal", 0),
+                    x.get("first_half_signal", 0)
+                ),
+                reverse=True
+            )
+
+            save_matches(
+                analyzed
+            )
+
+            finish_time = time.strftime(
+                "%H:%M:%S"
+            )
+
+            update_state(
+
+                scanner=1,
+
+                scan_in_progress=0,
+
+                analyzed_match_count=len(
+                    analyzed
+                ),
+
+                match_count=len(
+                    analyzed
+                ),
+
+                updated=finish_time,
+
+                last_scan_finished=finish_time,
+
+                error=None
+
+            )
+
+            print("")
+            print(
+                f"📊 Analiz edilen maç: "
+                f"{len(analyzed)}"
+            )
+
+            print(
+                f"⏱ Tarama süresi: "
+                f"{time.time() - cycle_start:.1f} saniye"
+            )
+
+            print(
+                f"😴 {CHECK_SECONDS} saniye sonra "
+                f"yeni tarama başlayacak."
+            )
+
+        except Exception as e:
+
+            print("")
+            print("=" * 60)
+            print("❌ TARAMA MOTORU HATASI")
+            print("=" * 60)
+
+            print(
+                "HATA:",
+                repr(e)
+            )
+
+            print("=" * 60)
+
+            update_state(
+
+                scanner=1,
+
+                scan_in_progress=0,
+
+                error=str(e),
+
+                last_scan_finished=time.strftime(
+                    "%H:%M:%S"
+                )
+
+            )
+
+        time.sleep(
+            CHECK_SECONDS
+        )
 
 
 # ============================================================
-# SCANNER BAŞLAT / WATCHDOG
+# SCANNER BAŞLAT
 # ============================================================
 
 scanner_thread = None
 scanner_lock_handle = None
-watchdog_thread = None
-scanner_start_lock = threading.Lock()
 
 
 def start_scanner():
 
     global scanner_thread
-    global scanner_lock_handle
-
-    with scanner_start_lock:
-
-        if (
-            scanner_thread is not None
-            and scanner_thread.is_alive()
-        ):
-            return True
-
-        lock = acquire_scanner_lock()
-
-        if lock is None:
-            print(
-                "ℹ️ Bu Gunicorn worker scanner lock alamadı."
-            )
-            return False
-
-        scanner_lock_handle = lock
-
-        print("")
-        print("=" * 60)
-        print("🚀 SCANNER OTOMATİK OLARAK BAŞLATILIYOR")
-        print("=" * 60)
-        print("")
-
-        scanner_thread = threading.Thread(
-            target=scanner_loop,
-            name="FootballScanner",
-            daemon=True
-        )
-
-        scanner_thread.start()
-
-        print("✅ Scanner thread başlatıldı.")
-        print("")
-        return True
-
-
-def scanner_watchdog_loop():
-    """Scanner thread'i ölürse aynı worker içinde yeniden başlatır."""
-
-    print("🛡️ Scanner watchdog başlatıldı.")
-
-    while True:
-        try:
-            if scanner_thread is None or not scanner_thread.is_alive():
-                print(
-                    "⚠️ Scanner thread çalışmıyor. "
-                    "Yeniden başlatma deneniyor..."
-                )
-
-                # Eski thread gerçekten öldüyse durumunu düzelt.
-                try:
-                    update_state(
-                        scanner=0,
-                        scan_in_progress=0,
-                        error="Scanner thread çalışmıyor; yeniden başlatılıyor.",
-                        updated=time.strftime("%H:%M:%S")
-                    )
-                except Exception as state_error:
-                    print(
-                        "⚠️ Watchdog durum güncelleme hatası:",
-                        repr(state_error)
-                    )
-
-                start_scanner()
-
-        except Exception as e:
-            print(
-                "❌ Watchdog hatası:",
-                repr(e)
-            )
-
-        time.sleep(10)
-
-
-# ============================================================
-# WATCHDOG BAŞLAT
-# ============================================================
-
-def start_watchdog():
-    global watchdog_thread
 
     if (
-        watchdog_thread is not None
-        and watchdog_thread.is_alive()
+        scanner_thread is not None
+        and
+        scanner_thread.is_alive()
     ):
+
         return
 
-    watchdog_thread = threading.Thread(
-        target=scanner_watchdog_loop,
-        name="ScannerWatchdog",
+    global scanner_lock_handle
+
+    # Lock dosyasının file descriptor'ını globalde tutuyoruz.
+    # Önceki sürümde local değişken olduğu için fonksiyon bitince
+    # descriptor kapanabiliyor ve başka Gunicorn worker da scanner
+    # başlatabiliyordu. Bu da SQLite kilitlerinin ana nedenlerinden biri.
+    lock = acquire_scanner_lock()
+
+    if lock is None:
+
+        print(
+            "ℹ️ Bu Gunicorn worker scanner lock alamadı."
+        )
+
+        return
+
+    scanner_lock_handle = lock
+
+    print("")
+    print("=" * 60)
+    print("🚀 SCANNER OTOMATİK OLARAK BAŞLATILIYOR")
+    print("=" * 60)
+    print("")
+
+    scanner_thread = threading.Thread(
+
+        target=scanner_loop,
+
+        name="FootballScanner",
+
         daemon=True
+
     )
 
-    watchdog_thread.start()
+    scanner_thread.start()
+
+    print(
+        "✅ Scanner thread başlatıldı."
+    )
+
+    print("")
 
 
 # ============================================================
@@ -3992,11 +3920,10 @@ def api_status():
 
 
 # ============================================================
-# SCANNER + WATCHDOG BAŞLAT
+# SCANNER BAŞLAT
 # ============================================================
 
 start_scanner()
-start_watchdog()
 
 
 # ============================================================
