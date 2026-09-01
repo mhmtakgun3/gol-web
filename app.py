@@ -38,6 +38,10 @@ DB_FILE = "/tmp/gol_scanner.db"
 
 LOCK_FILE = "/tmp/gol_scanner.lock"
 
+# API kısa süreli önbelleği: canlı taramada gereksiz tekrar çağrıları engeller.
+API_CACHE = {}
+API_CACHE_LOCK = threading.RLock()
+
 
 # ============================================================
 # İZİN VERİLEN LİGLER
@@ -467,70 +471,68 @@ update_state(
 # API İSTEĞİ
 # ============================================================
 
-def api_get(endpoint, params=None):
+def api_get(endpoint, params=None, use_cache=True):
+    """API-Football çağrısı.
+
+    Canlı taramada aynı fixture için aynı endpoint'i tekrar tekrar çağırmamak
+    için kısa süreli bellek kullanır. API hata döndürürse cevabı kaybetmez;
+    böylece gerçek hata mesajını teşhis edebiliriz.
+    """
 
     if not API_KEY:
-
         print("❌ API_KEY bulunamadı.")
-
         return None
 
-    headers = {
-        "x-apisports-key": API_KEY
+    params = params or {}
+    cache_key = (endpoint, tuple(sorted((str(k), str(v)) for k, v in params.items())))
+    now = time.time()
+
+    ttl_map = {
+        "fixtures": 15,
+        "fixtures/statistics": 55,
+        "fixtures/players": 55,
+        "fixtures/events": 25,
+        "leagues": 3600,
     }
+    ttl = ttl_map.get(endpoint, 10)
+
+    if use_cache:
+        with API_CACHE_LOCK:
+            cached = API_CACHE.get(cache_key)
+            if cached and now - cached[0] < ttl:
+                return cached[1]
+
+    headers = {"x-apisports-key": API_KEY}
 
     try:
-
         response = requests.get(
-
             f"{API_URL}/{endpoint}",
-
             headers=headers,
-
             params=params,
-
-            timeout=20
-
+            timeout=15,
         )
 
-        print(
-            f"API -> {endpoint} | "
-            f"HTTP {response.status_code}"
-        )
+        print(f"API -> {endpoint} | HTTP {response.status_code}")
 
         if response.status_code != 200:
-
-            print(
-                "❌ API HTTP hatası:",
-                response.status_code
-            )
-
-            print(
-                response.text[:500]
-            )
-
+            print("❌ API HTTP hatası:", response.status_code)
+            print(response.text[:500])
             return None
 
         data = response.json()
 
         if data.get("errors"):
+            print("⚠️ API errors:", data.get("errors"))
+            # Hata cevabını da döndür; stats-test gerçek nedeni gösterebilsin.
 
-            print(
-                "❌ API hatası:",
-                data.get("errors")
-            )
-
-            return None
+        if use_cache and not data.get("errors"):
+            with API_CACHE_LOCK:
+                API_CACHE[cache_key] = (now, data)
 
         return data
 
     except Exception as e:
-
-        print(
-            "❌ API bağlantı hatası:",
-            repr(e)
-        )
-
+        print("❌ API bağlantı hatası:", repr(e))
         return None
 
 
@@ -587,97 +589,111 @@ def get_live_matches():
 # ============================================================
 
 def get_stats(fixture_id):
+    """Gerçek takım istatistiklerini alır.
 
-    print(f"🧪 STATS v4 | fixture={fixture_id}")
+    Önce fixture detayındaki embedded statistics, sonra dedicated endpoint.
+    Aynı fixture için iki farklı fixture-detail çağrısı yapılmaz.
+    """
+    print(f"🧪 TEAM STATS | fixture={fixture_id}")
 
-    # 1) Önce fixture detayındaki gömülü istatistikleri dene.
-    for param_name in ("id", "ids"):
+    detail = api_get("fixtures", {"id": fixture_id})
+    response = (detail.get("response", []) or []) if detail else []
+    embedded = (response[0].get("statistics", []) or []) if response else []
 
-        print(
-            f"🔁 Fixture detay denemesi: "
-            f"fixtures?{param_name}={fixture_id}"
-        )
+    print(f"📊 embedded statistics: fixture={fixture_id} | blocks={len(embedded)}")
+    if len(embedded) >= 2:
+        return embedded
 
-        detail = api_get(
-            "fixtures",
-            {
-                param_name: fixture_id
-            }
-        )
-
-        if detail:
-
-            response = detail.get(
-                "response",
-                []
-            ) or []
-
-            print(
-                f"📦 fixture detay: "
-                f"fixture={fixture_id} | "
-                f"results={detail.get('results', len(response))} | "
-                f"items={len(response)}"
-            )
-
-            if response:
-
-                embedded = response[0].get(
-                    "statistics",
-                    []
-                ) or []
-
-                print(
-                    f"📊 embedded statistics: "
-                    f"fixture={fixture_id} | "
-                    f"blocks={len(embedded)}"
-                )
-
-                if len(embedded) >= 2:
-
-                    print(
-                        f"✅ EMBEDDED STATS OK: "
-                        f"fixture={fixture_id}"
-                    )
-
-                    return embedded
-
-    # 2) Gömülü istatistik yoksa dedicated endpoint.
-    data = api_get(
-        "fixtures/statistics",
-        {
-            "fixture": fixture_id
-        }
+    dedicated = api_get("fixtures/statistics", {"fixture": fixture_id})
+    stats = (dedicated.get("response", []) or []) if dedicated else []
+    print(
+        f"📊 dedicated statistics: fixture={fixture_id} | "
+        f"results={dedicated.get('results') if dedicated else None} | blocks={len(stats)}"
     )
+    if len(stats) >= 2:
+        return stats
 
-    if data:
+    print(f"⚠️ TEAM STATISTICS YOK: fixture={fixture_id}")
+    return []
 
-        stats = data.get(
-            "response",
-            []
-        ) or []
 
-        print(
-            f"📊 dedicated statistics: "
-            f"fixture={fixture_id} | "
-            f"results={data.get('results', len(stats))} | "
-            f"blocks={len(stats)}"
-        )
+def get_player_stats(fixture_id):
+    print(f"🧪 PLAYER STATS | fixture={fixture_id}")
+    data = api_get("fixtures/players", {"fixture": fixture_id})
+    response = (data.get("response", []) or []) if data else []
+    print(
+        f"📊 player statistics: fixture={fixture_id} | "
+        f"results={data.get('results') if data else None} | blocks={len(response)}"
+    )
+    return response
 
-        if len(stats) >= 2:
 
-            print(
-                f"✅ DEDICATED STATS OK: "
-                f"fixture={fixture_id}"
-            )
+def aggregate_player_stats(player_blocks):
+    if len(player_blocks) < 2:
+        return None
 
-            return stats
+    teams = []
+    for block in player_blocks[:2]:
+        total_shots = 0
+        target_shots = 0
+        shots_found = False
+        target_found = False
+
+        for player in block.get("players", []) or []:
+            stats_list = player.get("statistics", []) or []
+            if not stats_list:
+                continue
+            shots = (stats_list[0] or {}).get("shots", {}) or {}
+            total = shots.get("total")
+            on_target = shots.get("on")
+            if total is not None:
+                try:
+                    total_shots += int(total); shots_found = True
+                except (TypeError, ValueError):
+                    pass
+            if on_target is not None:
+                try:
+                    target_shots += int(on_target); target_found = True
+                except (TypeError, ValueError):
+                    pass
+
+        teams.append({
+            "shots": total_shots if shots_found else None,
+            "target": target_shots if target_found else None,
+            "corners": None,
+            "inside": None,
+        })
+
+    if not any(t["shots"] is not None or t["target"] is not None for t in teams):
+        return None
+
+    print(f"✅ PLAYER SHOTS OK | home={teams[0]} | away={teams[1]}")
+    return teams[0], teams[1]
+
+
+def get_event_fallback(fixture_id, match):
+    events = match.get("events") if isinstance(match, dict) else None
+    if events is None:
+        data = api_get("fixtures/events", {"fixture": fixture_id})
+        events = (data.get("response", []) or []) if data else []
+
+    goals = sum(1 for e in events if str(e.get("type") or "").lower() == "goal")
+    red_cards = 0
+    yellow_cards = 0
+    for e in events:
+        if str(e.get("type") or "").lower() != "card":
+            continue
+        detail = str(e.get("detail") or "").lower()
+        if "red" in detail:
+            red_cards += 1
+        elif "yellow" in detail:
+            yellow_cards += 1
 
     print(
-        f"❌ STATS YOK: "
-        f"fixture={fixture_id}"
+        f"📋 EVENTS | fixture={fixture_id} | events={len(events)} | "
+        f"goals={goals} | yellow={yellow_cards} | red={red_cards}"
     )
-
-    return []
+    return {"events": events or [], "goals": goals, "yellow_cards": yellow_cards, "red_cards": red_cards}
 
 
 # ============================================================
@@ -930,172 +946,69 @@ def check_all_league_statistics_coverage():
 # ============================================================
 
 @app.route("/api/stats-test/<int:fixture_id>")
-@app.route("/api/stats-test/<int:fixture_id>")
 def api_stats_test(fixture_id):
-
-    print("")
+    """Tek fixture için API'nin gerçekten ne döndürdüğünü teşhis eder.
+    Cache kullanılmaz; test her zaman canlı API cevabını görür.
+    """
+    print("\n" + "=" * 70)
+    print(f"🧪 CANLI API DATA TESTİ | fixture={fixture_id}")
     print("=" * 70)
-    print(f"🧪 GENİŞ KAPSAMLI MAÇ VERİ TESTİ | fixture={fixture_id}")
-    print("=" * 70)
 
-    # ---------------------------------------------------------
-    # 1) FIXTURE
-    # ---------------------------------------------------------
-    fixture_detail = api_get("fixtures", {"id": fixture_id})
-    fixture_response = (
-        fixture_detail.get("response", []) or []
-    ) if fixture_detail else []
-
+    fixture_detail = api_get("fixtures", {"id": fixture_id}, use_cache=False)
+    fixture_response = (fixture_detail.get("response", []) or []) if fixture_detail else []
     fixture_info = fixture_response[0] if fixture_response else None
 
-    embedded_stats = (
-        fixture_info.get("statistics", []) or []
-    ) if fixture_info else []
+    embedded_stats = (fixture_info.get("statistics", []) or []) if fixture_info else []
+    embedded_events = (fixture_info.get("events", []) or []) if fixture_info else []
 
-    embedded_events = (
-        fixture_info.get("events", []) or []
-    ) if fixture_info else []
+    dedicated = api_get("fixtures/statistics", {"fixture": fixture_id}, use_cache=False)
+    dedicated_response = (dedicated.get("response", []) or []) if dedicated else []
 
-    # ---------------------------------------------------------
-    # 2) DEDICATED STATISTICS
-    # ---------------------------------------------------------
-    dedicated = api_get(
-        "fixtures/statistics",
-        {"fixture": fixture_id}
-    )
+    players = api_get("fixtures/players", {"fixture": fixture_id}, use_cache=False)
+    player_response = (players.get("response", []) or []) if players else []
 
-    dedicated_response = (
-        dedicated.get("response", []) or []
-    ) if dedicated else []
+    events = api_get("fixtures/events", {"fixture": fixture_id}, use_cache=False)
+    event_response = (events.get("response", []) or []) if events else []
 
-    # ---------------------------------------------------------
-    # 3) EVENTS
-    # ---------------------------------------------------------
-    events_data = api_get(
-        "fixtures/events",
-        {"fixture": fixture_id}
-    )
-
-    events_response = (
-        events_data.get("response", []) or []
-    ) if events_data else []
-
-    # ---------------------------------------------------------
-    # 4) PLAYERS
-    # ---------------------------------------------------------
-    players_data = api_get(
-        "fixtures/players",
-        {"fixture": fixture_id}
-    )
-
-    players_response = (
-        players_data.get("response", []) or []
-    ) if players_data else []
-
-    # ---------------------------------------------------------
-    # LOG
-    # ---------------------------------------------------------
-    print(f"📦 Fixture response: {len(fixture_response)}")
-    print(f"📊 Embedded statistics: {len(embedded_stats)}")
-    print(f"📊 Dedicated statistics: {len(dedicated_response)}")
-    print(f"⚽ Embedded events: {len(embedded_events)}")
-    print(f"⚽ Dedicated events: {len(events_response)}")
-    print(f"👤 Player blocks: {len(players_response)}")
-
-    print(
-        "📋 Fixture API results:",
-        fixture_detail.get("results") if fixture_detail else None
-    )
-
-    print(
-        "⚠️ Fixture API errors:",
-        fixture_detail.get("errors") if fixture_detail else None
-    )
-
-    print(
-        "📋 Statistics API results:",
-        dedicated.get("results") if dedicated else None
-    )
-
-    print(
-        "⚠️ Statistics API errors:",
-        dedicated.get("errors") if dedicated else None
-    )
-
-    print(
-        "📋 Events API results:",
-        events_data.get("results") if events_data else None
-    )
-
-    print(
-        "⚠️ Events API errors:",
-        events_data.get("errors") if events_data else None
-    )
-
-    print(
-        "📋 Players API results:",
-        players_data.get("results") if players_data else None
-    )
-
-    print(
-        "⚠️ Players API errors:",
-        players_data.get("errors") if players_data else None
-    )
-
-    # ---------------------------------------------------------
-    # 5) SONUÇ
-    # ---------------------------------------------------------
-    return jsonify({
-
+    result = {
         "fixture_id": fixture_id,
-
         "fixture_found": bool(fixture_response),
-        "fixture_results": (
-            fixture_detail.get("results")
-            if fixture_detail else None
-        ),
-        "fixture_errors": (
-            fixture_detail.get("errors")
-            if fixture_detail else None
-        ),
-
+        "fixture_results": fixture_detail.get("results") if fixture_detail else None,
+        "fixture_errors": fixture_detail.get("errors") if fixture_detail else None,
         "embedded_blocks": len(embedded_stats),
         "embedded_statistics": embedded_stats,
-
         "dedicated_blocks": len(dedicated_response),
         "dedicated_statistics": dedicated_response,
-
+        "statistics_results": dedicated.get("results") if dedicated else None,
+        "statistics_errors": dedicated.get("errors") if dedicated else None,
         "embedded_events": len(embedded_events),
-        "events_results": (
-            events_data.get("results")
-            if events_data else None
-        ),
-        "events_errors": (
-            events_data.get("errors")
-            if events_data else None
-        ),
+        "embedded_events_data": embedded_events,
+        "dedicated_events": len(event_response),
+        "dedicated_events_data": event_response,
+        "events_results": events.get("results") if events else None,
+        "events_errors": events.get("errors") if events else None,
+        "player_team_blocks": len(player_response),
+        "player_statistics": player_response,
+        "players_results": players.get("results") if players else None,
+        "players_errors": players.get("errors") if players else None,
+        "stats_found": len(embedded_stats) >= 2 or len(dedicated_response) >= 2,
+        "events_found": bool(embedded_events or event_response),
+        "players_found": bool(player_response),
+    }
 
-        "dedicated_events": events_response,
+    print(f"📦 fixture={len(fixture_response)} | stats={len(embedded_stats)}/{len(dedicated_response)} | events={len(embedded_events)}/{len(event_response)} | players={len(player_response)}")
+    print("🧪 TEST SONUCU:", json.dumps({
+        k: result[k] for k in [
+            "fixture_found", "fixture_results", "fixture_errors",
+            "embedded_blocks", "dedicated_blocks", "statistics_results", "statistics_errors",
+            "embedded_events", "dedicated_events", "events_results", "events_errors",
+            "player_team_blocks", "players_results", "players_errors",
+            "stats_found", "events_found", "players_found"
+        ]
+    }, ensure_ascii=False))
 
-        "players_results": (
-            players_data.get("results")
-            if players_data else None
-        ),
-        "player_team_blocks": players_response,
+    return jsonify(result)
 
-        "stats_found": (
-            len(embedded_stats) >= 2
-            or len(dedicated_response) >= 2
-        ),
-
-        "events_found": bool(
-            embedded_events or events_response
-        ),
-
-        "players_found": bool(
-            players_response
-        )
-    })
 
 @app.route("/api/coverage-test")
 def api_coverage_test():
@@ -1163,70 +1076,36 @@ def get_team_stats(stats):
     if len(stats) < 2:
         return None
 
-    home = stats[0].get(
-        "statistics",
-        []
-    )
+    home = stats[0].get("statistics", []) or []
+    away = stats[1].get("statistics", []) or []
 
-    away = stats[1].get(
-        "statistics",
-        []
-    )
+    def optional_stat(items, name):
+        found = False
+        for item in items:
+            if item.get("type") == name:
+                value = item.get("value")
+                if value is None:
+                    return None
+                if isinstance(value, str):
+                    value = value.replace("%", "")
+                try:
+                    return float(value)
+                except Exception:
+                    return None
+        return None
 
     home_data = {
-
-        "shots":
-            stat_value(
-                home,
-                "Total Shots"
-            ),
-
-        "target":
-            stat_value(
-                home,
-                "Shots on Goal"
-            ),
-
-        "corners":
-            stat_value(
-                home,
-                "Corner Kicks"
-            ),
-
-        "inside":
-            stat_value(
-                home,
-                "Shots insidebox"
-            )
-
+        "shots": optional_stat(home, "Total Shots"),
+        "target": optional_stat(home, "Shots on Goal"),
+        "corners": optional_stat(home, "Corner Kicks"),
+        "inside": optional_stat(home, "Shots insidebox")
     }
 
     away_data = {
-
-        "shots":
-            stat_value(
-                away,
-                "Total Shots"
-            ),
-
-        "target":
-            stat_value(
-                away,
-                "Shots on Goal"
-            ),
-
-        "corners":
-            stat_value(
-                away,
-                "Corner Kicks"
-            ),
-
-        "inside":
-            stat_value(
-                away,
-                "Shots insidebox"
-            )
-
+        "shots": optional_stat(away, "Total Shots"),
+        "target": optional_stat(away, "Shots on Goal"),
+        "corners": optional_stat(away, "Corner Kicks"),
+        "inside": optional_stat(away, "Shots insidebox")
     }
 
     return home_data, away_data
@@ -1245,24 +1124,16 @@ def get_total_stats(stats):
 
     home, away = team_stats
 
+    def total(key):
+        values = [home.get(key), away.get(key)]
+        values = [v for v in values if v is not None]
+        return sum(values) if values else None
+
     return {
-
-        "shots":
-            home["shots"] +
-            away["shots"],
-
-        "target":
-            home["target"] +
-            away["target"],
-
-        "corners":
-            home["corners"] +
-            away["corners"],
-
-        "inside":
-            home["inside"] +
-            away["inside"]
-
+        "shots": total("shots"),
+        "target": total("target"),
+        "corners": total("corners"),
+        "inside": total("inside")
     }
 
 
@@ -1275,10 +1146,10 @@ def calculate_signal(
     current_stats
 ):
 
-    total_shots = current_stats["shots"]
-    total_target = current_stats["target"]
-    total_corners = current_stats["corners"]
-    total_inside = current_stats["inside"]
+    total_shots = current_stats.get("shots") or 0
+    total_target = current_stats.get("target") or 0
+    total_corners = current_stats.get("corners") or 0
+    total_inside = current_stats.get("inside") or 0
 
     minute = (
         match
@@ -1474,10 +1345,7 @@ def calculate_first_half_signal(
 
     reasons = []
 
-    total_shots = (
-        home["shots"] +
-        away["shots"]
-    )
+    total_shots = (home.get("shots") or 0) + (away.get("shots") or 0)
 
     if total_shots >= 12:
 
@@ -1499,10 +1367,7 @@ def calculate_first_half_signal(
 
         score += 9
 
-    total_target = (
-        home["target"] +
-        away["target"]
-    )
+    total_target = (home.get("target") or 0) + (away.get("target") or 0)
 
     if total_target >= 6:
 
@@ -1524,10 +1389,7 @@ def calculate_first_half_signal(
 
         score += 9
 
-    total_corners = (
-        home["corners"] +
-        away["corners"]
-    )
+    total_corners = (home.get("corners") or 0) + (away.get("corners") or 0)
 
     if total_corners >= 6:
 
@@ -1541,10 +1403,7 @@ def calculate_first_half_signal(
 
         score += 9
 
-    total_inside = (
-        home["inside"] +
-        away["inside"]
-    )
+    total_inside = (home.get("inside") or 0) + (away.get("inside") or 0)
 
     if total_inside >= 7:
 
@@ -1570,17 +1429,17 @@ def calculate_first_half_signal(
         )
 
     home_pressure = (
-        home["shots"] * 1.0 +
-        home["target"] * 2.5 +
-        home["corners"] * 1.2 +
-        home["inside"] * 1.5
+        (home.get("shots") or 0) * 1.0 +
+        (home.get("target") or 0) * 2.5 +
+        (home.get("corners") or 0) * 1.2 +
+        (home.get("inside") or 0) * 1.5
     )
 
     away_pressure = (
-        away["shots"] * 1.0 +
-        away["target"] * 2.5 +
-        away["corners"] * 1.2 +
-        away["inside"] * 1.5
+        (away.get("shots") or 0) * 1.0 +
+        (away.get("target") or 0) * 2.5 +
+        (away.get("corners") or 0) * 1.2 +
+        (away.get("inside") or 0) * 1.5
     )
 
     if home_pressure > away_pressure * 1.20:
@@ -1669,73 +1528,116 @@ def analyze_match(match):
         f"{goals_home}-{goals_away}"
     )
 
-    stats = get_stats(
-        fixture_id
-    )
+    stats = get_stats(fixture_id)
 
-    if not stats:
+    data_source = "statistics"
+
+    team_stats = get_team_stats(stats) if stats else None
+
+    # Team statistics gelmiyorsa oyuncu istatistiklerinden gerçek şut
+    # verisini kullan. Böylece küçük/özel liglerde veya canlı istatistik
+    # gecikmesinde maç tamamen kaybolmaz. Eksik alanları 0 diye uydurmuyoruz.
+    if not team_stats:
+
+        player_blocks = get_player_stats(fixture_id)
+        team_stats = aggregate_player_stats(player_blocks)
+        data_source = "player_statistics"
+
+    # Şut verisi de yoksa events yine gerçek bir canlı veri kaynağıdır.
+    # Ancak yalnızca events üzerinden sahte şut/korner sayıları üretmiyoruz.
+    # Bu durumda maç için olay tabanlı düşük güvenli sinyal üretiyoruz.
+    if not team_stats:
+
+        event_data = get_event_fallback(fixture_id, match)
+
+        minute_now = minute
+        score_total = goals_home + goals_away
+        event_score = 0
+        event_reasons = []
+
+        if minute_now >= 55 and score_total == 0:
+            event_score += 20
+            event_reasons.append("55+ dakika ve skor 0-0")
+
+        elif minute_now >= 60 and abs(goals_home - goals_away) == 1:
+            event_score += 15
+            event_reasons.append("60+ dakika ve maç tek farklı")
+
+        if event_data["red_cards"] > 0:
+            event_score += 5
+            event_reasons.append("Kırmızı kart maçı açık hale getirebilir")
+
+        # Olay verisi var ama baskı istatistiği yoksa güveni sınırlıyoruz.
+        event_score = min(event_score, 45)
 
         print(
-            "⚠️ İstatistik bulunamadı."
+            f"⚠️ Team/player stats yok; events tabanlı düşük güvenli analiz: "
+            f"fixture={fixture_id} | score={event_score}"
         )
 
-        return None
+        return {
+            "fixture_id": fixture_id,
+            "league": league_name,
+            "home": home,
+            "away": away,
+            "minute": minute,
+            "score_home": goals_home,
+            "score_away": goals_away,
+            "shots": None,
+            "target": None,
+            "corners": None,
+            "inside": None,
+            "signal": int(event_score),
+            "signal_reasons": event_reasons,
+            "expected_team": "⚽ Her iki takım",
+            "first_half_signal": 0,
+            "first_half_reasons": [],
+            "strong_signal": False,
+            "strong_first_half": False,
+            "very_strong": False,
+            "priority": int(event_score),
+            "data_source": "events_fallback"
+        }
 
-    current_stats = (
-        get_total_stats(stats)
-    )
+    current_stats = get_total_stats(stats) if stats else None
 
-    team_stats = (
-        get_team_stats(stats)
-    )
+    if current_stats is None:
+        home, away = team_stats
+        def add_optional(a, b):
+            values = [x for x in (a, b) if x is not None]
+            return sum(values) if values else None
+        current_stats = {
+            "shots": add_optional(home.get("shots"), away.get("shots")),
+            "target": add_optional(home.get("target"), away.get("target")),
+            "corners": add_optional(home.get("corners"), away.get("corners")),
+            "inside": add_optional(home.get("inside"), away.get("inside"))
+        }
 
-    if (
-        not current_stats
-        or not team_stats
-    ):
-
-        print(
-            "⚠️ Eksik istatistik."
-        )
-
-        return None
-
-    signal, reasons = (
-        calculate_signal(
-            match,
-            current_stats
-        )
-    )
+    signal, reasons = calculate_signal(match, current_stats)
 
     first_signal = 0
     first_reasons = []
     expected_team = "Belirsiz"
 
     if 15 <= minute <= 45:
-
-        (
-            first_signal,
-            first_reasons,
-            expected_team
-        ) = calculate_first_half_signal(
-            match,
-            team_stats
+        first_signal, first_reasons, expected_team = calculate_first_half_signal(
+            match, team_stats
         )
 
     home_stats, away_stats = team_stats
 
     home_pressure = (
-        home_stats["shots"] * 1.0 +
-        home_stats["target"] * 2.5 +
-        home_stats["corners"] * 1.2 +
-        home_stats["inside"] * 1.5
+        (home_stats.get("shots") or 0) * 1.0 +
+        (home_stats.get("target") or 0) * 2.5 +
+        (home_stats.get("corners") or 0) * 1.2 +
+        (home_stats.get("inside") or 0) * 1.5
     )
 
     away_pressure = (
-        away_stats["shots"] * 1.0 +
-        away_stats["target"] * 2.5 +
-        away_stats["corners"] * 1.2 +
-        away_stats["inside"] * 1.5
+        (away_stats.get("shots") or 0) * 1.0 +
+        (away_stats.get("target") or 0) * 2.5 +
+        (away_stats.get("corners") or 0) * 1.2 +
+        (away_stats.get("inside") or 0) * 1.5
     )
 
     if home_pressure > away_pressure * 1.20:
@@ -1800,16 +1702,16 @@ def analyze_match(match):
             goals_away,
 
         "shots":
-            int(current_stats["shots"]),
+            int(current_stats["shots"]) if current_stats.get("shots") is not None else None,
 
         "target":
-            int(current_stats["target"]),
+            int(current_stats["target"]) if current_stats.get("target") is not None else None,
 
         "corners":
-            int(current_stats["corners"]),
+            int(current_stats["corners"]) if current_stats.get("corners") is not None else None,
 
         "inside":
-            int(current_stats["inside"]),
+            int(current_stats["inside"]) if current_stats.get("inside") is not None else None,
 
         "signal":
             int(signal),
@@ -1836,7 +1738,10 @@ def analyze_match(match):
             very_strong,
 
         "priority":
-            int(priority)
+            int(priority),
+
+        "data_source":
+            data_source
 
     }
 
@@ -3475,6 +3380,22 @@ function createMatch(match) {
 
     let firstHalf = "";
 
+    let sourceBadge = "";
+
+    if (match.data_source === "player_statistics") {
+
+        sourceBadge = `
+            <span class="badge badge-blue">📊 OYUNCU VERİSİ</span>
+        `;
+
+    } else if (match.data_source === "events_fallback") {
+
+        sourceBadge = `
+            <span class="badge badge-orange">ℹ️ OLAY VERİSİ</span>
+        `;
+
+    }
+
     if (
         match.first_half_signal >= 65
     ) {
@@ -3547,7 +3468,7 @@ function createMatch(match) {
                     ŞUT
 
                     <b>
-                        ${match.shots}
+                        ${match.shots ?? "—"}
                     </b>
 
                 </div>
@@ -3557,7 +3478,7 @@ function createMatch(match) {
                     İSABET
 
                     <b>
-                        ${match.target}
+                        ${match.target ?? "—"}
                     </b>
 
                 </div>
@@ -3567,7 +3488,7 @@ function createMatch(match) {
                     KORNER
 
                     <b>
-                        ${match.corners}
+                        ${match.corners ?? "—"}
                     </b>
 
                 </div>
@@ -3577,7 +3498,7 @@ function createMatch(match) {
                     CEZA SAHASI
 
                     <b>
-                        ${match.inside}
+                        ${match.inside ?? "—"}
                     </b>
 
                 </div>
@@ -3598,6 +3519,7 @@ function createMatch(match) {
                     ${badge}
 
                     ${firstHalf}
+                    ${sourceBadge}
 
                 </div>
 
