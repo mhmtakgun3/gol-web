@@ -930,44 +930,172 @@ def check_all_league_statistics_coverage():
 # ============================================================
 
 @app.route("/api/stats-test/<int:fixture_id>")
+@app.route("/api/stats-test/<int:fixture_id>")
 def api_stats_test(fixture_id):
 
     print("")
     print("=" * 70)
-    print(f"🧪 TEK MAÇ STATISTICS TESTİ | fixture={fixture_id}")
+    print(f"🧪 GENİŞ KAPSAMLI MAÇ VERİ TESTİ | fixture={fixture_id}")
     print("=" * 70)
 
+    # ---------------------------------------------------------
+    # 1) FIXTURE
+    # ---------------------------------------------------------
     fixture_detail = api_get("fixtures", {"id": fixture_id})
-    fixture_response = (fixture_detail.get("response", []) or []) if fixture_detail else []
+    fixture_response = (
+        fixture_detail.get("response", []) or []
+    ) if fixture_detail else []
+
     fixture_info = fixture_response[0] if fixture_response else None
 
-    embedded_stats = (fixture_info.get("statistics", []) or []) if fixture_info else []
+    embedded_stats = (
+        fixture_info.get("statistics", []) or []
+    ) if fixture_info else []
 
-    dedicated = api_get("fixtures/statistics", {"fixture": fixture_id})
-    dedicated_response = (dedicated.get("response", []) or []) if dedicated else []
+    embedded_events = (
+        fixture_info.get("events", []) or []
+    ) if fixture_info else []
 
+    # ---------------------------------------------------------
+    # 2) DEDICATED STATISTICS
+    # ---------------------------------------------------------
+    dedicated = api_get(
+        "fixtures/statistics",
+        {"fixture": fixture_id}
+    )
+
+    dedicated_response = (
+        dedicated.get("response", []) or []
+    ) if dedicated else []
+
+    # ---------------------------------------------------------
+    # 3) EVENTS
+    # ---------------------------------------------------------
+    events_data = api_get(
+        "fixtures/events",
+        {"fixture": fixture_id}
+    )
+
+    events_response = (
+        events_data.get("response", []) or []
+    ) if events_data else []
+
+    # ---------------------------------------------------------
+    # 4) PLAYERS
+    # ---------------------------------------------------------
+    players_data = api_get(
+        "fixtures/players",
+        {"fixture": fixture_id}
+    )
+
+    players_response = (
+        players_data.get("response", []) or []
+    ) if players_data else []
+
+    # ---------------------------------------------------------
+    # LOG
+    # ---------------------------------------------------------
     print(f"📦 Fixture response: {len(fixture_response)}")
-    print(f"📊 Embedded statistics blocks: {len(embedded_stats)}")
-    print(f"📊 Dedicated statistics blocks: {len(dedicated_response)}")
-    print("📋 Fixture API results:", fixture_detail.get("results") if fixture_detail else None)
-    print("⚠️ Fixture API errors:", fixture_detail.get("errors") if fixture_detail else None)
-    print("📋 Statistics API results:", dedicated.get("results") if dedicated else None)
-    print("⚠️ Statistics API errors:", dedicated.get("errors") if dedicated else None)
+    print(f"📊 Embedded statistics: {len(embedded_stats)}")
+    print(f"📊 Dedicated statistics: {len(dedicated_response)}")
+    print(f"⚽ Embedded events: {len(embedded_events)}")
+    print(f"⚽ Dedicated events: {len(events_response)}")
+    print(f"👤 Player blocks: {len(players_response)}")
 
+    print(
+        "📋 Fixture API results:",
+        fixture_detail.get("results") if fixture_detail else None
+    )
+
+    print(
+        "⚠️ Fixture API errors:",
+        fixture_detail.get("errors") if fixture_detail else None
+    )
+
+    print(
+        "📋 Statistics API results:",
+        dedicated.get("results") if dedicated else None
+    )
+
+    print(
+        "⚠️ Statistics API errors:",
+        dedicated.get("errors") if dedicated else None
+    )
+
+    print(
+        "📋 Events API results:",
+        events_data.get("results") if events_data else None
+    )
+
+    print(
+        "⚠️ Events API errors:",
+        events_data.get("errors") if events_data else None
+    )
+
+    print(
+        "📋 Players API results:",
+        players_data.get("results") if players_data else None
+    )
+
+    print(
+        "⚠️ Players API errors:",
+        players_data.get("errors") if players_data else None
+    )
+
+    # ---------------------------------------------------------
+    # 5) SONUÇ
+    # ---------------------------------------------------------
     return jsonify({
-        "fixture_id": fixture_id,
-        "fixture_found": bool(fixture_response),
-        "embedded_blocks": len(embedded_stats),
-        "dedicated_blocks": len(dedicated_response),
-        "fixture_results": fixture_detail.get("results") if fixture_detail else None,
-        "fixture_errors": fixture_detail.get("errors") if fixture_detail else None,
-        "statistics_results": dedicated.get("results") if dedicated else None,
-        "statistics_errors": dedicated.get("errors") if dedicated else None,
-        "stats_found": len(embedded_stats) >= 2 or len(dedicated_response) >= 2,
-        "embedded_statistics": embedded_stats,
-        "dedicated_statistics": dedicated_response
-    })
 
+        "fixture_id": fixture_id,
+
+        "fixture_found": bool(fixture_response),
+        "fixture_results": (
+            fixture_detail.get("results")
+            if fixture_detail else None
+        ),
+        "fixture_errors": (
+            fixture_detail.get("errors")
+            if fixture_detail else None
+        ),
+
+        "embedded_blocks": len(embedded_stats),
+        "embedded_statistics": embedded_stats,
+
+        "dedicated_blocks": len(dedicated_response),
+        "dedicated_statistics": dedicated_response,
+
+        "embedded_events": len(embedded_events),
+        "events_results": (
+            events_data.get("results")
+            if events_data else None
+        ),
+        "events_errors": (
+            events_data.get("errors")
+            if events_data else None
+        ),
+
+        "dedicated_events": events_response,
+
+        "players_results": (
+            players_data.get("results")
+            if players_data else None
+        ),
+        "player_team_blocks": players_response,
+
+        "stats_found": (
+            len(embedded_stats) >= 2
+            or len(dedicated_response) >= 2
+        ),
+
+        "events_found": bool(
+            embedded_events or events_response
+        ),
+
+        "players_found": bool(
+            players_response
+        )
+    })
 
 @app.route("/api/coverage-test")
 def api_coverage_test():
