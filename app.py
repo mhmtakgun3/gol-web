@@ -585,28 +585,101 @@ def get_live_matches():
 # ============================================================
 # İSTATİSTİKLER
 # ============================================================
-
 def get_stats(fixture_id):
 
+    print(f"🧪 STATS v4 | fixture={fixture_id}")
+
+    # 1) Önce fixture detayından gömülü istatistikleri dene.
+    # API-Sports bazı maçlarda istatistikleri fixtures cevabının
+    # içinde doğrudan verebiliyor.
+    for param_name in ("id", "ids"):
+
+        print(
+            f"🔁 Fixture detay denemesi: "
+            f"fixtures?{param_name}={fixture_id}"
+        )
+
+        detail = api_get(
+            "fixtures",
+            {
+                param_name: fixture_id
+            }
+        )
+
+        if detail:
+
+            response = detail.get(
+                "response",
+                []
+            ) or []
+
+            print(
+                f"📦 fixture detay: "
+                f"fixture={fixture_id} | "
+                f"results={detail.get('results', len(response))} | "
+                f"items={len(response)}"
+            )
+
+            if response:
+
+                embedded = response[0].get(
+                    "statistics",
+                    []
+                ) or []
+
+                print(
+                    f"📊 embedded statistics: "
+                    f"fixture={fixture_id} | "
+                    f"blocks={len(embedded)}"
+                )
+
+                if len(embedded) >= 2:
+
+                    print(
+                        f"✅ EMBEDDED STATS OK: "
+                        f"fixture={fixture_id}"
+                    )
+
+                    return embedded
+
+    # 2) Fixture detayında istatistik yoksa,
+    # mevcut statistics endpoint'ini yedek olarak kullan.
     data = api_get(
-
         "fixtures/statistics",
-
         {
             "fixture": fixture_id
         }
-
     )
 
-    if not data:
-        return []
+    if data:
 
-    return data.get(
-        "response",
-        []
+        stats = data.get(
+            "response",
+            []
+        ) or []
+
+        print(
+            f"📊 dedicated statistics: "
+            f"fixture={fixture_id} | "
+            f"results={data.get('results', len(stats))} | "
+            f"blocks={len(stats)}"
+        )
+
+        if len(stats) >= 2:
+
+            print(
+                f"✅ DEDICATED STATS OK: "
+                f"fixture={fixture_id}"
+            )
+
+            return stats
+
+    print(
+        f"❌ STATS YOK: "
+        f"fixture={fixture_id}"
     )
 
-
+    return []
 # ============================================================
 # İSTATİSTİK DEĞERİ
 # ============================================================
