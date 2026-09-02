@@ -1,5 +1,6 @@
 import os
 import time
+import json
 import threading
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -24,6 +25,7 @@ FIRST_HALF_LIMIT = int(os.getenv("FIRST_HALF_LIMIT", "65"))
 
 # API çağrılarının sonsuza kadar beklememesi için
 REQUEST_TIMEOUT = 15
+LIVE_SNAPSHOT_FILE = "/tmp/gol_live_snapshot.json"
 
 # Basit cache süreleri
 LIVE_CACHE_TTL = 10
@@ -215,6 +217,21 @@ def get_live_matches() -> Tuple[List[Dict[str, Any]], Optional[str], int]:
         live_cache["ts"] = now
         live_cache["data"] = list(filtered)
         live_cache["all_live"] = list(response)
+
+    # Gunicorn birden fazla process açarsa RAM cache process'ler arasında paylaşılmaz.
+    # Bu küçük snapshot aynı Render instance içindeki /tmp dosyasına yazılır.
+    # Ekstra API isteği oluşturmaz.
+    try:
+        snapshot_payload = {
+            "ts": now,
+            "all_live": response,
+        }
+        temp_path = LIVE_SNAPSHOT_FILE + ".tmp"
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(snapshot_payload, f, ensure_ascii=False)
+        os.replace(temp_path, LIVE_SNAPSHOT_FILE)
+    except Exception:
+        pass
 
     return filtered, None, api_live_count
 
@@ -713,9 +730,27 @@ def api_live_leagues():
     Ekstra API çağrısı YAPMAZ.
     Scanner'ın zaten aldığı /fixtures?live=all cevabını cache'ten okur.
     """
-    with cache_lock:
-        all_live = list(live_cache.get("all_live", []))
-        cache_age = round(max(0.0, time.time() - float(live_cache.get("ts", 0.0))), 1)
+    all_live = []
+    snapshot_ts = 0.0
+    source = "memory"
+
+    # Önce paylaşılan /tmp snapshot'ını oku.
+    try:
+        with open(LIVE_SNAPSHOT_FILE, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        all_live = payload.get("all_live", []) or []
+        snapshot_ts = float(payload.get("ts", 0.0) or 0.0)
+        source = "shared_file"
+    except Exception:
+        # Dosya henüz oluşmadıysa mevcut process RAM cache'ine dön.
+        with cache_lock:
+            all_live = list(live_cache.get("all_live", []))
+            snapshot_ts = float(live_cache.get("ts", 0.0) or 0.0)
+            source = "memory"
+
+    cache_age = None
+    if snapshot_ts > 0:
+        cache_age = round(max(0.0, time.time() - snapshot_ts), 1)
 
     leagues = {}
 
@@ -758,7 +793,8 @@ def api_live_leagues():
 
     return jsonify({
         "ok": True,
-        "note": "Bu endpoint ekstra API isteği yapmaz; scanner cache'ini gösterir.",
+        "note": "Bu endpoint ekstra API isteği yapmaz; scanner'ın mevcut canlı maç snapshot'ını gösterir.",
+        "source": source,
         "cache_age_seconds": cache_age,
         "total_live_matches": len(all_live),
         "unique_live_leagues": len(result),
