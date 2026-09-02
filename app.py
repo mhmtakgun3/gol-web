@@ -1401,6 +1401,19 @@ PAGE = r"""
             border: 1px dashed #2a3953;
             border-radius: 16px;
         }
+
+        .notify-btn {
+            border: 0;
+            border-radius: 999px;
+            padding: 10px 14px;
+            font-weight: 700;
+            cursor: pointer;
+            background: #243653;
+            color: #eef5ff;
+        }
+        .notify-btn.enabled { background: #1f7a4f; }
+        .notify-btn.denied { background: #7b2b39; }
+
         @media(max-width: 760px) {
             .summary { grid-template-columns: repeat(2, minmax(0,1fr)); }
             .stats { grid-template-columns: repeat(2, minmax(0,1fr)); }
@@ -1419,7 +1432,10 @@ PAGE = r"""
                 <a href="/api/live-leagues" target="_blank" style="color:#7db7ff;margin-left:8px;">Canlı lig teşhisi</a>
             </div>
         </div>
-        <div class="status" id="statusText">Bağlanıyor...</div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <button id="notifyBtn" class="notify-btn" onclick="enableNotifications()">🔔 Bildirimleri Aç</button>
+            <div class="status" id="statusText">Bağlanıyor...</div>
+        </div>
     </div>
 
     <div id="errorBox" class="error"></div>
@@ -1447,6 +1463,106 @@ PAGE = r"""
 </div>
 
 <script>
+const TEAM_RADAR_THRESHOLD = 65;
+const notifiedRadarKeys = new Set(
+    JSON.parse(localStorage.getItem("golRadarNotified") || "[]")
+);
+
+function saveNotifiedKeys() {
+    const arr = Array.from(notifiedRadarKeys);
+    localStorage.setItem("golRadarNotified", JSON.stringify(arr.slice(-300)));
+}
+
+function updateNotifyButton() {
+    const btn = document.getElementById("notifyBtn");
+    if (!btn || !("Notification" in window)) return;
+
+    btn.classList.remove("enabled", "denied");
+
+    if (Notification.permission === "granted") {
+        btn.textContent = "🔔 Bildirimler Açık";
+        btn.classList.add("enabled");
+    } else if (Notification.permission === "denied") {
+        btn.textContent = "🔕 Bildirim Engelli";
+        btn.classList.add("denied");
+    } else {
+        btn.textContent = "🔔 Bildirimleri Aç";
+    }
+}
+
+async function enableNotifications() {
+    if (!("Notification" in window)) {
+        alert("Bu tarayıcı Windows bildirimlerini desteklemiyor.");
+        return;
+    }
+
+    const permission = await Notification.requestPermission();
+    updateNotifyButton();
+
+    if (permission === "granted") {
+        new Notification("Gol Radar aktif", {
+            body: "Bir takım %65+ gol sinyaline girdiğinde burada uyarılacaksın.",
+            tag: "gol-radar-test"
+        });
+    }
+}
+
+function radarNotification(match, teamName, teamSignal, side) {
+    if (!("Notification" in window) || Notification.permission !== "granted") return;
+
+    const fixtureId = match.fixture_id ?? "x";
+    const scoreKey = `${match.home_goals ?? 0}-${match.away_goals ?? 0}`;
+    const radarKey = `${fixtureId}:${side}:${scoreKey}`;
+
+    if (notifiedRadarKeys.has(radarKey)) return;
+
+    notifiedRadarKeys.add(radarKey);
+    saveNotifiedKeys();
+
+    const title = `⚽ GOL RADARI — %${teamSignal}`;
+    const body =
+        `${match.home_team} ${match.home_goals ?? 0}-${match.away_goals ?? 0} ${match.away_team}\n` +
+        `${match.minute ?? 0}' • Gol beklenen: ${teamName}`;
+
+    const n = new Notification(title, {
+        body: body,
+        tag: radarKey,
+        requireInteraction: true
+    });
+
+    n.onclick = function() {
+        window.focus();
+        n.close();
+    };
+}
+
+function checkTeamRadarNotifications(matches) {
+    if (!Array.isArray(matches)) return;
+
+    for (const m of matches) {
+        const homeSignal = Number(m.home_goal_signal || 0);
+        const awaySignal = Number(m.away_goal_signal || 0);
+
+        if (m.match_expected_team === m.home_team && homeSignal >= TEAM_RADAR_THRESHOLD) {
+            radarNotification(m, m.home_team, homeSignal, "home");
+        }
+
+        if (m.match_expected_team === m.away_team && awaySignal >= TEAM_RADAR_THRESHOLD) {
+            radarNotification(m, m.away_team, awaySignal, "away");
+        }
+
+        if (!m.match_expected_team || m.match_expected_team === "İki takım da") {
+            if (homeSignal >= TEAM_RADAR_THRESHOLD && homeSignal >= awaySignal + 8) {
+                radarNotification(m, m.home_team, homeSignal, "home");
+            }
+
+            if (awaySignal >= TEAM_RADAR_THRESHOLD && awaySignal >= homeSignal + 8) {
+                radarNotification(m, m.away_team, awaySignal, "away");
+            }
+        }
+    }
+}
+
 function esc(v) {
     return String(v ?? "")
         .replaceAll("&", "&amp;")
@@ -1502,6 +1618,7 @@ async function loadMatches() {
         const data = await r.json();
         const matches = data.matches || [];
 
+        checkTeamRadarNotifications(matches);
         document.getElementById("visibleMatches").textContent = matches.length;
 
         const root = document.getElementById("matches");
@@ -1607,6 +1724,7 @@ async function refreshAll() {
     await Promise.all([loadStatus(), loadMatches()]);
 }
 
+updateNotifyButton();
 refreshAll();
 setInterval(refreshAll, 5000);
 </script>
