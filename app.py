@@ -159,6 +159,16 @@ def serialize_matches_for_web() -> List[Dict[str, Any]]:
             elif expected_team_key == "away":
                 expected_team_name = match.get("away_team")
 
+            match_expected_key = item.get("match_expected_team")
+            match_expected_name = None
+
+            if match_expected_key == "home":
+                match_expected_name = match.get("home_team")
+            elif match_expected_key == "away":
+                match_expected_name = match.get("away_team")
+            elif match_expected_key == "both":
+                match_expected_name = "İki takım da"
+
             items.append({
                 "fixture_id": fixture_id,
                 "league": match.get("league"),
@@ -178,6 +188,11 @@ def serialize_matches_for_web() -> List[Dict[str, Any]]:
                 "first_half_active": item.get("first_half_signal", 0) >= FIRST_HALF_LIMIT,
                 "first_half_reasons": item.get("first_half_reasons", []),
                 "expected_team": expected_team_name,
+                "match_expected_team": match_expected_name,
+                "home_goal_signal": item.get("home_goal_signal", 0),
+                "away_goal_signal": item.get("away_goal_signal", 0),
+                "btts_signal": item.get("btts_signal", 0),
+                "btts_label": item.get("btts_label", "DÜŞÜK"),
                 "stats": {
                     "shots": stats.get("shots", 0),
                     "target": stats.get("target", 0),
@@ -497,6 +512,151 @@ def calculate_signal(
     return min(score, 100), reasons
 
 
+
+def calculate_team_goal_signal(
+    team_stats: Dict[str, float],
+    minute: int,
+    team_goals: int,
+    opponent_goals: int
+) -> int:
+    """
+    Takımın mevcut baskısını 0-100 arası bir GOL SİNYALİ puanına çevirir.
+    Bu değer istatistiksel olarak kalibre edilmiş bahis olasılığı değildir;
+    botun canlı maç baskı skorudur.
+    """
+    score = 0
+
+    shots = team_stats.get("shots", 0)
+    target = team_stats.get("target", 0)
+    corners = team_stats.get("corners", 0)
+    inside = team_stats.get("inside", 0)
+
+    # Şut
+    if shots >= 10:
+        score += 20
+    elif shots >= 7:
+        score += 14
+    elif shots >= 4:
+        score += 8
+
+    # İsabetli şut
+    if target >= 5:
+        score += 30
+    elif target >= 3:
+        score += 20
+    elif target >= 2:
+        score += 12
+    elif target >= 1:
+        score += 5
+
+    # Korner
+    if corners >= 6:
+        score += 15
+    elif corners >= 4:
+        score += 10
+    elif corners >= 2:
+        score += 5
+
+    # Ceza sahası içi şut
+    if inside >= 7:
+        score += 20
+    elif inside >= 5:
+        score += 14
+    elif inside >= 3:
+        score += 8
+
+    # Maçın son bölümünde baskının önemi artar
+    if minute >= 76:
+        score += 8
+    elif minute >= 55:
+        score += 5
+
+    # Geride olan takımın gol ihtiyacı
+    if team_goals < opponent_goals and minute >= 60:
+        score += 8
+    elif team_goals == opponent_goals and minute >= 60:
+        score += 5
+
+    return min(score, 100)
+
+
+def calculate_match_team_expectation(
+    total: Dict[str, Any],
+    minute: int,
+    home_goals: int,
+    away_goals: int
+) -> Tuple[int, int, Optional[str]]:
+    home_signal = calculate_team_goal_signal(
+        total["home"], minute, home_goals, away_goals
+    )
+    away_signal = calculate_team_goal_signal(
+        total["away"], minute, away_goals, home_goals
+    )
+
+    expected_team = None
+
+    # Çok düşük baskıda takım tahmini üretme.
+    # Anlamlı fark varsa daha güçlü tarafı seç.
+    if max(home_signal, away_signal) >= 35:
+        if home_signal >= away_signal + 8:
+            expected_team = "home"
+        elif away_signal >= home_signal + 8:
+            expected_team = "away"
+        elif max(home_signal, away_signal) >= 55:
+            expected_team = "both"
+
+    return home_signal, away_signal, expected_team
+
+
+def calculate_btts_signal(
+    home_signal: int,
+    away_signal: int,
+    minute: int,
+    home_goals: int,
+    away_goals: int
+) -> Tuple[int, str]:
+    """
+    KG Var değerlendirmesi.
+    Skor ve gol atması gereken takımın baskısı birlikte değerlendirilir.
+    """
+    # İki takım da zaten gol attıysa KG Var gerçekleşmiştir.
+    if home_goals > 0 and away_goals > 0:
+        return 100, "GERÇEKLEŞTİ"
+
+    # Kalan süre azaldıkça henüz atılması gereken gol/goller için puanı azalt.
+    if minute <= 60:
+        time_factor = 1.00
+    elif minute <= 70:
+        time_factor = 0.90
+    elif minute <= 80:
+        time_factor = 0.78
+    elif minute <= 90:
+        time_factor = 0.65
+    else:
+        time_factor = 0.55
+
+    if home_goals > 0 and away_goals == 0:
+        # KG için deplasmanın golü gerekiyor.
+        kg_score = round(away_signal * time_factor)
+    elif away_goals > 0 and home_goals == 0:
+        # KG için ev sahibinin golü gerekiyor.
+        kg_score = round(home_signal * time_factor)
+    else:
+        # 0-0'da iki takımın da gol bulması gerektiğinden zayıf taraf belirleyici.
+        kg_score = round(min(home_signal, away_signal) * time_factor * 0.85)
+
+    kg_score = max(0, min(100, kg_score))
+
+    if kg_score >= 65:
+        label = "YÜKSEK"
+    elif kg_score >= 45:
+        label = "ORTA"
+    else:
+        label = "DÜŞÜK"
+
+    return kg_score, label
+
+
 def calculate_first_half_signal(
     total: Dict[str, Any],
     minute: int,
@@ -667,6 +827,11 @@ def analyze_match(match: Dict[str, Any]) -> bool:
                 "first_half_signal": 0,
                 "first_half_reasons": [],
                 "expected_team": None,
+                "match_expected_team": None,
+                "home_goal_signal": 0,
+                "away_goal_signal": 0,
+                "btts_signal": 0,
+                "btts_label": "DÜŞÜK",
                 "match": snapshot,
                 "stats_error": None,
                 "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -683,6 +848,21 @@ def analyze_match(match: Dict[str, Any]) -> bool:
 
     first_half_signal, first_half_reasons, expected_team = calculate_first_half_signal(
         total,
+        minute,
+        home_goals,
+        away_goals,
+    )
+
+    home_goal_signal, away_goal_signal, match_expected_team = calculate_match_team_expectation(
+        total,
+        minute,
+        home_goals,
+        away_goals,
+    )
+
+    btts_signal, btts_label = calculate_btts_signal(
+        home_goal_signal,
+        away_goal_signal,
         minute,
         home_goals,
         away_goals,
@@ -706,6 +886,11 @@ def analyze_match(match: Dict[str, Any]) -> bool:
         current["first_half_signal"] = first_half_signal
         current["first_half_reasons"] = first_half_reasons
         current["expected_team"] = expected_team
+        current["match_expected_team"] = match_expected_team
+        current["home_goal_signal"] = home_goal_signal
+        current["away_goal_signal"] = away_goal_signal
+        current["btts_signal"] = btts_signal
+        current["btts_label"] = btts_label
         current["stats_error"] = None
         current["last_update"] = datetime.now().isoformat(timespec="seconds")
 
@@ -1180,6 +1365,34 @@ PAGE = r"""
             color: #ffca69;
             font-weight: 700;
         }
+        .team-signals {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0,1fr));
+            gap: 8px;
+            margin-bottom: 14px;
+        }
+        .team-sig {
+            background: #0d1521;
+            border-radius: 10px;
+            padding: 11px;
+            text-align: center;
+        }
+        .team-sig .k {
+            color: #8495ad;
+            font-size: 11px;
+        }
+        .team-sig .v {
+            font-size: 20px;
+            font-weight: 800;
+            margin-top: 4px;
+        }
+        .prediction-box {
+            background: #172337;
+            border-radius: 10px;
+            padding: 12px;
+            margin-bottom: 14px;
+            line-height: 1.65;
+        }
         .empty {
             padding: 34px;
             text-align: center;
@@ -1192,6 +1405,7 @@ PAGE = r"""
             .summary { grid-template-columns: repeat(2, minmax(0,1fr)); }
             .stats { grid-template-columns: repeat(2, minmax(0,1fr)); }
             .signals { grid-template-columns: 1fr; }
+            .team-signals { grid-template-columns: 1fr; }
         }
     </style>
 </head>
@@ -1201,7 +1415,7 @@ PAGE = r"""
         <div>
             <h1>⚽ Gol Sinyal Merkezi</h1>
             <div class="sub">
-                Canlı maçlar gerçek API istatistikleriyle analiz edilir.
+                Canlı maçlar gerçek API istatistikleriyle analiz edilir. Yüzdeler botun canlı baskı sinyal puanlarıdır.
                 <a href="/api/live-leagues" target="_blank" style="color:#7db7ff;margin-left:8px;">Canlı lig teşhisi</a>
             </div>
         </div>
@@ -1310,8 +1524,16 @@ async function loadMatches() {
                 : "";
 
             const expected = m.expected_team
-                ? `<div class="expected">Beklenen baskın takım: ${esc(m.expected_team)}</div>`
+                ? `<div class="expected">İlk yarı beklenen takım: ${esc(m.expected_team)}</div>`
                 : "";
+
+            const matchExpected = m.match_expected_team
+                ? `<strong>Gol beklenen takım:</strong> ${esc(m.match_expected_team)}`
+                : `<strong>Gol beklenen takım:</strong> Net üstün taraf yok`;
+
+            const kgText = m.btts_label === "GERÇEKLEŞTİ"
+                ? `<strong>KG Var:</strong> GERÇEKLEŞTİ`
+                : `<strong>KG Var:</strong> ${esc(m.btts_label)} — %${m.btts_signal ?? 0}`;
 
             return `
                 <div class="${cls}">
@@ -1336,6 +1558,26 @@ async function loadMatches() {
                                 <div class="title">İlk yarı gol sinyali</div>
                                 <div class="num">%${m.first_half_signal ?? 0}</div>
                             </div>
+                        </div>
+
+                        <div class="team-signals">
+                            <div class="team-sig">
+                                <div class="k">${esc(m.home_team)} gol sinyali</div>
+                                <div class="v">%${m.home_goal_signal ?? 0}</div>
+                            </div>
+                            <div class="team-sig">
+                                <div class="k">${esc(m.away_team)} gol sinyali</div>
+                                <div class="v">%${m.away_goal_signal ?? 0}</div>
+                            </div>
+                            <div class="team-sig">
+                                <div class="k">KG Var sinyali</div>
+                                <div class="v">%${m.btts_signal ?? 0}</div>
+                            </div>
+                        </div>
+
+                        <div class="prediction-box">
+                            ${matchExpected}<br>
+                            ${kgText}
                         </div>
 
                         <div class="stats">
