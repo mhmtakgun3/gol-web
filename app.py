@@ -2,6 +2,7 @@ import os
 import time
 import json
 import threading
+import fcntl
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -26,6 +27,8 @@ FIRST_HALF_LIMIT = int(os.getenv("FIRST_HALF_LIMIT", "65"))
 # API çağrılarının sonsuza kadar beklememesi için
 REQUEST_TIMEOUT = 15
 LIVE_SNAPSHOT_FILE = "/tmp/gol_live_snapshot.json"
+SHARED_STATE_FILE = "/tmp/gol_shared_state.json"
+SCANNER_LOCK_FILE = "/tmp/gol_scanner.lock"
 
 # Basit cache süreleri
 LIVE_CACHE_TTL = 10
@@ -132,6 +135,107 @@ scanner_status = {
 
 scanner_started = False
 scanner_start_lock = threading.Lock()
+
+
+
+# ============================================================
+# PROCESS'LER ARASI ORTAK DURUM
+# ============================================================
+
+def serialize_matches_for_web() -> List[Dict[str, Any]]:
+    """Scanner process'indeki match_memory verisini web için JSON'a çevirir."""
+    with memory_lock:
+        items = []
+
+        for fixture_id, item in match_memory.items():
+            match = item.get("match") or {}
+            stats = item.get("current_stats") or {}
+
+            expected_team_key = item.get("expected_team")
+            expected_team_name = None
+
+            if expected_team_key == "home":
+                expected_team_name = match.get("home_team")
+            elif expected_team_key == "away":
+                expected_team_name = match.get("away_team")
+
+            items.append({
+                "fixture_id": fixture_id,
+                "league": match.get("league"),
+                "country": match.get("country"),
+                "home_team": match.get("home_team"),
+                "away_team": match.get("away_team"),
+                "home_logo": match.get("home_logo"),
+                "away_logo": match.get("away_logo"),
+                "minute": match.get("minute"),
+                "status": match.get("status"),
+                "home_goals": match.get("home_goals"),
+                "away_goals": match.get("away_goals"),
+                "signal": item.get("current_signal", 0),
+                "signal_active": item.get("current_signal", 0) >= SIGNAL_LIMIT,
+                "reasons": item.get("current_reasons", []),
+                "first_half_signal": item.get("first_half_signal", 0),
+                "first_half_active": item.get("first_half_signal", 0) >= FIRST_HALF_LIMIT,
+                "first_half_reasons": item.get("first_half_reasons", []),
+                "expected_team": expected_team_name,
+                "stats": {
+                    "shots": stats.get("shots", 0),
+                    "target": stats.get("target", 0),
+                    "corners": stats.get("corners", 0),
+                    "inside": stats.get("inside", 0),
+                    "home": stats.get("home", {}),
+                    "away": stats.get("away", {}),
+                },
+                "stats_error": item.get("stats_error"),
+                "last_update": item.get("last_update"),
+            })
+
+    items.sort(
+        key=lambda x: (
+            x.get("signal_active", False),
+            x.get("first_half_active", False),
+            x.get("signal", 0),
+            x.get("first_half_signal", 0),
+        ),
+        reverse=True,
+    )
+
+    return items
+
+
+def write_shared_state():
+    """
+    Scanner'ın son durumunu /tmp altında atomik olarak yazar.
+    Web endpoint'leri API'ye gitmeden bu dosyayı okur.
+    """
+    try:
+        with status_lock:
+            status_copy = dict(scanner_status)
+
+        matches_copy = serialize_matches_for_web()
+
+        payload = {
+            "written_at": time.time(),
+            "status": status_copy,
+            "matches": matches_copy,
+        }
+
+        temp_path = SHARED_STATE_FILE + ".tmp"
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+
+        os.replace(temp_path, SHARED_STATE_FILE)
+
+    except Exception as exc:
+        print(f"Shared state yazma hatası: {exc}", flush=True)
+
+
+def read_shared_state() -> Optional[Dict[str, Any]]:
+    try:
+        with open(SHARED_STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
 
 
 # ============================================================
@@ -641,6 +745,17 @@ def remove_finished_matches(active_fixture_ids: set):
 # ============================================================
 
 def scanner_loop():
+    # Gunicorn birden fazla worker açsa bile yalnızca tek process scanner olur.
+    # Lock dosyası açık kaldığı sürece kilit tutulur.
+    try:
+        scanner_lock_handle = open(SCANNER_LOCK_FILE, "w")
+        fcntl.flock(scanner_lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
+        print("ℹ️ Scanner başka bir worker/process tarafından zaten çalıştırılıyor.", flush=True)
+        return
+
+    print("✅ Scanner kilidi alındı. API taramasını yalnızca bu process yapacak.", flush=True)
+
     while True:
         scan_started_ts = time.time()
         scan_started_iso = datetime.now().isoformat(timespec="seconds")
@@ -651,10 +766,21 @@ def scanner_loop():
             scanner_status["last_scan_error"] = None
             scanner_status["last_api_message"] = None
 
+        # Web anında "tarama yapılıyor" durumunu görebilsin.
+        write_shared_state()
+
         analyzed_count = 0
+        should_sleep = True
 
         try:
+            print("\n" + "=" * 60, flush=True)
+            print("📡 CANLI MAÇLAR TARAMASI BAŞLADI", flush=True)
+            print("=" * 60, flush=True)
+
             live_matches, live_error, api_live_count = get_live_matches()
+
+            print(f"📡 API canlı maç sayısı: {api_live_count}", flush=True)
+            print(f"✅ Uygun liglerde canlı maç: {len(live_matches)}", flush=True)
 
             with status_lock:
                 scanner_status["api_live_count"] = api_live_count
@@ -664,43 +790,53 @@ def scanner_loop():
                 with status_lock:
                     scanner_status["last_scan_error"] = live_error
                     scanner_status["last_api_message"] = live_error
+                    scanner_status["analyzed_count"] = 0
 
-                # Kota/servis hatasında gereksiz istatistik çağrısı yapılmaz.
-                time.sleep(CHECK_SECONDS)
-                continue
+                print(f"❌ API hatası: {live_error}", flush=True)
 
-            active_fixture_ids = set()
+            else:
+                active_fixture_ids = set()
 
-            for match in live_matches:
-                fixture_id = ((match.get("fixture") or {}).get("id"))
-                if fixture_id:
-                    active_fixture_ids.add(int(fixture_id))
+                for match in live_matches:
+                    fixture_id = ((match.get("fixture") or {}).get("id"))
+                    if fixture_id:
+                        active_fixture_ids.add(int(fixture_id))
 
-                try:
-                    if analyze_match(match):
-                        analyzed_count += 1
-                except Exception as exc:
-                    with status_lock:
-                        scanner_status["last_scan_error"] = f"Maç analiz hatası: {exc}"
+                    try:
+                        if analyze_match(match):
+                            analyzed_count += 1
+                    except Exception as exc:
+                        with status_lock:
+                            scanner_status["last_scan_error"] = f"Maç analiz hatası: {exc}"
+                        print(f"❌ Maç analiz hatası: {exc}", flush=True)
 
-            remove_finished_matches(active_fixture_ids)
+                remove_finished_matches(active_fixture_ids)
 
-            with status_lock:
-                scanner_status["analyzed_count"] = analyzed_count
+                with status_lock:
+                    scanner_status["analyzed_count"] = analyzed_count
+
+                print(f"📊 Analiz edilen maç: {analyzed_count}", flush=True)
 
         except Exception as exc:
             with status_lock:
                 scanner_status["last_scan_error"] = str(exc)
+            print(f"❌ Scanner hatası: {exc}", flush=True)
 
         finally:
             duration = round(time.time() - scan_started_ts, 2)
+
             with status_lock:
                 scanner_status["running"] = False
                 scanner_status["last_scan_finished"] = datetime.now().isoformat(timespec="seconds")
                 scanner_status["last_scan_duration"] = duration
 
-        time.sleep(CHECK_SECONDS)
+            # Tamamlanmış taramanın status + maç verisini tüm worker'lara paylaş.
+            write_shared_state()
 
+            print(f"⏱ Tarama süresi: {duration} saniye", flush=True)
+            print(f"😴 {CHECK_SECONDS} saniye sonra yeni tarama başlayacak.", flush=True)
+
+        time.sleep(CHECK_SECONDS)
 
 def ensure_scanner_started():
     global scanner_started
@@ -805,9 +941,20 @@ def api_live_leagues():
 
 @app.route("/api/status")
 def api_status():
-    # Bu endpoint API çağrısı ve DB kullanmaz; hızlı cevap verir.
-    with status_lock:
-        data = dict(scanner_status)
+    # API çağrısı YAPMAZ. Scanner'ın /tmp ortak state dosyasını okur.
+    shared = read_shared_state()
+
+    if shared and isinstance(shared.get("status"), dict):
+        data = dict(shared["status"])
+        state_age = round(max(0.0, time.time() - float(shared.get("written_at", 0.0))), 1)
+        data["state_source"] = "shared_file"
+        data["state_age_seconds"] = state_age
+    else:
+        # Scanner henüz ilk state'i yazmadıysa local başlangıç durumunu göster.
+        with status_lock:
+            data = dict(scanner_status)
+        data["state_source"] = "local_fallback"
+        data["state_age_seconds"] = None
 
     data.update({
         "ok": True,
@@ -823,65 +970,23 @@ def api_status():
 
 @app.route("/api/matches")
 def api_matches():
-    with memory_lock:
-        items = []
+    # API çağrısı YAPMAZ. Scanner'ın tamamladığı son analiz snapshot'ını okur.
+    shared = read_shared_state()
 
-        for fixture_id, item in match_memory.items():
-            match = item.get("match") or {}
-            stats = item.get("current_stats") or {}
-
-            expected_team_key = item.get("expected_team")
-            expected_team_name = None
-            if expected_team_key == "home":
-                expected_team_name = match.get("home_team")
-            elif expected_team_key == "away":
-                expected_team_name = match.get("away_team")
-
-            items.append({
-                "fixture_id": fixture_id,
-                "league": match.get("league"),
-                "country": match.get("country"),
-                "home_team": match.get("home_team"),
-                "away_team": match.get("away_team"),
-                "home_logo": match.get("home_logo"),
-                "away_logo": match.get("away_logo"),
-                "minute": match.get("minute"),
-                "status": match.get("status"),
-                "home_goals": match.get("home_goals"),
-                "away_goals": match.get("away_goals"),
-                "signal": item.get("current_signal", 0),
-                "signal_active": item.get("current_signal", 0) >= SIGNAL_LIMIT,
-                "reasons": item.get("current_reasons", []),
-                "first_half_signal": item.get("first_half_signal", 0),
-                "first_half_active": item.get("first_half_signal", 0) >= FIRST_HALF_LIMIT,
-                "first_half_reasons": item.get("first_half_reasons", []),
-                "expected_team": expected_team_name,
-                "stats": {
-                    "shots": stats.get("shots", 0),
-                    "target": stats.get("target", 0),
-                    "corners": stats.get("corners", 0),
-                    "inside": stats.get("inside", 0),
-                    "home": stats.get("home", {}),
-                    "away": stats.get("away", {}),
-                },
-                "stats_error": item.get("stats_error"),
-                "last_update": item.get("last_update"),
-            })
-
-    # Önce aktif normal sinyal, sonra ilk yarı sinyali, sonra skor.
-    items.sort(
-        key=lambda x: (
-            x.get("signal_active", False),
-            x.get("first_half_active", False),
-            x.get("signal", 0),
-            x.get("first_half_signal", 0),
-        ),
-        reverse=True,
-    )
+    if shared and isinstance(shared.get("matches"), list):
+        items = shared["matches"]
+        source = "shared_file"
+        state_age = round(max(0.0, time.time() - float(shared.get("written_at", 0.0))), 1)
+    else:
+        items = serialize_matches_for_web()
+        source = "local_fallback"
+        state_age = None
 
     return jsonify({
         "count": len(items),
         "matches": items,
+        "source": source,
+        "state_age_seconds": state_age,
     })
 
 
