@@ -111,6 +111,7 @@ match_memory: Dict[int, Dict[str, Any]] = {}
 live_cache = {
     "ts": 0.0,
     "data": [],
+    "all_live": [],
 }
 
 stats_cache: Dict[int, Dict[str, Any]] = {}
@@ -191,7 +192,8 @@ def get_live_matches() -> Tuple[List[Dict[str, Any]], Optional[str], int]:
     with cache_lock:
         if now - live_cache["ts"] < LIVE_CACHE_TTL:
             cached = list(live_cache["data"])
-            return cached, None, len(cached)
+            all_cached = list(live_cache.get("all_live", []))
+            return cached, None, len(all_cached)
 
     data, error = api_get("/fixtures", {"live": "all"})
     if data is None:
@@ -212,6 +214,7 @@ def get_live_matches() -> Tuple[List[Dict[str, Any]], Optional[str], int]:
     with cache_lock:
         live_cache["ts"] = now
         live_cache["data"] = list(filtered)
+        live_cache["all_live"] = list(response)
 
     return filtered, None, api_live_count
 
@@ -702,6 +705,68 @@ def ensure_scanner_started():
 # WEB API
 # ============================================================
 
+
+@app.route("/api/live-leagues")
+def api_live_leagues():
+    """
+    TEŞHİS ENDPOINT'İ
+    Ekstra API çağrısı YAPMAZ.
+    Scanner'ın zaten aldığı /fixtures?live=all cevabını cache'ten okur.
+    """
+    with cache_lock:
+        all_live = list(live_cache.get("all_live", []))
+        cache_age = round(max(0.0, time.time() - float(live_cache.get("ts", 0.0))), 1)
+
+    leagues = {}
+
+    for match in all_live:
+        fixture = match.get("fixture") or {}
+        league = match.get("league") or {}
+        teams = match.get("teams") or {}
+        goals = match.get("goals") or {}
+
+        league_id = league.get("id")
+        if league_id is None:
+            continue
+
+        if league_id not in leagues:
+            leagues[league_id] = {
+                "league_id": league_id,
+                "league": league.get("name", ""),
+                "country": league.get("country", ""),
+                "allowed": league_id in ALLOWED_LEAGUES,
+                "match_count": 0,
+                "matches": [],
+            }
+
+        leagues[league_id]["match_count"] += 1
+
+        if len(leagues[league_id]["matches"]) < 5:
+            leagues[league_id]["matches"].append({
+                "fixture_id": fixture.get("id"),
+                "home": (teams.get("home") or {}).get("name"),
+                "away": (teams.get("away") or {}).get("name"),
+                "minute": ((fixture.get("status") or {}).get("elapsed")),
+                "score": f"{goals.get('home', 0)}-{goals.get('away', 0)}",
+            })
+
+    result = sorted(
+        leagues.values(),
+        key=lambda x: (x["allowed"], x["match_count"], x["country"], x["league"]),
+        reverse=True,
+    )
+
+    return jsonify({
+        "ok": True,
+        "note": "Bu endpoint ekstra API isteği yapmaz; scanner cache'ini gösterir.",
+        "cache_age_seconds": cache_age,
+        "total_live_matches": len(all_live),
+        "unique_live_leagues": len(result),
+        "allowed_live_leagues": sum(1 for x in result if x["allowed"]),
+        "leagues": result,
+    })
+
+
 @app.route("/api/status")
 def api_status():
     # Bu endpoint API çağrısı ve DB kullanmaz; hızlı cevap verir.
@@ -994,7 +1059,10 @@ PAGE = r"""
     <div class="top">
         <div>
             <h1>⚽ Gol Sinyal Merkezi</h1>
-            <div class="sub">Canlı maçlar gerçek API istatistikleriyle analiz edilir.</div>
+            <div class="sub">
+                Canlı maçlar gerçek API istatistikleriyle analiz edilir.
+                <a href="/api/live-leagues" target="_blank" style="color:#7db7ff;margin-left:8px;">Canlı lig teşhisi</a>
+            </div>
         </div>
         <div class="status" id="statusText">Bağlanıyor...</div>
     </div>
