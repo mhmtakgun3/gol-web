@@ -112,6 +112,7 @@ cache_lock = threading.Lock()
 status_lock = threading.Lock()
 
 match_memory: Dict[int, Dict[str, Any]] = {}
+bot_pick_history: List[Dict[str, Any]] = []
 
 live_cache = {
     "ts": 0.0,
@@ -150,6 +151,7 @@ def serialize_matches_for_web() -> List[Dict[str, Any]]:
         for fixture_id, item in match_memory.items():
             match = item.get("match") or {}
             stats = item.get("current_stats") or {}
+            period_stats = item.get("period_stats") or stats
 
             expected_team_key = item.get("expected_team")
             expected_team_name = None
@@ -193,6 +195,12 @@ def serialize_matches_for_web() -> List[Dict[str, Any]]:
                 "away_goal_signal": item.get("away_goal_signal", 0),
                 "btts_signal": item.get("btts_signal", 0),
                 "btts_label": item.get("btts_label", "DÜŞÜK"),
+                "period_number": item.get("period_number", 0),
+                "period_started_minute": item.get("period_started_minute"),
+                "bot_pick_score": item.get("bot_pick_score", 0),
+                "bot_pick_text": item.get("bot_pick_text", ""),
+                "bot_pick_reasons": item.get("bot_pick_reasons", []),
+                "bot_pick_best": item.get("bot_pick_best", False),
                 "stats": {
                     "shots": stats.get("shots", 0),
                     "target": stats.get("target", 0),
@@ -201,12 +209,22 @@ def serialize_matches_for_web() -> List[Dict[str, Any]]:
                     "home": stats.get("home", {}),
                     "away": stats.get("away", {}),
                 },
+                "period_stats": {
+                    "shots": period_stats.get("shots", 0),
+                    "target": period_stats.get("target", 0),
+                    "corners": period_stats.get("corners", 0),
+                    "inside": period_stats.get("inside", 0),
+                    "home": period_stats.get("home", {}),
+                    "away": period_stats.get("away", {}),
+                },
                 "stats_error": item.get("stats_error"),
                 "last_update": item.get("last_update"),
             })
 
     items.sort(
         key=lambda x: (
+            x.get("bot_pick_best", False),
+            x.get("bot_pick_score", 0),
             x.get("signal_active", False),
             x.get("first_half_active", False),
             x.get("signal", 0),
@@ -233,6 +251,8 @@ def write_shared_state():
             "written_at": time.time(),
             "status": status_copy,
             "matches": matches_copy,
+            "bot_pick_stats": bot_pick_stats(),
+            "bot_pick_history": list(bot_pick_history[-50:]),
         }
 
         temp_path = SHARED_STATE_FILE + ".tmp"
@@ -657,6 +677,194 @@ def calculate_btts_signal(
     return kg_score, label
 
 
+
+def empty_total_stats() -> Dict[str, Any]:
+    zero_team = {"shots": 0, "target": 0, "corners": 0, "inside": 0}
+    return {
+        "home": dict(zero_team),
+        "away": dict(zero_team),
+        "shots": 0,
+        "target": 0,
+        "corners": 0,
+        "inside": 0,
+    }
+
+
+def subtract_total_stats(
+    current: Dict[str, Any],
+    baseline: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Gol sonrası yalnızca yeni oluşan aksiyonları hesaplar."""
+    if not baseline:
+        return current
+
+    result = empty_total_stats()
+
+    for side in ("home", "away"):
+        for key in ("shots", "target", "corners", "inside"):
+            result[side][key] = max(
+                0,
+                safe_int((current.get(side) or {}).get(key), 0)
+                - safe_int((baseline.get(side) or {}).get(key), 0)
+            )
+
+    for key in ("shots", "target", "corners", "inside"):
+        result[key] = result["home"][key] + result["away"][key]
+
+    return result
+
+
+def calculate_bot_pick(
+    evaluation_stats: Dict[str, Any],
+    normal_signal: int,
+    home_goal_signal: int,
+    away_goal_signal: int,
+    btts_signal: int,
+    btts_label: str,
+    minute: int,
+    home_team: str,
+    away_team: str,
+) -> Tuple[int, str, List[str]]:
+    """
+    Botun 'ben olsam bunu oynarım' seçimi.
+    Yalnızca mevcut istatistiklerden üretilen karar puanıdır.
+    """
+    if minute < BOT_PICK_MINUTE:
+        return 0, "", []
+
+    shots = evaluation_stats.get("shots", 0)
+    target = evaluation_stats.get("target", 0)
+    corners = evaluation_stats.get("corners", 0)
+    inside = evaluation_stats.get("inside", 0)
+
+    tempo_score = min(
+        100,
+        shots * 4 + target * 10 + corners * 3 + inside * 5
+    )
+
+    strongest_team_signal = max(home_goal_signal, away_goal_signal)
+
+    score = round(
+        normal_signal * 0.45
+        + strongest_team_signal * 0.35
+        + tempo_score * 0.20
+    )
+
+    # 60-85 arası canlı gol seçimleri için en değerli pencere.
+    if 60 <= minute <= 85:
+        score += 5
+    elif minute >= 89:
+        score -= 8
+
+    score = max(0, min(100, score))
+
+    reasons = []
+    if target >= 5:
+        reasons.append("İsabetli şut baskısı güçlü")
+    if inside >= 7:
+        reasons.append("Ceza sahası içi aksiyon yüksek")
+    if shots >= 12:
+        reasons.append("Maç temposu yüksek")
+    if strongest_team_signal >= 70:
+        reasons.append("Bir takımın gol radarı çok güçlü")
+
+    gap = abs(home_goal_signal - away_goal_signal)
+
+    if home_goal_signal >= 70 and home_goal_signal > away_goal_signal + 12:
+        pick_text = f"{home_team} gol atar"
+    elif away_goal_signal >= 70 and away_goal_signal > home_goal_signal + 12:
+        pick_text = f"{away_team} gol atar"
+    elif btts_label != "GERÇEKLEŞTİ" and btts_signal >= 65:
+        pick_text = "KG Var"
+    else:
+        pick_text = "Maçta bir gol daha"
+
+    return score, pick_text, reasons
+
+
+def mark_open_picks_won(
+    fixture_id: int,
+    minute: int,
+    new_score: Tuple[int, int]
+) -> None:
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    for pick in bot_pick_history:
+        if pick.get("fixture_id") == fixture_id and pick.get("status") == "OPEN":
+            pick["status"] = "WON"
+            pick["result_minute"] = minute
+            pick["result_score"] = list(new_score)
+            pick["result_at"] = now_iso
+
+
+def bot_pick_stats() -> Dict[str, Any]:
+    finished = [p for p in bot_pick_history if p.get("status") in ("WON", "LOST")]
+    won = sum(1 for p in finished if p.get("status") == "WON")
+    lost = sum(1 for p in finished if p.get("status") == "LOST")
+    total = len(finished)
+    success_rate = round((won / total) * 100, 1) if total else 0.0
+    return {
+        "total": total,
+        "won": won,
+        "lost": lost,
+        "open": sum(1 for p in bot_pick_history if p.get("status") == "OPEN"),
+        "success_rate": success_rate,
+    }
+
+
+def finalize_best_bot_pick() -> None:
+    """
+    Her tarama sonunda bütün canlı maçlar arasından o anki en güçlü
+    BOTUN SEÇİMİ adayını belirler ve seçim geçmişine kaydeder.
+    """
+    with memory_lock:
+        for item in match_memory.values():
+            item["bot_pick_best"] = False
+
+        candidates = [
+            item for item in match_memory.values()
+            if item.get("bot_pick_score", 0) >= BOT_PICK_LIMIT
+            and item.get("bot_pick_text")
+        ]
+
+        if not candidates:
+            return
+
+        best = max(candidates, key=lambda x: x.get("bot_pick_score", 0))
+        best["bot_pick_best"] = True
+
+        match = best.get("match") or {}
+        fixture_id = best.get("fixture_id")
+        score = tuple(best.get("score") or (0, 0))
+        period_key = f"{fixture_id}:{score[0]}-{score[1]}"
+
+        # Aynı skor döneminde aynı seçimi tekrar tekrar kaydetme.
+        if best.get("bot_pick_record_key") == period_key:
+            return
+
+        best["bot_pick_record_key"] = period_key
+
+        bot_pick_history.append({
+            "id": f"{period_key}:{int(time.time())}",
+            "fixture_id": fixture_id,
+            "home_team": match.get("home_team"),
+            "away_team": match.get("away_team"),
+            "league": match.get("league"),
+            "minute": match.get("minute"),
+            "pick_score": best.get("bot_pick_score", 0),
+            "pick_text": best.get("bot_pick_text", ""),
+            "pick_reasons": list(best.get("bot_pick_reasons") or []),
+            "pick_scoreline": list(score),
+            "period_number": best.get("period_number", 0),
+            "status": "OPEN",
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        })
+
+        # Render /tmp state sonsuza kadar büyümesin.
+        if len(bot_pick_history) > 200:
+            del bot_pick_history[:-200]
+
+
+
 def calculate_first_half_signal(
     total: Dict[str, Any],
     minute: int,
@@ -832,6 +1040,15 @@ def analyze_match(match: Dict[str, Any]) -> bool:
                 "away_goal_signal": 0,
                 "btts_signal": 0,
                 "btts_label": "DÜŞÜK",
+                "period_baseline": None,
+                "period_stats": total,
+                "period_number": 0,
+                "period_started_minute": snapshot["minute"],
+                "bot_pick_score": 0,
+                "bot_pick_text": "",
+                "bot_pick_reasons": [],
+                "bot_pick_best": False,
+                "bot_pick_record_key": None,
                 "match": snapshot,
                 "stats_error": None,
                 "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -839,13 +1056,44 @@ def analyze_match(match: Dict[str, Any]) -> bool:
             }
         return True
 
+    # Önce skor değişimini belirle. Gol olduysa yeni bir analiz dönemi başlat.
+    with memory_lock:
+        current = match_memory.get(int(fixture_id))
+        if current is None:
+            return False
+
+        previous_score = tuple(current.get("score", current_score))
+        score_changed = previous_score != current_score
+
+        if score_changed:
+            mark_open_picks_won(int(fixture_id), minute, current_score)
+            current["score"] = current_score
+            current["signal_sent"] = False
+            current["first_half_sent"] = False
+            current["period_baseline"] = total
+            current["period_number"] = safe_int(current.get("period_number"), 0) + 1
+            current["period_started_minute"] = minute
+            current["bot_pick_record_key"] = None
+
+        period_baseline = current.get("period_baseline")
+        period_number = safe_int(current.get("period_number"), 0)
+
+    # İlk gol öncesi toplam maç verisi kullanılır.
+    # Bir gol olduktan sonra ise SADECE golden sonraki yeni aksiyonlar kullanılır.
+    evaluation_total = (
+        subtract_total_stats(total, period_baseline)
+        if period_number > 0
+        else total
+    )
+
     normal_signal, normal_reasons = calculate_signal(
-        total,
+        evaluation_total,
         minute,
         home_goals,
         away_goals,
     )
 
+    # İlk yarı analizi toplam istatistik üzerinden kalır.
     first_half_signal, first_half_reasons, expected_team = calculate_first_half_signal(
         total,
         minute,
@@ -854,7 +1102,7 @@ def analyze_match(match: Dict[str, Any]) -> bool:
     )
 
     home_goal_signal, away_goal_signal, match_expected_team = calculate_match_team_expectation(
-        total,
+        evaluation_total,
         minute,
         home_goals,
         away_goals,
@@ -868,19 +1116,26 @@ def analyze_match(match: Dict[str, Any]) -> bool:
         away_goals,
     )
 
+    bot_pick_score, bot_pick_text, bot_pick_reasons = calculate_bot_pick(
+        evaluation_total,
+        normal_signal,
+        home_goal_signal,
+        away_goal_signal,
+        btts_signal,
+        btts_label,
+        minute,
+        snapshot["home_team"],
+        snapshot["away_team"],
+    )
+
     with memory_lock:
         current = match_memory.get(int(fixture_id))
         if current is None:
             return False
 
-        # Gol olmuşsa PC çalışan sürümde toplam istatistik korunur,
-        # yalnızca sinyal gönderilmiş bayrağı yeniden açılır.
-        if tuple(current.get("score", current_score)) != current_score:
-            current["score"] = current_score
-            current["signal_sent"] = False
-
         current["match"] = snapshot
         current["current_stats"] = total
+        current["period_stats"] = evaluation_total
         current["current_signal"] = normal_signal
         current["current_reasons"] = normal_reasons
         current["first_half_signal"] = first_half_signal
@@ -891,10 +1146,12 @@ def analyze_match(match: Dict[str, Any]) -> bool:
         current["away_goal_signal"] = away_goal_signal
         current["btts_signal"] = btts_signal
         current["btts_label"] = btts_label
+        current["bot_pick_score"] = bot_pick_score
+        current["bot_pick_text"] = bot_pick_text
+        current["bot_pick_reasons"] = bot_pick_reasons
         current["stats_error"] = None
         current["last_update"] = datetime.now().isoformat(timespec="seconds")
 
-        # Web sürümünde "sent" sadece sinyalin eşik üstüne çıktığını izlemek için tutulur.
         if normal_signal >= SIGNAL_LIMIT:
             current["signal_sent"] = True
 
@@ -913,6 +1170,10 @@ def remove_finished_matches(active_fixture_ids: set):
         ]
 
         for fixture_id in stale_ids:
+            for pick in bot_pick_history:
+                if pick.get("fixture_id") == fixture_id and pick.get("status") == "OPEN":
+                    pick["status"] = "LOST"
+                    pick["result_at"] = datetime.now().isoformat(timespec="seconds")
             match_memory.pop(fixture_id, None)
 
     with cache_lock:
@@ -996,6 +1257,7 @@ def scanner_loop():
                         print(f"❌ Maç analiz hatası: {exc}", flush=True)
 
                 remove_finished_matches(active_fixture_ids)
+                finalize_best_bot_pick()
 
                 with status_lock:
                     scanner_status["analyzed_count"] = analyzed_count
@@ -1141,12 +1403,18 @@ def api_status():
         data["state_source"] = "local_fallback"
         data["state_age_seconds"] = None
 
+    if shared and isinstance(shared.get("bot_pick_stats"), dict):
+        data["bot_pick_stats"] = shared.get("bot_pick_stats")
+    else:
+        data["bot_pick_stats"] = bot_pick_stats()
+
     data.update({
         "ok": True,
         "api_key_configured": bool(API_KEY),
         "check_seconds": CHECK_SECONDS,
         "signal_limit": SIGNAL_LIMIT,
         "first_half_limit": FIRST_HALF_LIMIT,
+        "bot_pick_limit": BOT_PICK_LIMIT,
         "allowed_league_count": len(ALLOWED_LEAGUES),
     })
 
@@ -1170,6 +1438,8 @@ def api_matches():
     return jsonify({
         "count": len(items),
         "matches": items,
+        "bot_pick_stats": (shared or {}).get("bot_pick_stats", bot_pick_stats()),
+        "bot_pick_history": (shared or {}).get("bot_pick_history", list(bot_pick_history[-50:])),
         "source": source,
         "state_age_seconds": state_age,
     })
@@ -1402,6 +1672,29 @@ PAGE = r"""
             border-radius: 16px;
         }
 
+
+        .bot-pick-box {
+            margin: 12px 0;
+            padding: 14px;
+            border-radius: 12px;
+            background: #33280f;
+            border: 1px solid #8f7222;
+        }
+        .bot-pick-title {
+            font-weight: 900;
+            font-size: 16px;
+            margin-bottom: 6px;
+        }
+        .bot-pick-choice {
+            font-size: 20px;
+            font-weight: 900;
+        }
+        .period-box {
+            margin-top: 10px;
+            color: #aebbd0;
+            font-size: 12px;
+        }
+
         .notify-btn {
             border: 0;
             border-radius: 999px;
@@ -1428,7 +1721,7 @@ PAGE = r"""
         <div>
             <h1>⚽ Gol Sinyal Merkezi</h1>
             <div class="sub">
-                Canlı maçlar gerçek API istatistikleriyle analiz edilir. Yüzdeler botun canlı baskı sinyal puanlarıdır.
+                Canlı maçlar gerçek API istatistikleriyle analiz edilir. Yüzdeler botun canlı baskı sinyal puanlarıdır. BOTUN SEÇİMİ 78/100 ve üzerindeki en güçlü adayı gösterir; gol sonrası yeni aksiyon dönemi başlar.
                 <a href="/api/live-leagues" target="_blank" style="color:#7db7ff;margin-left:8px;">Canlı lig teşhisi</a>
             </div>
         </div>
@@ -1456,6 +1749,18 @@ PAGE = r"""
         <div class="summary-card">
             <div class="label">Web'de görünen maç</div>
             <div class="value" id="visibleMatches">0</div>
+        </div>
+        <div class="summary-card">
+            <div class="label">Bot seçimi sonuçlandı</div>
+            <div class="value" id="pickTotal">0</div>
+        </div>
+        <div class="summary-card">
+            <div class="label">Bot seçimi kazandı</div>
+            <div class="value" id="pickWon">0</div>
+        </div>
+        <div class="summary-card">
+            <div class="label">Başarı oranı</div>
+            <div class="value" id="pickRate">%0</div>
         </div>
     </div>
 
@@ -1534,6 +1839,42 @@ function radarNotification(match, teamName, teamSignal, side) {
         window.focus();
         n.close();
     };
+}
+
+
+function botPickNotification(match) {
+    if (!("Notification" in window) || Notification.permission !== "granted") return;
+    if (!match.bot_pick_best || Number(match.bot_pick_score || 0) < 78) return;
+
+    const fixtureId = match.fixture_id ?? "x";
+    const scoreKey = `${match.home_goals ?? 0}-${match.away_goals ?? 0}`;
+    const key = `BOT:${fixtureId}:${scoreKey}`;
+
+    if (notifiedRadarKeys.has(key)) return;
+    notifiedRadarKeys.add(key);
+    saveNotifiedKeys();
+
+    const n = new Notification(`🧠 BOTUN SEÇİMİ — ${match.bot_pick_score}/100`, {
+        body:
+            `${match.home_team} ${match.home_goals ?? 0}-${match.away_goals ?? 0} ${match.away_team}\n` +
+            `${match.minute ?? 0}' • ${match.bot_pick_text}`,
+        tag: key,
+        requireInteraction: true
+    });
+
+    n.onclick = function() {
+        window.focus();
+        n.close();
+    };
+}
+
+function checkBotPickNotifications(matches) {
+    if (!Array.isArray(matches)) return;
+    const best = matches
+        .filter(m => m.bot_pick_best)
+        .sort((a, b) => Number(b.bot_pick_score || 0) - Number(a.bot_pick_score || 0))[0];
+
+    if (best) botPickNotification(best);
 }
 
 function checkTeamRadarNotifications(matches) {
@@ -1619,6 +1960,13 @@ async function loadMatches() {
         const matches = data.matches || [];
 
         checkTeamRadarNotifications(matches);
+        checkBotPickNotifications(matches);
+
+        const ps = data.bot_pick_stats || {};
+        document.getElementById("pickTotal").textContent = ps.total ?? 0;
+        document.getElementById("pickWon").textContent = ps.won ?? 0;
+        document.getElementById("pickRate").textContent = `%${ps.success_rate ?? 0}`;
+
         document.getElementById("visibleMatches").textContent = matches.length;
 
         const root = document.getElementById("matches");
@@ -1652,6 +2000,24 @@ async function loadMatches() {
                 ? `<strong>KG Var:</strong> GERÇEKLEŞTİ`
                 : `<strong>KG Var:</strong> ${esc(m.btts_label)} — %${m.btts_signal ?? 0}`;
 
+            const botPickHtml = m.bot_pick_best && Number(m.bot_pick_score || 0) >= 78
+                ? `<div class="bot-pick-box">
+                    <div class="bot-pick-title">🧠 BOTUN SEÇİMİ • ${m.bot_pick_score}/100</div>
+                    <div class="bot-pick-choice">${esc(m.bot_pick_text)}</div>
+                    <div style="margin-top:8px">${reasonTags(m.bot_pick_reasons)}</div>
+                   </div>`
+                : "";
+
+            const periodHtml = Number(m.period_number || 0) > 0
+                ? `<div class="period-box">
+                    🔄 Son golden sonraki yeni aksiyonlar değerlendiriliyor:
+                    ${num(m.period_stats?.shots)} şut •
+                    ${num(m.period_stats?.target)} isabetli •
+                    ${num(m.period_stats?.corners)} korner •
+                    ${num(m.period_stats?.inside)} ceza sahası içi
+                   </div>`
+                : "";
+
             return `
                 <div class="${cls}">
                     <div class="card-head">
@@ -1666,7 +2032,10 @@ async function loadMatches() {
                     </div>
 
                     <div class="body">
-                        <div class="signals">
+                        ${botPickHtml}
+                    ${periodHtml}
+
+                    <div class="signals">
                             <div class="sig ${m.signal_active ? "active" : ""}">
                                 <div class="title">Gol sinyali</div>
                                 <div class="num">%${m.signal ?? 0}</div>
