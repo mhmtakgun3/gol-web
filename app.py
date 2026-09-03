@@ -23,6 +23,8 @@ API_KEY = os.getenv("API_KEY", "").strip()
 CHECK_SECONDS = int(os.getenv("CHECK_SECONDS", "30"))
 SIGNAL_LIMIT = int(os.getenv("SIGNAL_LIMIT", "65"))
 FIRST_HALF_LIMIT = int(os.getenv("FIRST_HALF_LIMIT", "65"))
+BOT_PICK_LIMIT = 78
+BOT_PICK_MINUTE = 55
 
 # API çağrılarının sonsuza kadar beklememesi için
 REQUEST_TIMEOUT = 15
