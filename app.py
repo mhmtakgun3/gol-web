@@ -784,15 +784,66 @@ def calculate_bot_pick(
     return score, pick_text, reasons
 
 
-def mark_open_picks_won(
+def resolve_open_picks_after_goal(
     fixture_id: int,
     minute: int,
-    new_score: Tuple[int, int]
+    old_score: Tuple[int, int],
+    new_score: Tuple[int, int],
 ) -> None:
+    """
+    Gol sonrası açık BOT seçimlerini seçim türüne göre sonuçlandırır.
+
+    - "Maçta bir gol daha" -> herhangi bir yeni gol = WON
+    - "<Ev sahibi> gol atar" -> sadece ev sahibi golü = WON
+    - "<Deplasman> gol atar" -> sadece deplasman golü = WON
+    - "KG Var" -> yeni skorla iki takım da gol attıysa = WON
+    - Yanlış takım gol attıysa takım-gol seçimi LOST olur
+    """
     now_iso = datetime.now().isoformat(timespec="seconds")
+
+    old_home, old_away = old_score
+    new_home, new_away = new_score
+
+    home_goal_happened = new_home > old_home
+    away_goal_happened = new_away > old_away
+
     for pick in bot_pick_history:
-        if pick.get("fixture_id") == fixture_id and pick.get("status") == "OPEN":
-            pick["status"] = "WON"
+        if pick.get("fixture_id") != fixture_id or pick.get("status") != "OPEN":
+            continue
+
+        pick_text = (pick.get("pick_text") or "").strip()
+        home_team = (pick.get("home_team") or "").strip()
+        away_team = (pick.get("away_team") or "").strip()
+
+        result = None
+
+        if pick_text == "Maçta bir gol daha":
+            if home_goal_happened or away_goal_happened:
+                result = "WON"
+
+        elif pick_text == "KG Var":
+            if new_home > 0 and new_away > 0:
+                result = "WON"
+            # KG Var için tek gol henüz seçimi bitirmez; OPEN kalır.
+
+        elif home_team and pick_text == f"{home_team} gol atar":
+            if home_goal_happened:
+                result = "WON"
+            elif away_goal_happened:
+                result = "LOST"
+
+        elif away_team and pick_text == f"{away_team} gol atar":
+            if away_goal_happened:
+                result = "WON"
+            elif home_goal_happened:
+                result = "LOST"
+
+        else:
+            # Tanınmayan seçim tipi varsa herhangi bir golü otomatik WON sayma.
+            result = None
+
+        if result is not None:
+            pick["status"] = result
             pick["result_minute"] = minute
             pick["result_score"] = list(new_score)
             pick["result_at"] = now_iso
@@ -854,6 +905,13 @@ def finalize_best_bot_pick() -> None:
             "minute": match.get("minute"),
             "pick_score": best.get("bot_pick_score", 0),
             "pick_text": best.get("bot_pick_text", ""),
+            "pick_type": (
+                "MATCH_GOAL"
+                if best.get("bot_pick_text") == "Maçta bir gol daha"
+                else "BTTS"
+                if best.get("bot_pick_text") == "KG Var"
+                else "TEAM_GOAL"
+            ),
             "pick_reasons": list(best.get("bot_pick_reasons") or []),
             "pick_scoreline": list(score),
             "period_number": best.get("period_number", 0),
@@ -1068,7 +1126,7 @@ def analyze_match(match: Dict[str, Any]) -> bool:
         score_changed = previous_score != current_score
 
         if score_changed:
-            mark_open_picks_won(int(fixture_id), minute, current_score)
+            resolve_open_picks_after_goal(int(fixture_id), minute, previous_score, current_score)
             current["score"] = current_score
             current["signal_sent"] = False
             current["first_half_sent"] = False
