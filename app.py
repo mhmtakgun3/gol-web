@@ -1,6 +1,7 @@
 import os
 import time
 import json
+import re
 import threading
 import fcntl
 from datetime import datetime
@@ -29,6 +30,10 @@ BOT_PICK_CONFIRM_SCANS = 2
 MOMENTUM_WINDOW_SECONDS = 300
 MOMENTUM_LONG_SECONDS = 600
 TREND_HISTORY_MAX = 24
+
+# Canlı dış oran filtresi
+LIVE_ODDS_MIN = 1.50
+LIVE_ODDS_CACHE_TTL = 60
 
 # API çağrılarının sonsuza kadar beklememesi için
 REQUEST_TIMEOUT = 15
@@ -128,6 +133,12 @@ live_cache = {
 
 stats_cache: Dict[int, Dict[str, Any]] = {}
 
+live_odds_cache = {
+    "ts": 0.0,
+    "data": [],
+    "error": None,
+}
+
 scanner_status = {
     "running": False,
     "last_scan_started": None,
@@ -217,6 +228,13 @@ def serialize_matches_for_web() -> List[Dict[str, Any]]:
                 "momentum_delta_5m": item.get("momentum_delta_5m", {}),
                 "momentum_delta_10m": item.get("momentum_delta_10m", {}),
                 "scenario_adjustment": item.get("scenario_adjustment", 0),
+                "live_odd": item.get("live_odd"),
+                "live_odd_market": item.get("live_odd_market"),
+                "live_odd_selection": item.get("live_odd_selection"),
+                "live_odd_update": item.get("live_odd_update"),
+                "odds_qualified": item.get("odds_qualified", False),
+                "odds_min_required": LIVE_ODDS_MIN,
+                "odds_error": item.get("odds_error"),
                 "stats": {
                     "shots": stats.get("shots", 0),
                     "target": stats.get("target", 0),
@@ -414,6 +432,255 @@ def get_stats(fixture_id: int) -> Tuple[Optional[List[Dict[str, Any]]], Optional
         }
 
     return response, error
+
+
+
+def get_all_live_odds() -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """
+    Tüm canlı odds verisini tek API çağrısıyla alır.
+    Sadece BOT adayı oluştuğunda çağrılır ve 60 sn cache kullanır.
+    """
+    now = time.time()
+
+    with cache_lock:
+        if now - float(live_odds_cache.get("ts", 0)) < LIVE_ODDS_CACHE_TTL:
+            return list(live_odds_cache.get("data") or []), live_odds_cache.get("error")
+
+    data, error = api_get("/odds/live", {})
+
+    if data is None:
+        return [], error
+
+    response = data.get("response", []) or []
+
+    with cache_lock:
+        live_odds_cache["ts"] = now
+        live_odds_cache["data"] = list(response)
+        live_odds_cache["error"] = error
+
+    return response, error
+
+
+def _float_odd(value: Any) -> Optional[float]:
+    try:
+        odd = float(str(value).replace(",", "."))
+        if odd > 1.0:
+            return odd
+    except Exception:
+        pass
+    return None
+
+
+def _float_line(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    text = str(value).strip().replace(",", ".")
+    m = re.search(r"(-?\d+(?:\.\d+)?)", text)
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except Exception:
+        return None
+
+
+def _fixture_odds_entry(
+    all_odds: List[Dict[str, Any]],
+    fixture_id: int
+) -> Optional[Dict[str, Any]]:
+    for entry in all_odds:
+        fid = safe_int(((entry.get("fixture") or {}).get("id")), 0)
+        if fid == safe_int(fixture_id, 0):
+            return entry
+    return None
+
+
+def _candidate_values_for_market(market: Dict[str, Any]) -> List[Dict[str, Any]]:
+    values = market.get("values") or []
+    # Eğer aynı seçimden birden fazla varsa API'nin main=True olanını tercih et.
+    main_values = [v for v in values if v.get("main") is True and not v.get("suspended", False)]
+    if main_values:
+        return main_values
+    return [v for v in values if not v.get("suspended", False)]
+
+
+def find_live_odd_for_pick(
+    fixture_odds: Optional[Dict[str, Any]],
+    pick_text: str,
+    home_team: str,
+    away_team: str,
+    home_goals: int,
+    away_goals: int,
+) -> Optional[Dict[str, Any]]:
+    """
+    BOT seçimini canlı odds marketiyle eşleştirir.
+
+    Maçta bir gol daha:
+      mevcut toplam gole göre Over (toplam_gol + 0.5)
+
+    Takım gol atar:
+      önce Next Goal / Next Team To Score marketi,
+      sonra açıkça takım total-goal marketi aranır.
+
+    KG Var:
+      Both Teams To Score = Yes
+    """
+    if not fixture_odds:
+        return None
+
+    status = fixture_odds.get("status") or {}
+    if status.get("blocked") or status.get("finished"):
+        return None
+
+    markets = fixture_odds.get("odds") or []
+    matches = []
+
+    pick_text_clean = (pick_text or "").strip()
+    total_goals = safe_int(home_goals) + safe_int(away_goals)
+
+    def add_match(market, value, quality=0):
+        odd = _float_odd(value.get("odd"))
+        if odd is None:
+            return
+        matches.append({
+            "odd": odd,
+            "market": market.get("name") or "",
+            "selection": value.get("value") or "",
+            "handicap": value.get("handicap"),
+            "main": value.get("main"),
+            "quality": quality,
+            "update": fixture_odds.get("update"),
+        })
+
+    # --------------------------------------------------------
+    # MAÇTA BİR GOL DAHA -> mevcut total + 0.5 OVER
+    # --------------------------------------------------------
+    if pick_text_clean == "Maçta bir gol daha":
+        wanted_line = total_goals + 0.5
+
+        for market in markets:
+            name = str(market.get("name") or "").lower()
+
+            # Gol total marketi olsun; corner/card vb. olmasın.
+            if not any(k in name for k in ("over/under", "total", "goals")):
+                continue
+            if any(k in name for k in ("corner", "card", "booking", "throw", "offside")):
+                continue
+            if "team" in name or "home" in name or "away" in name:
+                continue
+
+            for value in _candidate_values_for_market(market):
+                val_text = str(value.get("value") or "").lower()
+                if "over" not in val_text:
+                    continue
+
+                line = _float_line(value.get("handicap"))
+                if line is None:
+                    line = _float_line(value.get("value"))
+
+                if line is not None and abs(line - wanted_line) <= 0.01:
+                    add_match(market, value, quality=100)
+
+    # --------------------------------------------------------
+    # KG VAR
+    # --------------------------------------------------------
+    elif pick_text_clean == "KG Var":
+        for market in markets:
+            name = str(market.get("name") or "").lower()
+
+            if not (
+                ("both" in name and "score" in name)
+                or "btts" in name
+                or "both teams" in name
+            ):
+                continue
+
+            for value in _candidate_values_for_market(market):
+                val_text = str(value.get("value") or "").strip().lower()
+                if val_text in ("yes", "evet", "y"):
+                    add_match(market, value, quality=100)
+
+    # --------------------------------------------------------
+    # TAKIM GOL ATAR
+    # --------------------------------------------------------
+    else:
+        side = None
+        team_name = None
+        current_team_goals = 0
+
+        if home_team and pick_text_clean == f"{home_team} gol atar":
+            side = "home"
+            team_name = home_team
+            current_team_goals = safe_int(home_goals)
+        elif away_team and pick_text_clean == f"{away_team} gol atar":
+            side = "away"
+            team_name = away_team
+            current_team_goals = safe_int(away_goals)
+
+        if side:
+            # Önce Next Goal marketi: doğrudan hangi takım sıradaki golü atar.
+            for market in markets:
+                name = str(market.get("name") or "").lower()
+                if "next" not in name or "goal" not in name:
+                    continue
+
+                for value in _candidate_values_for_market(market):
+                    val = str(value.get("value") or "").strip().lower()
+                    team_lower = str(team_name or "").lower()
+
+                    side_match = (
+                        (side == "home" and val in ("home", "1"))
+                        or (side == "away" and val in ("away", "2"))
+                        or (team_lower and team_lower in val)
+                    )
+                    if side_match:
+                        add_match(market, value, quality=120)
+
+            # Fallback: takım total gol over mevcut+0.5
+            wanted_line = current_team_goals + 0.5
+            for market in markets:
+                name = str(market.get("name") or "").lower()
+
+                side_words = (
+                    ("home", "team 1", "1st team")
+                    if side == "home"
+                    else ("away", "team 2", "2nd team")
+                )
+
+                if "goal" not in name and "total" not in name:
+                    continue
+                if not any(word in name for word in side_words):
+                    continue
+                if any(k in name for k in ("corner", "card", "booking")):
+                    continue
+
+                for value in _candidate_values_for_market(market):
+                    val_text = str(value.get("value") or "").lower()
+                    if "over" not in val_text:
+                        continue
+
+                    line = _float_line(value.get("handicap"))
+                    if line is None:
+                        line = _float_line(value.get("value"))
+
+                    if line is not None and abs(line - wanted_line) <= 0.01:
+                        add_match(market, value, quality=90)
+
+    if not matches:
+        return None
+
+    # En açık/doğrudan market önce, aynı kalite içinde main sonra,
+    # ardından oran.
+    matches.sort(
+        key=lambda x: (
+            x.get("quality", 0),
+            1 if x.get("main") is True else 0,
+            x.get("odd", 0),
+        ),
+        reverse=True,
+    )
+    return matches[0]
+
 
 
 # ============================================================
@@ -1068,12 +1335,21 @@ def bot_pick_stats() -> Dict[str, Any]:
 
 def finalize_best_bot_pick() -> None:
     """
-    Her tarama sonunda bütün canlı maçlar arasından o anki en güçlü
-    BOTUN SEÇİMİ adayını belirler ve seçim geçmişine kaydeder.
+    BOT adayları önce tamamen istatistik/momentum/onay sisteminden geçer.
+    Ardından canlı odds tek çağrıyla alınır.
+
+    Nihai BOTUN SEÇİMİ olabilmesi için:
+      - BOT score >= 78
+      - 2 ardışık tarama onayı
+      - eşleşen canlı market bulunması
+      - canlı oran >= 1.50
+
+    Odds yüksek diye maç seçilmez; odds yalnızca son filtredir.
     """
     with memory_lock:
         for item in match_memory.values():
             item["bot_pick_best"] = False
+            item["odds_qualified"] = False
 
         candidates = [
             item for item in match_memory.values()
@@ -1082,10 +1358,79 @@ def finalize_best_bot_pick() -> None:
             and item.get("bot_pick_ready", False)
         ]
 
-        if not candidates:
+        # API çağrısı sırasında lock tutmamak için gerekli alanları kopyala.
+        candidate_snapshots = []
+        for item in candidates:
+            match = item.get("match") or {}
+            candidate_snapshots.append({
+                "fixture_id": item.get("fixture_id"),
+                "bot_pick_score": item.get("bot_pick_score", 0),
+                "bot_pick_text": item.get("bot_pick_text", ""),
+                "home_team": match.get("home_team") or "",
+                "away_team": match.get("away_team") or "",
+                "home_goals": safe_int(match.get("home_goals"), 0),
+                "away_goals": safe_int(match.get("away_goals"), 0),
+            })
+
+    if not candidate_snapshots:
+        return
+
+    # Tek odds çağrısı, 60 sn cache.
+    all_live_odds, odds_error = get_all_live_odds()
+
+    qualified = []
+
+    for c in candidate_snapshots:
+        entry = _fixture_odds_entry(all_live_odds, safe_int(c["fixture_id"], 0))
+
+        odd_info = find_live_odd_for_pick(
+            entry,
+            c["bot_pick_text"],
+            c["home_team"],
+            c["away_team"],
+            c["home_goals"],
+            c["away_goals"],
+        )
+
+        with memory_lock:
+            item = match_memory.get(safe_int(c["fixture_id"], 0))
+            if item is None:
+                continue
+
+            item["odds_error"] = odds_error
+
+            if odd_info:
+                item["live_odd"] = odd_info.get("odd")
+                item["live_odd_market"] = odd_info.get("market")
+                item["live_odd_selection"] = odd_info.get("selection")
+                item["live_odd_update"] = odd_info.get("update")
+                item["odds_qualified"] = float(odd_info.get("odd") or 0) >= LIVE_ODDS_MIN
+            else:
+                item["live_odd"] = None
+                item["live_odd_market"] = None
+                item["live_odd_selection"] = None
+                item["live_odd_update"] = None
+                item["odds_qualified"] = False
+
+            if item.get("odds_qualified"):
+                qualified.append({
+                    "fixture_id": c["fixture_id"],
+                    "bot_pick_score": item.get("bot_pick_score", 0),
+                })
+
+    if not qualified:
+        return
+
+    # Oranı en yüksek olanı değil, BOT kalitesi en yüksek olanı seç.
+    # Böylece yüksek oranı "daha güvenli" sanıp peşinden koşmuyoruz.
+    best_ref = max(qualified, key=lambda x: x.get("bot_pick_score", 0))
+    best_fixture_id = safe_int(best_ref["fixture_id"], 0)
+
+    with memory_lock:
+        best = match_memory.get(best_fixture_id)
+        if best is None:
             return
 
-        best = max(candidates, key=lambda x: x.get("bot_pick_score", 0))
         best["bot_pick_best"] = True
 
         match = best.get("match") or {}
@@ -1130,14 +1475,16 @@ def finalize_best_bot_pick() -> None:
             "btts_signal": best.get("btts_signal", 0),
             "period_stats": best.get("period_stats", {}),
             "full_stats": best.get("current_stats", {}),
+            "live_odd": best.get("live_odd"),
+            "live_odd_market": best.get("live_odd_market"),
+            "live_odd_selection": best.get("live_odd_selection"),
+            "odds_min_required": LIVE_ODDS_MIN,
             "status": "OPEN",
             "created_at": datetime.now().isoformat(timespec="seconds"),
         })
 
-        # Render /tmp state sonsuza kadar büyümesin.
         if len(bot_pick_history) > 200:
             del bot_pick_history[:-200]
-
 
 
 def calculate_first_half_signal(
@@ -1335,6 +1682,12 @@ def analyze_match(match: Dict[str, Any]) -> bool:
                 "momentum_home_score": 0,
                 "momentum_away_score": 0,
                 "scenario_adjustment": 0,
+                "live_odd": None,
+                "live_odd_market": None,
+                "live_odd_selection": None,
+                "live_odd_update": None,
+                "odds_qualified": False,
+                "odds_error": None,
                 "match": snapshot,
                 "stats_error": None,
                 "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -1364,6 +1717,12 @@ def analyze_match(match: Dict[str, Any]) -> bool:
             current["bot_pick_confirm_text"] = ""
             current["bot_pick_ready"] = False
             current["trend_history"] = []
+            current["live_odd"] = None
+            current["live_odd_market"] = None
+            current["live_odd_selection"] = None
+            current["live_odd_update"] = None
+            current["odds_qualified"] = False
+            current["odds_error"] = None
 
         period_baseline = current.get("period_baseline")
         period_number = safe_int(current.get("period_number"), 0)
@@ -1762,6 +2121,8 @@ def api_status():
         "bot_pick_limit": BOT_PICK_LIMIT,
         "bot_pick_confirm_scans": BOT_PICK_CONFIRM_SCANS,
         "momentum_window_seconds": MOMENTUM_WINDOW_SECONDS,
+        "live_odds_min": LIVE_ODDS_MIN,
+        "live_odds_cache_ttl": LIVE_ODDS_CACHE_TTL,
         "allowed_league_count": len(ALLOWED_LEAGUES),
     })
 
@@ -2036,6 +2397,25 @@ PAGE = r"""
             font-weight: 800;
         }
 
+
+        .odds-badge {
+            display: inline-block;
+            margin-top: 8px;
+            padding: 5px 9px;
+            border-radius: 999px;
+            background: #1d6b47;
+            font-weight: 900;
+            font-size: 13px;
+        }
+        .odds-waiting {
+            display: inline-block;
+            margin-top: 8px;
+            padding: 5px 9px;
+            border-radius: 999px;
+            background: #39445a;
+            font-size: 12px;
+        }
+
         .bot-pick-box {
             margin: 12px 0;
             padding: 14px;
@@ -2084,7 +2464,7 @@ PAGE = r"""
         <div>
             <h1>⚽ Gol Sinyal Merkezi</h1>
             <div class="sub">
-                Canlı maçlar gerçek API istatistikleriyle analiz edilir. Yüzdeler botun canlı baskı sinyal puanlarıdır. BOTUN SEÇİMİ 78/100 eşiğini iki ardışık taramada koruyan en güçlü adayı gösterir; son 5–10 dakikalık momentum, skor/dakika senaryosu ve gol sonrası yeni aksiyonlar birlikte değerlendirilir.
+                Canlı maçlar gerçek API istatistikleriyle analiz edilir. Yüzdeler botun canlı baskı sinyal puanlarıdır. BOTUN SEÇİMİ 78/100 eşiğini iki ardışık taramada koruyan, momentum ve skor/dakika filtresinden geçen ve eşleşen canlı dış oranı en az 1.50 olan en güçlü adayı gösterir. Oran yalnızca son filtredir; yüksek oran daha güvenli kabul edilmez.
                 <a href="/api/live-leagues" target="_blank" style="color:#7db7ff;margin-left:8px;">Canlı lig teşhisi</a>
             </div>
         </div>
@@ -2220,7 +2600,8 @@ function botPickNotification(match) {
     const n = new Notification(`🧠 BOTUN SEÇİMİ — ${match.bot_pick_score}/100`, {
         body:
             `${match.home_team} ${match.home_goals ?? 0}-${match.away_goals ?? 0} ${match.away_team}\n` +
-            `${match.minute ?? 0}' • ${match.bot_pick_text}`,
+            `${match.minute ?? 0}' • ${match.bot_pick_text}` +
+            (match.live_odd ? ` • Canlı oran: ${Number(match.live_odd).toFixed(2)}` : ""),
         tag: key,
         requireInteraction: true
     });
@@ -2373,6 +2754,12 @@ async function loadMatches() {
                     🧠 BOT adayı: ${m.bot_pick_score ?? 0}/100
                     &nbsp;|&nbsp;
                     Onay: ${m.bot_pick_confirm_count ?? 0}/${m.bot_pick_confirm_required ?? 2}
+                    ${
+                        m.live_odd
+                        ? `<br>💰 Canlı oran: <strong>${Number(m.live_odd).toFixed(2)}</strong>
+                           • ${m.odds_qualified ? "✅ 1.50+ oran filtresi geçti" : "⛔ 1.50 altı"}`
+                        : ""
+                    }
                    </div>`
                 : "";
 
@@ -2380,6 +2767,15 @@ async function loadMatches() {
                 ? `<div class="bot-pick-box">
                     <div class="bot-pick-title">🧠 BOTUN SEÇİMİ • ${m.bot_pick_score}/100</div>
                     <div class="bot-pick-choice">${esc(m.bot_pick_text)}</div>
+                    ${
+                        m.live_odd
+                        ? `<div class="odds-badge">💰 ORAN ONAYLI • ${Number(m.live_odd).toFixed(2)}</div>
+                           <div style="margin-top:6px;font-size:12px;color:#c8d4e6">
+                               ${esc(m.live_odd_market || "")}
+                               ${m.live_odd_selection ? " • " + esc(m.live_odd_selection) : ""}
+                           </div>`
+                        : ""
+                    }
                     <div style="margin-top:8px">${reasonTags(m.bot_pick_reasons)}</div>
                    </div>`
                 : "";
