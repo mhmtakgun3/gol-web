@@ -1335,16 +1335,11 @@ def bot_pick_stats() -> Dict[str, Any]:
 
 def finalize_best_bot_pick() -> None:
     """
-    BOT adayları önce tamamen istatistik/momentum/onay sisteminden geçer.
-    Ardından canlı odds tek çağrıyla alınır.
+    BOT PICK kararı yalnızca futbol modeliyle verilir:
+    78+ puan + 2 ardışık onay + momentum/skor-dakika modeli.
 
-    Nihai BOTUN SEÇİMİ olabilmesi için:
-      - BOT score >= 78
-      - 2 ardışık tarama onayı
-      - eşleşen canlı market bulunması
-      - canlı oran >= 1.50
-
-    Odds yüksek diye maç seçilmez; odds yalnızca son filtredir.
+    Canlı oran artık zorunlu filtre değildir.
+    Bulunursa sadece bilgi ve performans analizi için eklenir.
     """
     with memory_lock:
         for item in match_memory.values():
@@ -1358,7 +1353,6 @@ def finalize_best_bot_pick() -> None:
             and item.get("bot_pick_ready", False)
         ]
 
-        # API çağrısı sırasında lock tutmamak için gerekli alanları kopyala.
         candidate_snapshots = []
         for item in candidates:
             match = item.get("match") or {}
@@ -1375,14 +1369,11 @@ def finalize_best_bot_pick() -> None:
     if not candidate_snapshots:
         return
 
-    # Tek odds çağrısı, 60 sn cache.
+    # Odds bilgi amaçlıdır; hata veya market bulunamaması seçimi engellemez.
     all_live_odds, odds_error = get_all_live_odds()
-
-    qualified = []
 
     for c in candidate_snapshots:
         entry = _fixture_odds_entry(all_live_odds, safe_int(c["fixture_id"], 0))
-
         odd_info = find_live_odd_for_pick(
             entry,
             c["bot_pick_text"],
@@ -1412,18 +1403,8 @@ def finalize_best_bot_pick() -> None:
                 item["live_odd_update"] = None
                 item["odds_qualified"] = False
 
-            if item.get("odds_qualified"):
-                qualified.append({
-                    "fixture_id": c["fixture_id"],
-                    "bot_pick_score": item.get("bot_pick_score", 0),
-                })
-
-    if not qualified:
-        return
-
-    # Oranı en yüksek olanı değil, BOT kalitesi en yüksek olanı seç.
-    # Böylece yüksek oranı "daha güvenli" sanıp peşinden koşmuyoruz.
-    best_ref = max(qualified, key=lambda x: x.get("bot_pick_score", 0))
+    # Odds değil, BOT puanı en güçlü adayı belirler.
+    best_ref = max(candidate_snapshots, key=lambda x: x.get("bot_pick_score", 0))
     best_fixture_id = safe_int(best_ref["fixture_id"], 0)
 
     with memory_lock:
@@ -1438,11 +1419,18 @@ def finalize_best_bot_pick() -> None:
         score = tuple(best.get("score") or (0, 0))
         period_key = f"{fixture_id}:{score[0]}-{score[1]}"
 
-        # Aynı skor döneminde aynı seçimi tekrar tekrar kaydetme.
         if best.get("bot_pick_record_key") == period_key:
             return
 
         best["bot_pick_record_key"] = period_key
+
+        live_odd = best.get("live_odd")
+        if live_odd is None:
+            odds_status = "NOT_FOUND"
+        elif float(live_odd) >= LIVE_ODDS_MIN:
+            odds_status = "QUALIFIED"
+        else:
+            odds_status = "BELOW_MIN"
 
         bot_pick_history.append({
             "id": f"{period_key}:{int(time.time())}",
@@ -1475,10 +1463,11 @@ def finalize_best_bot_pick() -> None:
             "btts_signal": best.get("btts_signal", 0),
             "period_stats": best.get("period_stats", {}),
             "full_stats": best.get("current_stats", {}),
-            "live_odd": best.get("live_odd"),
+            "live_odd": live_odd,
             "live_odd_market": best.get("live_odd_market"),
             "live_odd_selection": best.get("live_odd_selection"),
-            "odds_min_required": LIVE_ODDS_MIN,
+            "odds_status": odds_status,
+            "odds_min_reference": LIVE_ODDS_MIN,
             "status": "OPEN",
             "created_at": datetime.now().isoformat(timespec="seconds"),
         })
@@ -2464,7 +2453,7 @@ PAGE = r"""
         <div>
             <h1>⚽ Gol Sinyal Merkezi</h1>
             <div class="sub">
-                Canlı maçlar gerçek API istatistikleriyle analiz edilir. Yüzdeler botun canlı baskı sinyal puanlarıdır. BOTUN SEÇİMİ 78/100 eşiğini iki ardışık taramada koruyan, momentum ve skor/dakika filtresinden geçen ve eşleşen canlı dış oranı en az 1.50 olan en güçlü adayı gösterir. Oran yalnızca son filtredir; yüksek oran daha güvenli kabul edilmez.
+                Canlı maçlar gerçek API istatistikleriyle analiz edilir. Yüzdeler botun canlı baskı sinyal puanlarıdır. BOTUN SEÇİMİ 78/100 eşiğini iki ardışık taramada koruyan ve momentum ile skor/dakika modelinden geçen en güçlü adayı gösterir. Canlı dış oran bilgi amaçlı eklenir; 1.50+ oran ayrıca işaretlenir fakat oran bulunmaması veya 1.50 altında olması BOT PICK kararını engellemez.
                 <a href="/api/live-leagues" target="_blank" style="color:#7db7ff;margin-left:8px;">Canlı lig teşhisi</a>
             </div>
         </div>
@@ -2757,7 +2746,7 @@ async function loadMatches() {
                     ${
                         m.live_odd
                         ? `<br>💰 Canlı oran: <strong>${Number(m.live_odd).toFixed(2)}</strong>
-                           • ${m.odds_qualified ? "✅ 1.50+ oran filtresi geçti" : "⛔ 1.50 altı"}`
+                           • ${m.odds_qualified ? "✅ 1.50+ ORAN UYGUN" : "ℹ️ 1.50 ALTI"}`
                         : ""
                     }
                    </div>`
@@ -2769,12 +2758,12 @@ async function loadMatches() {
                     <div class="bot-pick-choice">${esc(m.bot_pick_text)}</div>
                     ${
                         m.live_odd
-                        ? `<div class="odds-badge">💰 ORAN ONAYLI • ${Number(m.live_odd).toFixed(2)}</div>
+                        ? `<div class="${m.odds_qualified ? 'odds-badge' : 'odds-waiting'}">💰 ${m.odds_qualified ? 'ORAN UYGUN' : '1.50 ALTI'} • ${Number(m.live_odd).toFixed(2)}</div>
                            <div style="margin-top:6px;font-size:12px;color:#c8d4e6">
                                ${esc(m.live_odd_market || "")}
                                ${m.live_odd_selection ? " • " + esc(m.live_odd_selection) : ""}
                            </div>`
-                        : ""
+                        : `<div class="odds-waiting">💰 CANLI ORAN BULUNAMADI</div>`
                     }
                     <div style="margin-top:8px">${reasonTags(m.bot_pick_reasons)}</div>
                    </div>`
