@@ -25,6 +25,10 @@ SIGNAL_LIMIT = int(os.getenv("SIGNAL_LIMIT", "65"))
 FIRST_HALF_LIMIT = int(os.getenv("FIRST_HALF_LIMIT", "65"))
 BOT_PICK_LIMIT = 78
 BOT_PICK_MINUTE = 55
+BOT_PICK_CONFIRM_SCANS = 2
+MOMENTUM_WINDOW_SECONDS = 300
+MOMENTUM_LONG_SECONDS = 600
+TREND_HISTORY_MAX = 24
 
 # API çağrılarının sonsuza kadar beklememesi için
 REQUEST_TIMEOUT = 15
@@ -203,6 +207,16 @@ def serialize_matches_for_web() -> List[Dict[str, Any]]:
                 "bot_pick_text": item.get("bot_pick_text", ""),
                 "bot_pick_reasons": item.get("bot_pick_reasons", []),
                 "bot_pick_best": item.get("bot_pick_best", False),
+                "bot_pick_confirm_count": item.get("bot_pick_confirm_count", 0),
+                "bot_pick_confirm_required": BOT_PICK_CONFIRM_SCANS,
+                "bot_pick_ready": item.get("bot_pick_ready", False),
+                "momentum_score": item.get("momentum_score", 0),
+                "momentum_label": item.get("momentum_label", "YENİ"),
+                "momentum_home_score": item.get("momentum_home_score", 0),
+                "momentum_away_score": item.get("momentum_away_score", 0),
+                "momentum_delta_5m": item.get("momentum_delta_5m", {}),
+                "momentum_delta_10m": item.get("momentum_delta_10m", {}),
+                "scenario_adjustment": item.get("scenario_adjustment", 0),
                 "stats": {
                     "shots": stats.get("shots", 0),
                     "target": stats.get("target", 0),
@@ -716,6 +730,158 @@ def subtract_total_stats(
     return result
 
 
+
+def stats_delta(
+    current: Dict[str, Any],
+    previous: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    if not previous:
+        return empty_total_stats()
+
+    result = empty_total_stats()
+
+    for side in ("home", "away"):
+        for key in ("shots", "target", "corners", "inside"):
+            result[side][key] = max(
+                0,
+                safe_int((current.get(side) or {}).get(key), 0)
+                - safe_int((previous.get(side) or {}).get(key), 0)
+            )
+
+    for key in ("shots", "target", "corners", "inside"):
+        result[key] = result["home"][key] + result["away"][key]
+
+    return result
+
+
+def momentum_points(delta: Dict[str, Any]) -> int:
+    """
+    Son dönemde üretilen YENİ aksiyonların baskı puanı.
+    """
+    return min(
+        100,
+        safe_int(delta.get("shots"), 0) * 6
+        + safe_int(delta.get("target"), 0) * 16
+        + safe_int(delta.get("corners"), 0) * 5
+        + safe_int(delta.get("inside"), 0) * 8
+    )
+
+
+def calculate_momentum(
+    current_stats: Dict[str, Any],
+    trend_history: List[Dict[str, Any]],
+    now_ts: float
+) -> Dict[str, Any]:
+    """
+    Ekstra API çağrısı yapmadan, önceki tarama snapshot'ları ile
+    son 5 ve 10 dakikadaki YENİ aksiyonları karşılaştırır.
+    """
+    if not trend_history:
+        return {
+            "score": 0,
+            "label": "YENİ",
+            "delta_5m": empty_total_stats(),
+            "delta_10m": empty_total_stats(),
+            "home_score": 0,
+            "away_score": 0,
+        }
+
+    def choose_baseline(seconds: int) -> Dict[str, Any]:
+        target_ts = now_ts - seconds
+        eligible = [x for x in trend_history if float(x.get("ts", 0)) <= target_ts]
+        if eligible:
+            return eligible[-1].get("stats") or {}
+        return trend_history[0].get("stats") or {}
+
+    base_5 = choose_baseline(MOMENTUM_WINDOW_SECONDS)
+    base_10 = choose_baseline(MOMENTUM_LONG_SECONDS)
+
+    delta_5 = stats_delta(current_stats, base_5)
+    delta_10 = stats_delta(current_stats, base_10)
+
+    score_5 = momentum_points(delta_5)
+    score_10 = momentum_points(delta_10)
+
+    # Yakın dönem daha önemli; 10 dakika ise kalıcılığı kontrol eder.
+    score = min(100, round(score_5 * 0.72 + score_10 * 0.28))
+
+    home_score = min(
+        100,
+        safe_int(delta_5["home"].get("shots"), 0) * 6
+        + safe_int(delta_5["home"].get("target"), 0) * 16
+        + safe_int(delta_5["home"].get("corners"), 0) * 5
+        + safe_int(delta_5["home"].get("inside"), 0) * 8
+    )
+    away_score = min(
+        100,
+        safe_int(delta_5["away"].get("shots"), 0) * 6
+        + safe_int(delta_5["away"].get("target"), 0) * 16
+        + safe_int(delta_5["away"].get("corners"), 0) * 5
+        + safe_int(delta_5["away"].get("inside"), 0) * 8
+    )
+
+    if score >= 65:
+        label = "ÇOK GÜÇLÜ"
+    elif score >= 45:
+        label = "YÜKSELİYOR"
+    elif score >= 25:
+        label = "ORTA"
+    else:
+        label = "ZAYIF"
+
+    return {
+        "score": score,
+        "label": label,
+        "delta_5m": delta_5,
+        "delta_10m": delta_10,
+        "home_score": home_score,
+        "away_score": away_score,
+    }
+
+
+def calculate_match_scenario_adjustment(
+    minute: int,
+    home_goals: int,
+    away_goals: int
+) -> Tuple[int, List[str]]:
+    """
+    Aynı istatistiklerin farklı skor/dakikalarda aynı anlamı taşımamasını sağlar.
+    """
+    adjustment = 0
+    reasons = []
+
+    goal_diff = abs(home_goals - away_goals)
+    total_goals = home_goals + away_goals
+
+    if goal_diff <= 1:
+        adjustment += 5
+        reasons.append("Skor hâlâ rekabetçi")
+    elif goal_diff == 2 and minute >= 75:
+        adjustment -= 8
+        reasons.append("İki farklı skor nedeniyle temkin")
+    elif goal_diff >= 3:
+        adjustment -= 15
+        reasons.append("Maç kopmuş görünüyor")
+
+    if (home_goals, away_goals) in ((0, 0), (1, 1), (1, 0), (0, 1)):
+        adjustment += 3
+
+    if 65 <= minute <= 85:
+        adjustment += 5
+        reasons.append("Gol için güçlü dakika aralığı")
+    elif 86 <= minute <= 88:
+        adjustment += 0
+    elif minute >= 89:
+        adjustment -= 10
+        reasons.append("Kalan süre çok az")
+
+    if total_goals >= 5:
+        adjustment -= 4
+
+    return adjustment, reasons
+
+
+
 def calculate_bot_pick(
     evaluation_stats: Dict[str, Any],
     normal_signal: int,
@@ -726,13 +892,21 @@ def calculate_bot_pick(
     minute: int,
     home_team: str,
     away_team: str,
-) -> Tuple[int, str, List[str]]:
+    home_goals: int,
+    away_goals: int,
+    momentum: Dict[str, Any],
+) -> Tuple[int, str, List[str], int]:
     """
-    Botun 'ben olsam bunu oynarım' seçimi.
-    Yalnızca mevcut istatistiklerden üretilen karar puanıdır.
+    BOTUN SEÇİMİ artık:
+    - genel gol sinyali
+    - güçlü takım sinyali
+    - maç temposu
+    - son 5/10 dk momentum
+    - skor/dakika senaryosu
+    birlikte kullanır.
     """
     if minute < BOT_PICK_MINUTE:
-        return 0, "", []
+        return 0, "", [], 0
 
     shots = evaluation_stats.get("shots", 0)
     target = evaluation_stats.get("target", 0)
@@ -745,18 +919,26 @@ def calculate_bot_pick(
     )
 
     strongest_team_signal = max(home_goal_signal, away_goal_signal)
+    momentum_score = safe_int(momentum.get("score"), 0)
 
+    # Momentum artık ciddi ağırlığa sahip.
     score = round(
-        normal_signal * 0.45
-        + strongest_team_signal * 0.35
-        + tempo_score * 0.20
+        normal_signal * 0.35
+        + strongest_team_signal * 0.30
+        + tempo_score * 0.15
+        + momentum_score * 0.20
     )
 
-    # 60-85 arası canlı gol seçimleri için en değerli pencere.
-    if 60 <= minute <= 85:
+    scenario_adjustment, scenario_reasons = calculate_match_scenario_adjustment(
+        minute, home_goals, away_goals
+    )
+    score += scenario_adjustment
+
+    # Eski toplam istatistik yüksek ama güncel aksiyon durmuşsa cezalandır.
+    if momentum_score < 20:
+        score -= 10
+    elif momentum_score >= 65:
         score += 5
-    elif minute >= 89:
-        score -= 8
 
     score = max(0, min(100, score))
 
@@ -769,19 +951,35 @@ def calculate_bot_pick(
         reasons.append("Maç temposu yüksek")
     if strongest_team_signal >= 70:
         reasons.append("Bir takımın gol radarı çok güçlü")
+    if momentum_score >= 65:
+        reasons.append("Son dakikalarda momentum çok güçlü")
+    elif momentum_score >= 45:
+        reasons.append("Son dakikalarda baskı yükseliyor")
 
-    gap = abs(home_goal_signal - away_goal_signal)
+    reasons.extend(scenario_reasons)
 
-    if home_goal_signal >= 70 and home_goal_signal > away_goal_signal + 12:
+    # Takım seçimi için yalnızca toplam sinyal değil, son 5 dk takım momentumu da dikkate alınır.
+    home_momentum = safe_int(momentum.get("home_score"), 0)
+    away_momentum = safe_int(momentum.get("away_score"), 0)
+
+    if (
+        home_goal_signal >= 70
+        and home_goal_signal > away_goal_signal + 12
+        and home_momentum >= away_momentum
+    ):
         pick_text = f"{home_team} gol atar"
-    elif away_goal_signal >= 70 and away_goal_signal > home_goal_signal + 12:
+    elif (
+        away_goal_signal >= 70
+        and away_goal_signal > home_goal_signal + 12
+        and away_momentum >= home_momentum
+    ):
         pick_text = f"{away_team} gol atar"
-    elif btts_label != "GERÇEKLEŞTİ" and btts_signal >= 65:
+    elif btts_label != "GERÇEKLEŞTİ" and btts_signal >= 65 and momentum_score >= 35:
         pick_text = "KG Var"
     else:
         pick_text = "Maçta bir gol daha"
 
-    return score, pick_text, reasons
+    return score, pick_text, reasons, scenario_adjustment
 
 
 def resolve_open_picks_after_goal(
@@ -847,6 +1045,10 @@ def resolve_open_picks_after_goal(
             pick["result_minute"] = minute
             pick["result_score"] = list(new_score)
             pick["result_at"] = now_iso
+            pick["minutes_to_result"] = max(
+                0,
+                safe_int(minute, 0) - safe_int(pick.get("minute"), 0)
+            )
 
 
 def bot_pick_stats() -> Dict[str, Any]:
@@ -877,6 +1079,7 @@ def finalize_best_bot_pick() -> None:
             item for item in match_memory.values()
             if item.get("bot_pick_score", 0) >= BOT_PICK_LIMIT
             and item.get("bot_pick_text")
+            and item.get("bot_pick_ready", False)
         ]
 
         if not candidates:
@@ -915,6 +1118,18 @@ def finalize_best_bot_pick() -> None:
             "pick_reasons": list(best.get("bot_pick_reasons") or []),
             "pick_scoreline": list(score),
             "period_number": best.get("period_number", 0),
+            "confirmation_scans": best.get("bot_pick_confirm_count", 0),
+            "momentum_score": best.get("momentum_score", 0),
+            "momentum_label": best.get("momentum_label", "YENİ"),
+            "momentum_delta_5m": best.get("momentum_delta_5m", {}),
+            "momentum_delta_10m": best.get("momentum_delta_10m", {}),
+            "scenario_adjustment": best.get("scenario_adjustment", 0),
+            "normal_signal": best.get("current_signal", 0),
+            "home_goal_signal": best.get("home_goal_signal", 0),
+            "away_goal_signal": best.get("away_goal_signal", 0),
+            "btts_signal": best.get("btts_signal", 0),
+            "period_stats": best.get("period_stats", {}),
+            "full_stats": best.get("current_stats", {}),
             "status": "OPEN",
             "created_at": datetime.now().isoformat(timespec="seconds"),
         })
@@ -1109,6 +1324,17 @@ def analyze_match(match: Dict[str, Any]) -> bool:
                 "bot_pick_reasons": [],
                 "bot_pick_best": False,
                 "bot_pick_record_key": None,
+                "bot_pick_confirm_count": 0,
+                "bot_pick_confirm_text": "",
+                "bot_pick_ready": False,
+                "trend_history": [],
+                "momentum_score": 0,
+                "momentum_label": "YENİ",
+                "momentum_delta_5m": empty_total_stats(),
+                "momentum_delta_10m": empty_total_stats(),
+                "momentum_home_score": 0,
+                "momentum_away_score": 0,
+                "scenario_adjustment": 0,
                 "match": snapshot,
                 "stats_error": None,
                 "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -1134,6 +1360,10 @@ def analyze_match(match: Dict[str, Any]) -> bool:
             current["period_number"] = safe_int(current.get("period_number"), 0) + 1
             current["period_started_minute"] = minute
             current["bot_pick_record_key"] = None
+            current["bot_pick_confirm_count"] = 0
+            current["bot_pick_confirm_text"] = ""
+            current["bot_pick_ready"] = False
+            current["trend_history"] = []
 
         period_baseline = current.get("period_baseline")
         period_number = safe_int(current.get("period_number"), 0)
@@ -1176,7 +1406,19 @@ def analyze_match(match: Dict[str, Any]) -> bool:
         away_goals,
     )
 
-    bot_pick_score, bot_pick_text, bot_pick_reasons = calculate_bot_pick(
+    now_ts = time.time()
+
+    with memory_lock:
+        current_for_trend = match_memory.get(int(fixture_id))
+        trend_history = list((current_for_trend or {}).get("trend_history") or [])
+
+    momentum = calculate_momentum(
+        evaluation_total,
+        trend_history,
+        now_ts,
+    )
+
+    bot_pick_score, bot_pick_text, bot_pick_reasons, scenario_adjustment = calculate_bot_pick(
         evaluation_total,
         normal_signal,
         home_goal_signal,
@@ -1186,6 +1428,9 @@ def analyze_match(match: Dict[str, Any]) -> bool:
         minute,
         snapshot["home_team"],
         snapshot["away_team"],
+        home_goals,
+        away_goals,
+        momentum,
     )
 
     with memory_lock:
@@ -1209,6 +1454,46 @@ def analyze_match(match: Dict[str, Any]) -> bool:
         current["bot_pick_score"] = bot_pick_score
         current["bot_pick_text"] = bot_pick_text
         current["bot_pick_reasons"] = bot_pick_reasons
+        current["momentum_score"] = momentum.get("score", 0)
+        current["momentum_label"] = momentum.get("label", "YENİ")
+        current["momentum_delta_5m"] = momentum.get("delta_5m", empty_total_stats())
+        current["momentum_delta_10m"] = momentum.get("delta_10m", empty_total_stats())
+        current["momentum_home_score"] = momentum.get("home_score", 0)
+        current["momentum_away_score"] = momentum.get("away_score", 0)
+        current["scenario_adjustment"] = scenario_adjustment
+
+        # 2 ardışık tarama onayı:
+        # aynı seçim metni eşik üstünde kalırsa sayaç artar.
+        if bot_pick_score >= BOT_PICK_LIMIT and bot_pick_text:
+            if current.get("bot_pick_confirm_text") == bot_pick_text:
+                current["bot_pick_confirm_count"] = safe_int(
+                    current.get("bot_pick_confirm_count"), 0
+                ) + 1
+            else:
+                current["bot_pick_confirm_text"] = bot_pick_text
+                current["bot_pick_confirm_count"] = 1
+        else:
+            current["bot_pick_confirm_count"] = 0
+            current["bot_pick_confirm_text"] = ""
+
+        current["bot_pick_ready"] = (
+            safe_int(current.get("bot_pick_confirm_count"), 0)
+            >= BOT_PICK_CONFIRM_SCANS
+        )
+
+        # Bu taramayı trend geçmişine ekle.
+        trend = list(current.get("trend_history") or [])
+        trend.append({
+            "ts": now_ts,
+            "minute": minute,
+            "stats": evaluation_total,
+            "normal_signal": normal_signal,
+            "home_goal_signal": home_goal_signal,
+            "away_goal_signal": away_goal_signal,
+            "bot_pick_score": bot_pick_score,
+        })
+        current["trend_history"] = trend[-TREND_HISTORY_MAX:]
+
         current["stats_error"] = None
         current["last_update"] = datetime.now().isoformat(timespec="seconds")
 
@@ -1475,6 +1760,8 @@ def api_status():
         "signal_limit": SIGNAL_LIMIT,
         "first_half_limit": FIRST_HALF_LIMIT,
         "bot_pick_limit": BOT_PICK_LIMIT,
+        "bot_pick_confirm_scans": BOT_PICK_CONFIRM_SCANS,
+        "momentum_window_seconds": MOMENTUM_WINDOW_SECONDS,
         "allowed_league_count": len(ALLOWED_LEAGUES),
     })
 
@@ -1733,6 +2020,22 @@ PAGE = r"""
         }
 
 
+
+        .candidate-box {
+            margin: 10px 0;
+            padding: 11px 12px;
+            border-radius: 10px;
+            background: #182234;
+            border: 1px solid #2d4264;
+            color: #c7d6eb;
+            font-size: 13px;
+            line-height: 1.55;
+        }
+        .momentum-strong {
+            color: #55d99b;
+            font-weight: 800;
+        }
+
         .bot-pick-box {
             margin: 12px 0;
             padding: 14px;
@@ -1781,7 +2084,7 @@ PAGE = r"""
         <div>
             <h1>⚽ Gol Sinyal Merkezi</h1>
             <div class="sub">
-                Canlı maçlar gerçek API istatistikleriyle analiz edilir. Yüzdeler botun canlı baskı sinyal puanlarıdır. BOTUN SEÇİMİ 78/100 ve üzerindeki en güçlü adayı gösterir; gol sonrası yeni aksiyon dönemi başlar.
+                Canlı maçlar gerçek API istatistikleriyle analiz edilir. Yüzdeler botun canlı baskı sinyal puanlarıdır. BOTUN SEÇİMİ 78/100 eşiğini iki ardışık taramada koruyan en güçlü adayı gösterir; son 5–10 dakikalık momentum, skor/dakika senaryosu ve gol sonrası yeni aksiyonlar birlikte değerlendirilir.
                 <a href="/api/live-leagues" target="_blank" style="color:#7db7ff;margin-left:8px;">Canlı lig teşhisi</a>
             </div>
         </div>
@@ -2060,6 +2363,19 @@ async function loadMatches() {
                 ? `<strong>KG Var:</strong> GERÇEKLEŞTİ`
                 : `<strong>KG Var:</strong> ${esc(m.btts_label)} — %${m.btts_signal ?? 0}`;
 
+            const candidateHtml = Number(m.bot_pick_score || 0) > 0
+                ? `<div class="candidate-box">
+                    📈 Momentum:
+                    <span class="${Number(m.momentum_score || 0) >= 45 ? 'momentum-strong' : ''}">
+                        ${m.momentum_score ?? 0}/100 • ${esc(m.momentum_label || 'YENİ')}
+                    </span>
+                    &nbsp;|&nbsp;
+                    🧠 BOT adayı: ${m.bot_pick_score ?? 0}/100
+                    &nbsp;|&nbsp;
+                    Onay: ${m.bot_pick_confirm_count ?? 0}/${m.bot_pick_confirm_required ?? 2}
+                   </div>`
+                : "";
+
             const botPickHtml = m.bot_pick_best && Number(m.bot_pick_score || 0) >= 78
                 ? `<div class="bot-pick-box">
                     <div class="bot-pick-title">🧠 BOTUN SEÇİMİ • ${m.bot_pick_score}/100</div>
@@ -2092,7 +2408,8 @@ async function loadMatches() {
                     </div>
 
                     <div class="body">
-                        ${botPickHtml}
+                        ${candidateHtml}
+                    ${botPickHtml}
                     ${periodHtml}
 
                     <div class="signals">
