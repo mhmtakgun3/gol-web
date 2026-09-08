@@ -33,6 +33,8 @@ TREND_HISTORY_MAX = 24
 
 # Canlı dış oran filtresi
 LIVE_ODDS_MIN = 1.50
+
+UEFA_COMPETITIONS = {2: "UEFA Champions League", 3: "UEFA Europa League", 848: "UEFA Europa Conference League"}
 LIVE_ODDS_CACHE_TTL = 60
 
 # API çağrılarının sonsuza kadar beklememesi için
@@ -46,6 +48,11 @@ LIVE_CACHE_TTL = 10
 STATS_CACHE_TTL = 20
 
 ALLOWED_LEAGUES = {
+    # UEFA Avrupa Kupaları
+    2,    # UEFA Champions League
+    3,    # UEFA Europa League
+    848,  # UEFA Europa Conference League
+
     # İNGİLTERE
     39, 40, 41, 42,
     # İSPANYA
