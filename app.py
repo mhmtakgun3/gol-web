@@ -53,16 +53,26 @@ ALLOWED_LEAGUES = {
     3,    # UEFA Europa League
     848,  # UEFA Europa Conference League
 
-    # İNGİLTERE
+    # İNGİLTERE - Ligler + Kupalar
     39, 40, 41, 42,
-    # İSPANYA
+    45,  # FA Cup
+    48,  # League Cup / Carabao Cup
+    46,  # EFL Trophy
+
+    # İSPANYA - Ligler + Kupa
     140, 141, 435,
-    # İTALYA
-    135, 136, 137,
-    # ALMANYA
+    143, # Copa del Rey
+
+    # İTALYA - Ligler + Kupa
+    135, 136, 137,  # 137 = Coppa Italia
+
+    # ALMANYA - Ligler + Kupa
     78, 79, 80,
-    # FRANSA
+    81,  # DFB Pokal
+
+    # FRANSA - Ligler + Kupa
     61, 62, 63,
+    66,  # Coupe de France
     # TÜRKİYE
     203, 204, 205, 206,
     # HOLLANDA
