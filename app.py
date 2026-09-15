@@ -2456,6 +2456,22 @@ function esc(v){
     .replaceAll('"',"&quot;");
 }
 
+function homeGoalsOf(m){
+  if(m.home_goals!==undefined && m.home_goals!==null) return Number(m.home_goals||0);
+  if(Array.isArray(m.score)) return Number(m.score[0]||0);
+  if(m.goals && m.goals.home!==undefined) return Number(m.goals.home||0);
+  return 0;
+}
+function awayGoalsOf(m){
+  if(m.away_goals!==undefined && m.away_goals!==null) return Number(m.away_goals||0);
+  if(Array.isArray(m.score)) return Number(m.score[1]||0);
+  if(m.goals && m.goals.away!==undefined) return Number(m.goals.away||0);
+  return 0;
+}
+function bttsDoneOf(m){
+  return homeGoalsOf(m)>0 && awayGoalsOf(m)>0;
+}
+
 function leagueLabel(m){
   const c=m.country||"", l=m.league||"";
   return c&&l ? `${c} • ${l}` : (l||c||"Lig");
@@ -2501,7 +2517,7 @@ function categoryFor(m){
 
   if(m.bot_pick_best) return {icon:"🧠",text:"BOT PICK",cls:"bot-t"};
   if(Number(m.minute||0)<=45 && firstHalf>=firstHalfLimit) return {icon:"⏱️",text:"İY 0,5 ÜST",cls:"blue-t"};
-  const bttsDone=Number(m.home_goals||0)>0 && Number(m.away_goals||0)>0;
+  const bttsDone=bttsDoneOf(m);
   if(btts>=70 && !bttsDone) return {icon:"⚽",text:"KARŞILIKLI GOL VAR",cls:"green-t"};
   if(pressure>=80) return {icon:"🔥",text:"ÇOK YÜKSEK BASKI",cls:"red-t"};
   if(goal>=80) return {icon:"🎯",text:"YÜKSEK GOL SİNYALİ",cls:"green-t"};
@@ -2556,8 +2572,8 @@ function renderMatches(){
   for(const m of list){
     const home=m.home_team||"";
     const away=m.away_team||"";
-    const hg=Number(m.home_goals||0);
-    const ag=Number(m.away_goals||0);
+    const hg=homeGoalsOf(m);
+    const ag=awayGoalsOf(m);
     const minute=Number(m.minute||0);
     const goal=Number(m.signal||0);
     const pressure=Number(m.momentum_score||0);
@@ -2600,11 +2616,20 @@ function renderMatches(){
     const bttsAlreadyHappened=(hg>0 && ag>0);
     const bttsPick=(!bttsAlreadyHappened && btts>=70);
 
-    const pick=(m.bot_pick_best&&m.bot_pick_text)
-      ? m.bot_pick_text
+    let botPickText=String(m.bot_pick_text||"").trim();
+    const botPickIsBtts=/KG Var|Karşılıklı Gol/i.test(botPickText);
+
+    // Eğer KG Var artık gerçekleşmişse eski KG Var BOT metnini ekranda tekrar önermeyiz.
+    // Aynı mevcut sinyallerden dinamik ÜST önerisine döner.
+    const validBotPickText=(m.bot_pick_best && botPickText && !(bttsAlreadyHappened && botPickIsBtts))
+      ? botPickText
+      : "";
+
+    const pick=validBotPickText
+      ? validBotPickText
       : (firstHalfPick ? `İY 0,5 ÜST • İY Sinyali ${firstHalf}/100`
         : bttsPick ? "Karşılıklı Gol Var"
-        : (goal>=65 || bot>=65 || pressure>=65) ? dynamicOver
+        : (goal>=65 || bot>=65 || pressure>=65 || m.bot_pick_best) ? dynamicOver
         : expected ? `${expected} gol bekleniyor`
         : "Gol için takipte");
 
@@ -2733,11 +2758,20 @@ function tryNotifications(ms){
     if(saved[periodKey]) continue;
 
     if(m.bot_pick_best){
+      let notifyPick=String(m.bot_pick_text||"").trim();
+      if(bttsDoneOf(m) && /KG Var|Karşılıklı Gol/i.test(notifyPick)){
+        const total=homeGoalsOf(m)+awayGoalsOf(m);
+        const g=Number(m.signal||0), p=Number(m.momentum_score||0), b=Number(m.bot_pick_score||0);
+        let more=1;
+        if(b>=78 || (g>=65 && p>=65)) more=2;
+        if(b>=88 && g>=80 && p>=75) more=3;
+        notifyPick=`${(total+more-0.5).toFixed(1).replace(".",",")} ÜST • ${more} gol daha`;
+      }
       new Notification(`🧠 BOT PICK • ${m.bot_pick_score||0}/100`,{
         body:
           `${m.home_team} ${score} ${m.away_team}`+
           ` • ${m.minute||0}'`+
-          ` • ${m.bot_pick_text||""}`+
+          ` • ${notifyPick}`+
           (m.live_odd?` • Oran ${Number(m.live_odd).toFixed(2)}`:"")
       });
       saved[periodKey]=now;
