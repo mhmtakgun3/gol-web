@@ -2486,8 +2486,11 @@ function categoryFor(m){
   const pressure=Number(m.momentum_score||0);
   const bot=Number(m.bot_pick_score||0);
   const btts=Number(m.btts_signal||0);
+  const firstHalf=Number(m.first_half_signal||0);
+  const firstHalfLimit=Number(m.first_half_limit||65);
 
   if(m.bot_pick_best) return {icon:"🧠",text:"BOT PICK",cls:"bot-t"};
+  if(Number(m.minute||0)<=45 && firstHalf>=firstHalfLimit) return {icon:"⏱️",text:"İY 0,5 ÜST",cls:"blue-t"};
   if(btts>=70) return {icon:"⚽",text:"KARŞILIKLI GOL VAR",cls:"green-t"};
   if(pressure>=80) return {icon:"🔥",text:"ÇOK YÜKSEK BASKI",cls:"red-t"};
   if(goal>=80) return {icon:"🎯",text:"YÜKSEK GOL SİNYALİ",cls:"green-t"};
@@ -2551,14 +2554,19 @@ function renderMatches(){
     const homeGoal=Number(m.home_goal_signal||0);
     const awayGoal=Number(m.away_goal_signal||0);
     const btts=Number(m.btts_signal||0);
+    const firstHalf=Number(m.first_half_signal||0);
     const s=m.stats||{};
     const cat=categoryFor(m);
     const league=leagueLabel(m);
 
     const expected=m.match_expected_team||m.expected_team||"";
+    const firstHalfLimit=Number(m.first_half_limit||65);
+    const firstHalfPick=(minute<=45 && firstHalf>=firstHalfLimit);
+
     const pick=(m.bot_pick_best&&m.bot_pick_text)
       ? m.bot_pick_text
-      : (btts>=70 ? "Karşılıklı Gol Var"
+      : (firstHalfPick ? `İY 0,5 ÜST • İY Sinyali ${firstHalf}/100`
+        : btts>=70 ? "Karşılıklı Gol Var"
         : expected ? `${expected} gol bekleniyor`
         : goal>=65 ? "Maçta en az 1 gol daha"
         : "Gol için takipte");
@@ -2606,6 +2614,7 @@ function renderMatches(){
           ${esc(away)} %${awayGoal}
           &nbsp; | &nbsp;
           KG Var %${btts}
+          ${minute<=45 ? ` &nbsp; | &nbsp; İY %${firstHalf}` : ""}
         </div>
 
         <div class="stats">
