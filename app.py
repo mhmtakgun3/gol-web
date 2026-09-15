@@ -2501,7 +2501,8 @@ function categoryFor(m){
 
   if(m.bot_pick_best) return {icon:"🧠",text:"BOT PICK",cls:"bot-t"};
   if(Number(m.minute||0)<=45 && firstHalf>=firstHalfLimit) return {icon:"⏱️",text:"İY 0,5 ÜST",cls:"blue-t"};
-  if(btts>=70) return {icon:"⚽",text:"KARŞILIKLI GOL VAR",cls:"green-t"};
+  const bttsDone=Number(m.home_goals||0)>0 && Number(m.away_goals||0)>0;
+  if(btts>=70 && !bttsDone) return {icon:"⚽",text:"KARŞILIKLI GOL VAR",cls:"green-t"};
   if(pressure>=80) return {icon:"🔥",text:"ÇOK YÜKSEK BASKI",cls:"red-t"};
   if(goal>=80) return {icon:"🎯",text:"YÜKSEK GOL SİNYALİ",cls:"green-t"};
   if(pressure>=65) return {icon:"📌",text:"YÜKSEK BASKI",cls:"blue-t"};
@@ -2573,12 +2574,38 @@ function renderMatches(){
     const firstHalfLimit=Number(m.first_half_limit||65);
     const firstHalfPick=(minute<=45 && firstHalf>=firstHalfLimit);
 
+    // Dinamik ÜST önerisi:
+    // Mevcut toplam gole göre bir sonraki çizgi hesaplanır.
+    // Örn. 2-3 => 5 gol => 5,5 ÜST = 1 gol daha.
+    // Güçlü sinyal varsa daha ileri çizgi de söylenebilir:
+    // Örn. 1-1 ve çok güçlü devam sinyali => 3,5 ÜST = 2 gol daha.
+    const totalGoals=hg+ag;
+    let expectedMoreGoals=1;
+
+    // Çok güçlü devam baskısında 2 gol daha beklentisi.
+    // BOT 78+ veya hem GOL hem BASKI güçlü ise.
+    if(bot>=78 || (goal>=65 && pressure>=65)){
+      expectedMoreGoals=2;
+    }
+
+    // Aşırı güçlü birleşik sinyalde 3 gol daha beklentisi.
+    if(bot>=88 && goal>=80 && pressure>=75){
+      expectedMoreGoals=3;
+    }
+
+    const overLine=(totalGoals + expectedMoreGoals - 0.5).toFixed(1).replace(".",",");
+    const dynamicOver=`${overLine} ÜST • Bu maçta ${expectedMoreGoals} gol daha bekleniyor`;
+
+    // KG Var yalnızca henüz gerçekleşmediyse önerilebilir.
+    const bttsAlreadyHappened=(hg>0 && ag>0);
+    const bttsPick=(!bttsAlreadyHappened && btts>=70);
+
     const pick=(m.bot_pick_best&&m.bot_pick_text)
       ? m.bot_pick_text
       : (firstHalfPick ? `İY 0,5 ÜST • İY Sinyali ${firstHalf}/100`
-        : btts>=70 ? "Karşılıklı Gol Var"
+        : bttsPick ? "Karşılıklı Gol Var"
+        : (goal>=65 || bot>=65 || pressure>=65) ? dynamicOver
         : expected ? `${expected} gol bekleniyor`
-        : goal>=65 ? "Maçta en az 1 gol daha"
         : "Gol için takipte");
 
     const odd=m.live_odd ? Number(m.live_odd) : null;
