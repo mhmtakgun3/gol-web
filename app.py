@@ -2282,13 +2282,20 @@ select{
 .card.bot::before{width:4px;background:var(--purple)}
 
 /* Öne çıkan BOT PICK, geniş okunan maç özeti */
-.card.bot.featured{
-  grid-column:span 2;
-  background:#1c283e;border:1px solid #8662b1;border-radius:18px;
+.card.featured{
+  grid-column:span 1;
+  background:#1c283e;border:1px solid #405879;border-radius:18px;
   padding:18px 20px;min-height:0;color:#e8edf7;
-  box-shadow:0 0 0 1px rgba(155,102,218,.18),0 14px 32px rgba(0,0,0,.2)
+  box-shadow:0 14px 32px rgba(0,0,0,.2)
 }
-.card.bot.featured::before{display:none}
+.card.featured:not(.bot){padding:13px 14px}
+.card.featured:not(.bot) .featured-title{font-size:14px}
+.card.featured:not(.bot) .featured-info{gap:7px;font-size:11px}
+.card.featured:not(.bot) .featured-teams{font-size:12px}
+.card.featured:not(.bot) .featured-pick{font-size:12px}
+.card.featured:not(.bot) .featured-divider{margin:10px 0}
+.card.featured.bot{grid-column:span 2;border-color:#8662b1;box-shadow:0 0 0 1px rgba(155,102,218,.18),0 14px 32px rgba(0,0,0,.2)}
+.card.featured::before{display:none}
 .featured-head{display:flex;justify-content:space-between;align-items:center;gap:12px}
 .featured-title{font-size:18px;font-weight:900;color:#62ddb1;overflow-wrap:anywhere}
 .featured-status{border:1px solid #485b78;border-radius:24px;padding:6px 11px;color:#c9d7e8;font-size:11px;white-space:nowrap}
@@ -2424,7 +2431,7 @@ select{
   .header{flex-direction:column}.header-right{justify-content:flex-start}
   .toolbar{flex-direction:column;align-items:stretch}.controls{justify-content:space-between}
   select{min-width:0;flex:1}.grid{grid-template-columns:1fr}.title{font-size:22px}
-  .card.bot.featured{grid-column:span 1}
+  .card.featured.bot{grid-column:span 1}
 }
 </style>
 </head>
@@ -2474,7 +2481,7 @@ select{
       <span><span class="dot" style="background:#ff3f4f"></span>0–44 Zayıf</span>
       <span>🧠 BOT PICK</span>
     </div>
-    <div>Gol Sinyal Merkezi v2.0 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
+    <div>Gol Sinyal Merkezi v2.1 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
   </div>
 </div>
 
@@ -2692,93 +2699,38 @@ function renderMatches(){
       ? `<img class="badge-logo" src="${esc(m.away_logo)}" alt="">`
       : `<span class="fake-ball">⚽</span>`;
 
-    if(m.bot_pick_best){
-      const title=pick;
-      const remaining=m.status==="1H"
-        ? (minute<45 ? `İlk yarı bitimine ~${45-minute} dk` : "İlk yarının son dakikaları")
-        : (m.status==="2H" && minute<90 ? `90. dakikaya ~${90-minute} dk` : "Maç devam ediyor");
-      const level=Math.max(0,Math.min(5,Math.ceil(pressure/20)));
-      const dots=Array.from({length:5},(_,i)=>`<span class="pressure-dot ${i<level?"filled":""}"></span>`).join("");
-      const performance=currentBotPickStats && Number(currentBotPickStats.total)>0
-        ? `🎯 Kayıtlı BOT PICK başarısı: %${Number(currentBotPickStats.success_rate).toFixed(1).replace(".",",")} (${Number(currentBotPickStats.won)}/${Number(currentBotPickStats.total)})`
-        : "🎯 Kayıtlı BOT PICK sonucu henüz yok";
-      const oddDisplay=Number.isFinite(odd) && odd>0
-        ? `<span class="featured-odd"><small>oran</small>${odd.toFixed(2)}</span>`
-        : `<span class="featured-odd unavailable">oran yok</span>`;
-      html+=`
-        <div class="card bot featured">
-          <div class="featured-head">
-            <div class="featured-title">🧠 ${esc(title)}</div>
-            <div class="featured-status">Canlı • ${esc(m.status||"")}</div>
-          </div>
-          <div class="featured-divider"></div>
-          <div class="featured-info">
-            <div>🏆 ${esc(league)}</div>
-            <div class="featured-teams">⚽ ${esc(home)} ${hg} – ${ag} ${esc(away)}</div>
-            <div>🎯 Hedef: <b>${esc(pick)}</b></div>
-            <div>⏱️ ${minute}. dakika | ${esc(remaining)}</div>
-            <div>📌 Baskı: <span class="pressure-dots" aria-label="${level}/5 baskı">${dots}</span> <b>${pressure}/100</b></div>
-            <div>${esc(performance)}</div>
-            <div>⚽ Şut ${Number(s.shots||0)} · İsabet ${Number(s.target||0)} · Korner ${Number(s.corners||0)} · Ceza içi ${Number(s.inside||0)}</div>
-          </div>
-          <div class="featured-divider"></div>
-          <div class="featured-foot">
-            <div><div class="play-label">NE OYNANIR?</div><div class="featured-pick">${esc(pick)}</div></div>
-            ${oddDisplay}
-          </div>
-        </div>`;
-      continue;
-    }
-
+    const title=m.bot_pick_best ? pick : (firstHalfPick ? `İY ${firstHalfLine} ÜST` : cat.text);
+    const remaining=m.status==="1H"
+      ? (minute<45 ? `İlk yarı bitimine ~${45-minute} dk` : "İlk yarının son dakikaları")
+      : (m.status==="2H" && minute<90 ? `90. dakikaya ~${90-minute} dk` : "Maç devam ediyor");
+    const level=Math.max(0,Math.min(5,Math.ceil(pressure/20)));
+    const dots=Array.from({length:5},(_,i)=>`<span class="pressure-dot ${i<level?"filled":""}"></span>`).join("");
+    const performance=currentBotPickStats && Number(currentBotPickStats.total)>0
+      ? `🎯 Kayıtlı BOT PICK başarısı: %${Number(currentBotPickStats.success_rate).toFixed(1).replace(".",",")} (${Number(currentBotPickStats.won)}/${Number(currentBotPickStats.total)})`
+      : "🎯 Kayıtlı BOT PICK sonucu henüz yok";
+    const oddDisplay=Number.isFinite(odd) && odd>0
+      ? `<span class="featured-odd"><small>oran</small>${odd.toFixed(2)}</span>`
+      : `<span class="featured-odd unavailable">oran yok</span>`;
     html+=`
-      <div class="card ${cardLevel(m)}">
-        <div class="card-head">
-          <div class="type ${cat.cls}">${cat.icon} ${cat.text}</div>
-          <div class="live-badge">CANLI</div>
+      <div class="card featured ${m.bot_pick_best?"bot":""}">
+        <div class="featured-head">
+          <div class="featured-title">${m.bot_pick_best?"🧠":cat.icon} ${esc(title)}</div>
+          <div class="featured-status">${m.bot_pick_best?"BOT PICK • ":""}Canlı • ${esc(m.status||"")}</div>
         </div>
-
-        <div class="meta">
-          <div class="league">🏆 ${esc(league)}</div>
-          <div class="minute">${minute}'</div>
+        <div class="featured-divider"></div>
+        <div class="featured-info">
+          <div>🏆 ${esc(league)}</div>
+          <div class="featured-teams">⚽ ${esc(home)} ${hg} – ${ag} ${esc(away)}</div>
+          <div>🎯 Hedef: <b>${esc(pick)}</b></div>
+          <div>⏱️ ${minute}. dakika | ${esc(remaining)}</div>
+          <div>📌 Baskı: <span class="pressure-dots" aria-label="${level}/5 baskı">${dots}</span> <b>${pressure}/100</b></div>
+          ${m.bot_pick_best ? `<div>${esc(performance)}</div>` : ""}
+          <div>⚽ Şut ${Number(s.shots||0)} · İsabet ${Number(s.target||0)} · Korner ${Number(s.corners||0)} · Ceza içi ${Number(s.inside||0)}</div>
         </div>
-
-        <div class="teams">
-          <div class="team">${homeLogo}<span class="team-name">${esc(home)}</span></div>
-          <div class="score">${hg} - ${ag}</div>
-          <div class="team away"><span class="team-name">${esc(away)}</span>${awayLogo}</div>
-        </div>
-
-        <div class="signals">
-          <div class="signal ${colorClass(goal)}">🎯 GOL %${goal}</div>
-          <div class="signal ${pressureClass(pressure)}">📌 BASKI ${pressure}</div>
-          <div class="signal ${botClass(bot)}">🧠 BOT ${bot}</div>
-        </div>
-
-        <div class="team-line">
-          ${esc(home)} %${homeGoal}
-          &nbsp; | &nbsp;
-          ${esc(away)} %${awayGoal}
-          &nbsp; | &nbsp;
-          KG Var %${btts}
-          ${firstHalfLine ? ` &nbsp; | &nbsp; İY %${firstHalf}` : ""}
-        </div>
-
-        <div class="stats">
-          <div class="stat">⚽ Şut ${Number(s.shots||0)}</div>
-          <div class="stat">🎯 İsabet ${Number(s.target||0)}</div>
-          <div class="stat">⚑ Korner ${Number(s.corners||0)}</div>
-          <div class="stat">▣ Ceza içi ${Number(s.inside||0)}</div>
-        </div>
-
-        <div class="bottom">
-          <div>
-            <div class="play-label">NE OYNANIR?</div>
-            <div class="pick">🎯 ${esc(pick)}</div>
-          </div>
-          <div class="odd-wrap">
-            <div class="odd-caption">oran</div>
-            ${oddHtml}
-          </div>
+        <div class="featured-divider"></div>
+        <div class="featured-foot">
+          <div><div class="play-label">NE OYNANIR?</div><div class="featured-pick">${esc(pick)}</div></div>
+          ${oddDisplay}
         </div>
       </div>`;
   }
