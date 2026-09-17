@@ -2281,6 +2281,30 @@ select{
 }
 .card.bot::before{width:4px;background:var(--purple)}
 
+/* Öne çıkan BOT PICK, geniş okunan maç özeti */
+.card.bot.featured{
+  grid-column:span 2;
+  background:#1c283e;border:1px solid #8662b1;border-radius:18px;
+  padding:18px 20px;min-height:0;color:#e8edf7;
+  box-shadow:0 0 0 1px rgba(155,102,218,.18),0 14px 32px rgba(0,0,0,.2)
+}
+.card.bot.featured::before{display:none}
+.featured-head{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.featured-title{font-size:18px;font-weight:900;color:#62ddb1;overflow-wrap:anywhere}
+.featured-status{border:1px solid #485b78;border-radius:24px;padding:6px 11px;color:#c9d7e8;font-size:11px;white-space:nowrap}
+.featured-divider{height:1px;background:#46536c;margin:15px 0}
+.featured-info{display:grid;gap:11px;font-size:13px;line-height:1.45}
+.featured-teams{font-size:15px;font-weight:800;overflow-wrap:anywhere}
+.featured-info b{color:#f2f5fc}
+.pressure-dots{display:inline-flex;gap:5px;vertical-align:middle;margin:0 5px}
+.pressure-dot{width:12px;height:12px;border-radius:50%;background:#48566c}
+.pressure-dot.filled{background:#f38048;box-shadow:0 0 8px rgba(243,128,72,.35)}
+.featured-foot{display:flex;justify-content:space-between;align-items:flex-end;gap:12px}
+.featured-pick{font-size:16px;font-weight:900;overflow-wrap:anywhere}
+.featured-odd{white-space:nowrap;font-weight:900;font-size:19px}
+.featured-odd small{font-size:10px;color:#aabbd1;font-weight:700;margin-right:5px}
+.featured-odd.unavailable{font-size:13px;color:#aabbd1}
+
 /* CARD HEAD */
 .card-head{
   display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px
@@ -2400,6 +2424,7 @@ select{
   .header{flex-direction:column}.header-right{justify-content:flex-start}
   .toolbar{flex-direction:column;align-items:stretch}.controls{justify-content:space-between}
   select{min-width:0;flex:1}.grid{grid-template-columns:1fr}.title{font-size:22px}
+  .card.bot.featured{grid-column:span 1}
 }
 </style>
 </head>
@@ -2456,6 +2481,7 @@ select{
 <script>
 let currentMatches = [];
 let currentLeague = "ALL";
+let currentBotPickStats = null;
 
 function esc(v){
   return String(v ?? "")
@@ -2666,6 +2692,44 @@ function renderMatches(){
       ? `<img class="badge-logo" src="${esc(m.away_logo)}" alt="">`
       : `<span class="fake-ball">⚽</span>`;
 
+    if(m.bot_pick_best){
+      const title=pick;
+      const remaining=m.status==="1H"
+        ? (minute<45 ? `İlk yarı bitimine ~${45-minute} dk` : "İlk yarının son dakikaları")
+        : (m.status==="2H" && minute<90 ? `90. dakikaya ~${90-minute} dk` : "Maç devam ediyor");
+      const level=Math.max(0,Math.min(5,Math.ceil(pressure/20)));
+      const dots=Array.from({length:5},(_,i)=>`<span class="pressure-dot ${i<level?"filled":""}"></span>`).join("");
+      const performance=currentBotPickStats && Number(currentBotPickStats.total)>0
+        ? `🎯 Kayıtlı BOT PICK başarısı: %${Number(currentBotPickStats.success_rate).toFixed(1).replace(".",",")} (${Number(currentBotPickStats.won)}/${Number(currentBotPickStats.total)})`
+        : "🎯 Kayıtlı BOT PICK sonucu henüz yok";
+      const oddDisplay=Number.isFinite(odd) && odd>0
+        ? `<span class="featured-odd"><small>oran</small>${odd.toFixed(2)}</span>`
+        : `<span class="featured-odd unavailable">oran yok</span>`;
+      html+=`
+        <div class="card bot featured">
+          <div class="featured-head">
+            <div class="featured-title">🧠 ${esc(title)}</div>
+            <div class="featured-status">Canlı • ${esc(m.status||"")}</div>
+          </div>
+          <div class="featured-divider"></div>
+          <div class="featured-info">
+            <div>🏆 ${esc(league)}</div>
+            <div class="featured-teams">⚽ ${esc(home)} ${hg} – ${ag} ${esc(away)}</div>
+            <div>🎯 Hedef: <b>${esc(pick)}</b></div>
+            <div>⏱️ ${minute}. dakika | ${esc(remaining)}</div>
+            <div>📌 Baskı: <span class="pressure-dots" aria-label="${level}/5 baskı">${dots}</span> <b>${pressure}/100</b></div>
+            <div>${esc(performance)}</div>
+            <div>⚽ Şut ${Number(s.shots||0)} · İsabet ${Number(s.target||0)} · Korner ${Number(s.corners||0)} · Ceza içi ${Number(s.inside||0)}</div>
+          </div>
+          <div class="featured-divider"></div>
+          <div class="featured-foot">
+            <div><div class="play-label">NE OYNANIR?</div><div class="featured-pick">${esc(pick)}</div></div>
+            ${oddDisplay}
+          </div>
+        </div>`;
+      continue;
+    }
+
     html+=`
       <div class="card ${cardLevel(m)}">
         <div class="card-head">
@@ -2736,6 +2800,7 @@ async function loadAll(){
     document.getElementById("scanEvery").textContent=`↻ ${s.check_seconds||30} sn'de bir`;
 
     currentMatches=Array.isArray(m.matches)?m.matches:[];
+    currentBotPickStats=m.bot_pick_stats||s.bot_pick_stats||null;
     renderLeagueTabs(currentMatches);
     renderMatches();
     tryNotifications(currentMatches);
