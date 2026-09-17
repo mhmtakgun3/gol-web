@@ -1499,82 +1499,193 @@ def calculate_first_half_signal(
     home_goals: int,
     away_goals: int
 ) -> Tuple[int, List[str], Optional[str]]:
+    """
+    İlk yarı gol motoru.
+
+    15-45. dakikalar arasında toplam tempo, isabetli şut, ceza sahası
+    içi aksiyon, korner, dakika baskısı ve tek takım dominasyonunu birlikte
+    değerlendirir. FIRST_HALF_LIMIT değiştirilmeden daha erken ve daha
+    gerçekçi İY gol sinyali üretmek için tasarlanmıştır.
+    """
 
     if minute < 15 or minute > 45:
         return 0, [], None
 
     score = 0
-    reasons = []
+    reasons: List[str] = []
 
-    shots = total["shots"]
-    target = total["target"]
-    corners = total["corners"]
-    inside = total["inside"]
+    shots = safe_int(total.get("shots"), 0)
+    target = safe_int(total.get("target"), 0)
+    corners = safe_int(total.get("corners"), 0)
+    inside = safe_int(total.get("inside"), 0)
 
-    # ŞUT
-    if shots >= 12:
+    home = total.get("home") or {}
+    away = total.get("away") or {}
+
+    # --------------------------------------------------------
+    # 1) TOPLAM ŞUT TEMPOSU
+    # --------------------------------------------------------
+    if shots >= 13:
         score += 22
-        reasons.append("İlk yarıda şut sayısı çok yüksek")
-    elif shots >= 9:
-        score += 16
-        reasons.append("İlk yarıda şut sayısı yüksek")
-    elif shots >= 6:
-        score += 9
-
-    # İSABETLİ ŞUT
-    if target >= 6:
-        score += 25
-        reasons.append("İlk yarıda isabetli şut çok yüksek")
-    elif target >= 4:
-        score += 17
-        reasons.append("İlk yarıda isabetli şut yüksek")
-    elif target >= 3:
-        score += 9
-
-    # KORNER
-    if corners >= 6:
-        score += 15
-        reasons.append("İlk yarıda korner baskısı çok yüksek")
-    elif corners >= 4:
-        score += 9
-
-    # CEZA SAHASI İÇİ
-    if inside >= 7:
-        score += 15
-        reasons.append("İlk yarıda ceza sahası içi şut çok yüksek")
-    elif inside >= 5:
-        score += 9
-
-    # 0-0
-    if home_goals == 0 and away_goals == 0:
+        reasons.append("İlk yarıda şut temposu çok yüksek")
+    elif shots >= 10:
+        score += 18
+        reasons.append("İlk yarıda şut temposu yüksek")
+    elif shots >= 7:
+        score += 13
+        reasons.append("İlk yarıda şut üretimi iyi")
+    elif shots >= 5:
         score += 8
-        reasons.append("İlk yarı 0-0, gol baskısı değerlendiriliyor")
+    elif shots >= 3:
+        score += 4
 
-    home = total["home"]
-    away = total["away"]
+    # --------------------------------------------------------
+    # 2) İSABETLİ ŞUT - İY motorunda en güçlü kriter
+    # Eski sistemde 1-2 isabetli şut hiç puan getirmiyordu.
+    # --------------------------------------------------------
+    if target >= 6:
+        score += 28
+        reasons.append("İlk yarıda isabetli şut baskısı çok yüksek")
+    elif target >= 4:
+        score += 23
+        reasons.append("İlk yarıda isabetli şut baskısı yüksek")
+    elif target >= 3:
+        score += 18
+        reasons.append("Kaleyi bulan şutlar gol baskısını artırıyor")
+    elif target >= 2:
+        score += 12
+        reasons.append("İlk yarıda kaleyi bulan şutlar var")
+    elif target >= 1:
+        score += 6
 
-    home_pressure = (
-        home["shots"] * 1.0
-        + home["target"] * 2.5
-        + home["corners"] * 1.2
-        + home["inside"] * 1.5
-    )
+    # --------------------------------------------------------
+    # 3) CEZA SAHASI İÇİ AKSİYON
+    # --------------------------------------------------------
+    if inside >= 8:
+        score += 18
+        reasons.append("Ceza sahası içi üretim çok yüksek")
+    elif inside >= 6:
+        score += 14
+        reasons.append("Ceza sahası içi baskı yüksek")
+    elif inside >= 4:
+        score += 10
+        reasons.append("Ceza sahası içinde tehlikeli üretim var")
+    elif inside >= 2:
+        score += 5
 
-    away_pressure = (
-        away["shots"] * 1.0
-        + away["target"] * 2.5
-        + away["corners"] * 1.2
-        + away["inside"] * 1.5
-    )
+    # --------------------------------------------------------
+    # 4) KORNER - destekleyici kriter, tek başına sinyal üretmez
+    # --------------------------------------------------------
+    if corners >= 7:
+        score += 12
+        reasons.append("İlk yarıda korner baskısı çok yüksek")
+    elif corners >= 5:
+        score += 9
+        reasons.append("Korner baskısı yüksek")
+    elif corners >= 3:
+        score += 5
+    elif corners >= 2:
+        score += 2
+
+    # --------------------------------------------------------
+    # 5) DAKİKA / TEMPO
+    # Aynı istatistik 18'de ve 38'de aynı anlama gelmez.
+    # --------------------------------------------------------
+    if 20 <= minute <= 29:
+        if shots >= 6 or target >= 2 or inside >= 4:
+            score += 5
+            reasons.append("Erken dakikada yüksek tempo")
+    elif 30 <= minute <= 35:
+        if shots >= 6 or target >= 2:
+            score += 8
+            reasons.append("İlk yarının son bölümüne girerken baskı artıyor")
+    elif 36 <= minute <= 40:
+        if shots >= 5 or target >= 2 or inside >= 3:
+            score += 12
+            reasons.append("İlk yarı sonuna doğru gol baskısı güçlü")
+    elif 41 <= minute <= 45:
+        if shots >= 5 or target >= 2 or inside >= 3:
+            score += 10
+            reasons.append("Devre bitmeden önce güçlü gol baskısı")
+
+    # --------------------------------------------------------
+    # 6) 0-0 SENARYOSU
+    # İY 0.5 ÜST için baskı varsa ekstra ağırlık ver.
+    # --------------------------------------------------------
+    if home_goals == 0 and away_goals == 0:
+        if minute >= 30 and (target >= 2 or (shots >= 7 and inside >= 3)):
+            score += 10
+            reasons.append("0-0 skorda İY 0.5 ÜST baskısı güçleniyor")
+        elif target >= 1 or shots >= 5:
+            score += 5
+            reasons.append("0-0 skorda gol arayışı var")
+    else:
+        # İlk yarıda zaten gol varsa, devam eden tempo İY 1.5+ açısından değerlidir.
+        if home_goals + away_goals >= 1 and minute <= 42 and (target >= 3 or shots >= 8):
+            score += 6
+            reasons.append("Gol sonrası ilk yarı temposu devam ediyor")
+
+    # --------------------------------------------------------
+    # 7) KOMBİNASYON BONUSLARI
+    # Tek bir istatistiğe değil, birlikte oluşan gerçek baskıya ödül ver.
+    # --------------------------------------------------------
+    if shots >= 8 and target >= 3 and inside >= 4:
+        score += 10
+        reasons.append("Şut + isabet + ceza sahası baskısı birlikte güçlü")
+    elif shots >= 6 and target >= 2 and inside >= 3:
+        score += 6
+        reasons.append("Gol üretebilecek dengeli hücum baskısı")
+
+    if target >= 3 and corners >= 4:
+        score += 4
+
+    # --------------------------------------------------------
+    # 8) TEK TAKIM DOMİNASYONU
+    # Rakip üretmese bile bir takım tek başına gol sinyali oluşturabilsin.
+    # --------------------------------------------------------
+    def team_pressure(team: Dict[str, Any]) -> float:
+        return (
+            safe_int(team.get("shots"), 0) * 1.0
+            + safe_int(team.get("target"), 0) * 3.0
+            + safe_int(team.get("corners"), 0) * 1.0
+            + safe_int(team.get("inside"), 0) * 1.8
+        )
+
+    home_pressure = team_pressure(home)
+    away_pressure = team_pressure(away)
+
+    home_shots = safe_int(home.get("shots"), 0)
+    home_target = safe_int(home.get("target"), 0)
+    home_inside = safe_int(home.get("inside"), 0)
+    away_shots = safe_int(away.get("shots"), 0)
+    away_target = safe_int(away.get("target"), 0)
+    away_inside = safe_int(away.get("inside"), 0)
 
     expected_team = None
 
-    if away_pressure > 0 and home_pressure > away_pressure * 1.20:
+    if home_pressure > 0 and home_pressure >= away_pressure * 1.20:
         expected_team = "home"
-    elif home_pressure > 0 and away_pressure > home_pressure * 1.20:
+    elif away_pressure > 0 and away_pressure >= home_pressure * 1.20:
         expected_team = "away"
 
-    return min(score, 100), reasons, expected_team
+    home_dominant = home_shots >= 6 and (home_target >= 2 or home_inside >= 4)
+    away_dominant = away_shots >= 6 and (away_target >= 2 or away_inside >= 4)
+
+    if home_dominant and home_pressure >= away_pressure * 1.35:
+        score += 8
+        expected_team = "home"
+        reasons.append("Ev sahibi tek başına güçlü gol baskısı kuruyor")
+    elif away_dominant and away_pressure >= home_pressure * 1.35:
+        score += 8
+        expected_team = "away"
+        reasons.append("Deplasman tek başına güçlü gol baskısı kuruyor")
+
+    # Çok düşük gerçek tehditte korner/şut sayısı puanı şişirmesin.
+    if target == 0 and inside <= 1:
+        score = min(score, 54)
+        reasons.append("Kaleyi bulan net tehdit henüz zayıf")
+
+    return min(max(score, 0), 100), reasons, expected_team
 
 
 # ============================================================
