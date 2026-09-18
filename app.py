@@ -117,8 +117,6 @@ ALLOWED_LEAGUES = {
     292, 293,
     # AVUSTRALYA
     188,
-    # ROMANYA
-    283, 284,
     # SIRBİSTAN
     286,
     # HIRVATİSTAN
@@ -131,9 +129,24 @@ ALLOWED_LEAGUES = {
     244,
     # İZLANDA
     164,
-    # GÜNEY AFRİKA
-    288
 }
+
+# Yalnızca maç önü analizinden çıkarılan ligler. Canlı Gol Merkezi bu ligleri
+# taramaya devam eder; Romanya ve Güney Afrika ise yukarıdaki ortak listeden çıkarıldı.
+PREMATCH_EXCLUDED_LEAGUES = {
+    128,       # Arjantin
+    219,       # Avusturya 2. lig
+    71, 72,    # Brezilya ligleri
+    172,       # Bulgaristan
+    210,       # Hırvatistan
+    62, 63,    # Fransa 2. ve 3. lig
+    120,       # Danimarka 2. lig
+    262, 263,  # Meksika ligleri
+    107,       # Polonya 2. lig
+    293,       # Güney Kore 2. lig
+    435,       # İspanya 3. lig
+}
+PREMATCH_LEAGUES = ALLOWED_LEAGUES - PREMATCH_EXCLUDED_LEAGUES
 
 # ------------------------------------------------------------
 # Ortak durum
@@ -2091,7 +2104,7 @@ def prematch_fixtures(day: date) -> Tuple[Optional[List[Dict[str, Any]]], Option
         return None, error
     return [
         item for item in (items or [])
-        if safe_int((item.get("league") or {}).get("id")) in ALLOWED_LEAGUES
+        if safe_int((item.get("league") or {}).get("id")) in PREMATCH_LEAGUES
         and ((item.get("fixture") or {}).get("status") or {}).get("short") in ("NS", "TBD")
     ], None
 
@@ -2707,7 +2720,7 @@ select{
       <span><span class="dot" style="background:#ff3f4f"></span>0–44 Zayıf</span>
       <span>🧠 BOT PICK</span>
     </div>
-    <div>Gol Sinyal Merkezi v2.4 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
+    <div>Gol Sinyal Merkezi v2.5 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
   </div>
 </div>
 
@@ -3115,7 +3128,7 @@ button{border:1px solid #2cab79;background:#0e6f50;color:white;cursor:pointer;fo
   <label for="league">Lig</label>
   <select id="league" disabled><option value="ALL">Tüm ligler</option></select>
 </div>
-<div class="hint">Yalnızca Gol Merkezi'nde takip edilen ligler • Saatler Türkiye saatidir • Analiz, açtığın maç için yapılır.</div>
+<div class="hint">Seçilen maç önü ligleri • Saatler Türkiye saatidir • Analiz, açtığın maç için yapılır.</div>
 <p id="state">Fikstür yükleniyor…</p>
 <div class="grid" id="fixtures"></div>
 </div><script>
