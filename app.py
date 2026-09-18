@@ -27,6 +27,9 @@ FIRST_HALF_LIMIT = int(os.getenv("FIRST_HALF_LIMIT", "65"))
 BOT_PICK_LIMIT = 78
 BOT_PICK_MINUTE = 55
 BOT_PICK_CONFIRM_SCANS = 2
+BOT_PICK_LATE_MINUTE = 75
+BOT_PICK_MIN_RECENT_PRESSURE = 45
+BOT_PICK_LATE_MIN_RECENT_PRESSURE = 70
 MOMENTUM_WINDOW_SECONDS = 300
 MOMENTUM_LONG_SECONDS = 600
 TREND_HISTORY_MAX = 24
@@ -1210,6 +1213,20 @@ def calculate_bot_pick(
 
     strongest_team_signal = max(home_goal_signal, away_goal_signal)
     momentum_score = safe_int(momentum.get("score"), 0)
+    recent = momentum.get("delta_5m") or {}
+    recent_target = safe_int(recent.get("target"), 0)
+    recent_inside = safe_int(recent.get("inside"), 0)
+
+    # Eski şut birikimi tek başına yeni gol seçimi üretemez.
+    # Özellikle 75'ten sonra kalan süre azaldığı için hem güçlü güncel
+    # baskı hem de yakın zamanda isabetli/ceza içi aksiyon gerekir.
+    if minute >= BOT_PICK_LATE_MINUTE:
+        if (momentum_score < BOT_PICK_LATE_MIN_RECENT_PRESSURE
+                or recent_target < 1 or recent_inside < 1):
+            return 0, "", ["Geç dakikada güncel isabetli şut ve ceza içi baskısı yetersiz"], 0
+    elif (momentum_score < BOT_PICK_MIN_RECENT_PRESSURE
+          or (recent_target < 1 and recent_inside < 2)):
+        return 0, "", ["Son 5 dakikadaki gol aksiyonu yetersiz"], 0
 
     # Momentum artık ciddi ağırlığa sahip.
     score = round(
@@ -1251,17 +1268,21 @@ def calculate_bot_pick(
     # Takım seçimi için yalnızca toplam sinyal değil, son 5 dk takım momentumu da dikkate alınır.
     home_momentum = safe_int(momentum.get("home_score"), 0)
     away_momentum = safe_int(momentum.get("away_score"), 0)
+    recent_home = recent.get("home") or {}
+    recent_away = recent.get("away") or {}
 
     if (
         home_goal_signal >= 70
         and home_goal_signal > away_goal_signal + 12
-        and home_momentum >= away_momentum
+        and home_momentum >= max(45, away_momentum)
+        and safe_int(recent_home.get("target"), 0) >= 1
     ):
         pick_text = f"{home_team} gol atar"
     elif (
         away_goal_signal >= 70
         and away_goal_signal > home_goal_signal + 12
-        and away_momentum >= home_momentum
+        and away_momentum >= max(45, home_momentum)
+        and safe_int(recent_away.get("target"), 0) >= 1
     ):
         pick_text = f"{away_team} gol atar"
     elif btts_label != "GERÇEKLEŞTİ" and btts_signal >= 65 and momentum_score >= 35:
@@ -2481,7 +2502,7 @@ select{
       <span><span class="dot" style="background:#ff3f4f"></span>0–44 Zayıf</span>
       <span>🧠 BOT PICK</span>
     </div>
-    <div>Gol Sinyal Merkezi v2.1 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
+    <div>Gol Sinyal Merkezi v2.2 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
   </div>
 </div>
 
@@ -2705,9 +2726,13 @@ function renderMatches(){
       : (m.status==="2H" && minute<90 ? `90. dakikaya ~${90-minute} dk` : "Maç devam ediyor");
     const level=Math.max(0,Math.min(5,Math.ceil(pressure/20)));
     const dots=Array.from({length:5},(_,i)=>`<span class="pressure-dot ${i<level?"filled":""}"></span>`).join("");
-    const performance=currentBotPickStats && Number(currentBotPickStats.total)>0
-      ? `🎯 Kayıtlı BOT PICK başarısı: %${Number(currentBotPickStats.success_rate).toFixed(1).replace(".",",")} (${Number(currentBotPickStats.won)}/${Number(currentBotPickStats.total)})`
-      : "🎯 Kayıtlı BOT PICK sonucu henüz yok";
+    const recorded=Number(currentBotPickStats?.total||0);
+    const performance=recorded>=20
+      ? `🎯 Kayıtlı BOT PICK başarısı: %${Number(currentBotPickStats.success_rate).toFixed(1).replace(".",",")} (${Number(currentBotPickStats.won)}/${recorded})`
+      : recorded>0
+        ? `🎯 Kayıtlı sonuç: ${Number(currentBotPickStats.won)} doğru / ${recorded} seçim (az veri)`
+        : "🎯 Kayıtlı BOT PICK sonucu henüz yok";
+    const recent5=m.momentum_delta_5m||{};
     const oddDisplay=Number.isFinite(odd) && odd>0
       ? `<span class="featured-odd"><small>oran</small>${odd.toFixed(2)}</span>`
       : `<span class="featured-odd unavailable">oran yok</span>`;
@@ -2725,6 +2750,7 @@ function renderMatches(){
           <div>⏱️ ${minute}. dakika | ${esc(remaining)}</div>
           <div>📌 Baskı: <span class="pressure-dots" aria-label="${level}/5 baskı">${dots}</span> <b>${pressure}/100</b></div>
           ${m.bot_pick_best ? `<div>${esc(performance)}</div>` : ""}
+          ${m.bot_pick_best ? `<div>⏱️ Son 5 dk: Şut ${Number(recent5.shots||0)} · İsabet ${Number(recent5.target||0)} · Ceza içi ${Number(recent5.inside||0)}</div>` : ""}
           <div>⚽ Şut ${Number(s.shots||0)} · İsabet ${Number(s.target||0)} · Korner ${Number(s.corners||0)} · Ceza içi ${Number(s.inside||0)}</div>
         </div>
         <div class="featured-divider"></div>
