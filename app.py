@@ -177,6 +177,8 @@ live_odds_cache = {
 prematch_cache: Dict[str, Dict[str, Any]] = {}
 PREMATCH_FIXTURE_CACHE_SECONDS = 900
 PREMATCH_FORM_CACHE_SECONDS = 1800
+PREMATCH_ODDS_CACHE_SECONDS = 1800
+PREMATCH_MIN_ODD = 1.30
 ISTANBUL_TZ = ZoneInfo("Europe/Istanbul")
 
 scanner_status = {
@@ -2114,7 +2116,7 @@ def prematch_team_form(team_id: int, kickoff: str
     # Son sekiz tamamlanmış maç; bugünün canlı maçı veya gelecek maç sızmasın.
     items, error = prematch_api_cached(
         f"form:{team_id}", "/fixtures",
-        {"team": team_id, "last": 10, "timezone": "Europe/Istanbul"},
+        {"team": team_id, "last": 16, "timezone": "Europe/Istanbul"},
         PREMATCH_FORM_CACHE_SECONDS,
     )
     if error:
@@ -2146,6 +2148,9 @@ def prematch_team_form(team_id: int, kickoff: str
             "scored": scored, "conceded": conceded,
             "win": scored > conceded, "btts": scored > 0 and conceded > 0,
             "over15": scored + conceded >= 2,
+            "over25": scored + conceded >= 3,
+            "under25": scored + conceded <= 2,
+            "draw": scored == conceded,
         })
     finished.sort(key=lambda x: x["date"], reverse=True)
     recent = finished[:8]
@@ -2159,8 +2164,11 @@ def prematch_team_form(team_id: int, kickoff: str
             "scored": round(sum(x["scored"] for x in rows) / n, 2) if n else None,
             "conceded": round(sum(x["conceded"] for x in rows) / n, 2) if n else None,
             "wins": sum(x["win"] for x in rows),
+            "draws": sum(x["draw"] for x in rows),
             "btts": sum(x["btts"] for x in rows),
             "over15": sum(x["over15"] for x in rows),
+            "over25": sum(x["over25"] for x in rows),
+            "under25": sum(x["under25"] for x in rows),
         }
 
     return {
@@ -2172,33 +2180,157 @@ def prematch_team_form(team_id: int, kickoff: str
 
 
 def prematch_suggestions(home: Dict[str, Any], away: Dict[str, Any]
-                         ) -> List[Dict[str, str]]:
+                         ) -> List[Dict[str, Any]]:
     if home.get("insufficient") or away.get("insufficient"):
         return []
     h, a = home["all"], away["all"]
     hv, av = home["home"], away["away"]
-    picks = []
-    if (h["over15"] / h["count"] >= 0.65
-            and a["over15"] / a["count"] >= 0.65
-            and h["scored"] + h["conceded"] >= 2.6
-            and a["scored"] + a["conceded"] >= 2.6):
-        picks.append({"label": "1,5 ÜST eğilimi",
-                      "reason": f"Son {h['count']} / {a['count']} maçın {h['over15']} / {a['over15']} tanesi en az iki gollü."})
-    if (h["btts"] / h["count"] >= 0.60
-            and a["btts"] / a["count"] >= 0.60
-            and h["scored"] >= 1 and a["scored"] >= 1):
-        picks.append({"label": "KG VAR eğilimi",
-                      "reason": f"Son maçlarda karşılıklı gol: {h['btts']}/{h['count']} ve {a['btts']}/{a['count']}."})
+    picks: List[Dict[str, Any]] = []
+    home_goals = h["scored"] + h["conceded"]
+    away_goals = a["scored"] + a["conceded"]
+    enough_venue = hv["count"] >= 2 and av["count"] >= 2
+    venue_goals = ((hv["scored"] + hv["conceded"] + av["scored"] + av["conceded"]) / 2
+                   if enough_venue else 0)
+
+    if (enough_venue and h["over25"] / h["count"] >= .50
+            and a["over25"] / a["count"] >= .50
+            and (home_goals + away_goals) / 2 >= 2.75 and venue_goals >= 2.6):
+        picks.append({"market": "OVER_2_5", "label": "2,5 ÜST",
+                      "reason": f"Son maçlarda 3+ gol: {h['over25']}/{h['count']} ve {a['over25']}/{a['count']}; iç/dış saha toplam gol ortalaması {venue_goals:.1f}.", "rank": 4})
+    if (enough_venue and h["under25"] / h["count"] >= .625
+            and a["under25"] / a["count"] >= .625
+            and (home_goals + away_goals) / 2 <= 2.35 and venue_goals <= 2.5):
+        picks.append({"market": "UNDER_2_5", "label": "2,5 ALT",
+                      "reason": f"Son maçlarda en fazla 2 gol: {h['under25']}/{h['count']} ve {a['under25']}/{a['count']}; iç/dış saha ortalaması {venue_goals:.1f}.", "rank": 4})
+    if (enough_venue and h["btts"] / h["count"] >= .50
+            and a["btts"] / a["count"] >= .50
+            and hv["btts"] / hv["count"] >= .50 and av["btts"] / av["count"] >= .50
+            and min(h["scored"], a["scored"], hv["conceded"], av["conceded"]) >= .8):
+        picks.append({"market": "BTTS_YES", "label": "KG VAR",
+                      "reason": f"Karşılıklı gol: {h['btts']}/{h['count']} ve {a['btts']}/{a['count']}; iç/dış sahada da iki takım gol yiyor.", "rank": 4})
+    if (enough_venue and h["btts"] / h["count"] <= .38
+            and a["btts"] / a["count"] <= .38
+            and (h["scored"] <= .9 or a["scored"] <= .9)):
+        picks.append({"market": "BTTS_NO", "label": "KG YOK",
+                      "reason": f"Son maçlarda KG: {h['btts']}/{h['count']} ve {a['btts']}/{a['count']}; takımlardan birinin gol ortalaması düşük.", "rank": 3})
+
     if hv["count"] >= 3 and av["count"] >= 3:
         home_edge = hv["scored"] - hv["conceded"]
         away_edge = av["scored"] - av["conceded"]
-        if hv["wins"] / hv["count"] >= 0.67 and av["wins"] / av["count"] <= 0.33 and home_edge - away_edge >= 0.7:
-            picks.append({"label": "MS 1 eğilimi",
-                          "reason": f"Ev sahibinin iç saha galibiyeti {hv['wins']}/{hv['count']}; rakibin deplasman galibiyeti {av['wins']}/{av['count']}."})
-        elif av["wins"] / av["count"] >= 0.67 and hv["wins"] / hv["count"] <= 0.33 and away_edge - home_edge >= 0.7:
-            picks.append({"label": "MS 2 eğilimi",
-                          "reason": f"Deplasman takımının dış saha galibiyeti {av['wins']}/{av['count']}; ev sahibinin iç saha galibiyeti {hv['wins']}/{hv['count']}."})
-    return picks
+        home_wins, away_wins = hv["wins"] / hv["count"], av["wins"] / av["count"]
+        if home_wins >= .67 and away_wins <= .33 and home_edge - away_edge >= .7:
+            picks.append({"market": "HOME", "label": "MS 1",
+                          "reason": f"İç saha galibiyeti {hv['wins']}/{hv['count']}, rakibin deplasman galibiyeti {av['wins']}/{av['count']}; gol farkı ev sahibinden yana.", "rank": 5})
+        elif away_wins >= .67 and home_wins <= .33 and away_edge - home_edge >= .7:
+            picks.append({"market": "AWAY", "label": "MS 2",
+                          "reason": f"Deplasman galibiyeti {av['wins']}/{av['count']}, ev sahibinin iç saha galibiyeti {hv['wins']}/{hv['count']}; gol farkı deplasmandan yana.", "rank": 5})
+        if (hv["wins"] + hv["draws"]) / hv["count"] >= .67 and away_wins <= .33 and home_edge >= away_edge:
+            picks.append({"market": "DC_1X", "label": "1X",
+                          "reason": f"Ev sahibi iç sahada {hv['wins'] + hv['draws']}/{hv['count']} kez kaybetmedi; rakibin dış saha galibiyeti {av['wins']}/{av['count']}.", "rank": 2})
+        if (av["wins"] + av["draws"]) / av["count"] >= .67 and home_wins <= .33 and away_edge >= home_edge:
+            picks.append({"market": "DC_X2", "label": "X2",
+                          "reason": f"Deplasman takımı dış sahada {av['wins'] + av['draws']}/{av['count']} kez kaybetmedi; ev sahibinin iç saha galibiyeti {hv['wins']}/{hv['count']}.", "rank": 2})
+
+    if (not any(p["market"] == "OVER_2_5" for p in picks)
+            and h["over15"] / h["count"] >= .625 and a["over15"] / a["count"] >= .625
+            and home_goals >= 2.4 and away_goals >= 2.4):
+        picks.append({"market": "OVER_1_5", "label": "1,5 ÜST",
+                      "reason": f"En az iki gol: {h['over15']}/{h['count']} ve {a['over15']}/{a['count']}; daha yüksek gol çizgisi için işaret zayıf.", "rank": 1})
+    return sorted(picks, key=lambda p: p["rank"], reverse=True)
+
+
+PREMATCH_BOOKMAKERS = (
+    "pinnacle", "pinnaclesports", "bet365", "betfair", "betfairexchange",
+    "unibet", "bwin", "williamhill", "1xbet", "marathonbet", "10bet",
+    "888sport", "betway", "betsson", "nordicbet", "betano", "22bet",
+)
+
+
+def prematch_fixture_odds(fixture_id: int
+                          ) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+    key = f"prematch_odds:{fixture_id}"
+    with cache_lock:
+        cached = prematch_cache.get(key)
+        if cached and time.time() - cached["ts"] < PREMATCH_ODDS_CACHE_SECONDS:
+            return cached["data"], None
+    all_entries = []
+    for page in (1, 2):
+        data, error = api_get("/odds", {"fixture": fixture_id, "page": page})
+        if error or data is None:
+            if page == 1:
+                return None, error or "Maç önü oran verisi alınamadı."
+            break
+        entries = data.get("response")
+        if not isinstance(entries, list):
+            return None, "Beklenmeyen oran yanıtı."
+        all_entries.extend(entries)
+        total_pages = safe_int((data.get("paging") or {}).get("total"), 1)
+        if page >= total_pages:
+            break
+    with cache_lock:
+        prematch_cache[key] = {"ts": time.time(), "data": all_entries}
+    return all_entries, None
+
+
+def prematch_odd_for_market(entries: List[Dict[str, Any]], market_code: str
+                            ) -> Optional[Dict[str, Any]]:
+    wanted_total = {
+        "OVER_1_5": ("over", 1.5), "OVER_2_5": ("over", 2.5),
+        "UNDER_2_5": ("under", 2.5),
+    }
+    results = []
+    for entry in entries:
+        for bookmaker in entry.get("bookmakers") or []:
+            book_name = str(bookmaker.get("name") or "")
+            book_key = re.sub(r"[^a-z0-9]", "", book_name.lower())
+            if book_key not in PREMATCH_BOOKMAKERS:
+                continue
+            for bet in bookmaker.get("bets") or []:
+                name = str(bet.get("name") or "").strip().lower()
+                is_result = name in ("match winner", "1x2", "full time result", "fulltime result")
+                is_double = name == "double chance"
+                is_btts = name in ("both teams score", "both teams to score", "btts")
+                is_total = name in ("goals over/under", "total goals", "over/under")
+                for value in bet.get("values") or []:
+                    selection = str(value.get("value") or "").strip()
+                    normalized = re.sub(r"\s+", "", selection.lower())
+                    matches = False
+                    if market_code in wanted_total and is_total:
+                        direction, line = wanted_total[market_code]
+                        found_line = _float_line(value.get("handicap"))
+                        if found_line is None:
+                            found_line = _float_line(selection)
+                        matches = normalized.startswith(direction) and found_line is not None and abs(found_line - line) < .01
+                    elif market_code == "BTTS_YES" and is_btts:
+                        matches = normalized in ("yes", "evet")
+                    elif market_code == "BTTS_NO" and is_btts:
+                        matches = normalized in ("no", "hayır", "hayir")
+                    elif market_code == "HOME" and is_result:
+                        matches = normalized in ("home", "1")
+                    elif market_code == "AWAY" and is_result:
+                        matches = normalized in ("away", "2")
+                    elif market_code == "DC_1X" and is_double:
+                        matches = normalized in ("home/draw", "1x", "homedraw")
+                    elif market_code == "DC_X2" and is_double:
+                        matches = normalized in ("draw/away", "x2", "drawaway")
+                    if not matches:
+                        continue
+                    odd = _float_odd(value.get("odd"))
+                    if odd is None or odd < PREMATCH_MIN_ODD:
+                        continue
+                    results.append({
+                        "odd": round(odd, 2), "bookmaker": book_name,
+                        "market_name": bet.get("name"), "selection": selection,
+                        "updated": entry.get("update"),
+                        "book_priority": PREMATCH_BOOKMAKERS.index(book_key),
+                    })
+    if not results:
+        return None
+    # Önceden belirlenen yabancı sağlayıcı sırası; uç bir en yüksek oranı seçme.
+    results.sort(key=lambda quote: (quote["book_priority"], quote["odd"]))
+    chosen = results[0]
+    chosen.pop("book_priority", None)
+    return chosen
 
 
 @app.route("/api/prematch/fixtures")
@@ -2254,11 +2386,37 @@ def api_prematch_analyze():
     if home_error or away_error:
         return jsonify({"error": home_error or away_error}), 503
     suggestions = prematch_suggestions(home or {}, away or {})
+    odds_entries, odds_error = prematch_fixture_odds(fixture_id) if suggestions else ([], None)
+    priced = []
+    if odds_entries is not None:
+        for suggestion in suggestions:
+            quote = prematch_odd_for_market(odds_entries, suggestion["market"])
+            # 1,5 ÜST yalnızca gerçek bir alternatif kalmadığında ve daha
+            # anlamlı bir fiyatla gösterilir; ekranı kolay seçimlerle doldurma.
+            if suggestion["market"] == "OVER_1_5" and quote and quote["odd"] < 1.50:
+                quote = None
+            if quote:
+                priced.append({
+                    "label": suggestion["label"], "reason": suggestion["reason"],
+                    "quote": quote,
+                })
+    if any(item["label"] != "1,5 ÜST" for item in priced):
+        priced = [item for item in priced if item["label"] != "1,5 ÜST"]
+    priced = priced[:3]
+    if odds_error:
+        odds_note = f"Oran sağlayıcısı yanıt vermedi: {odds_error}"
+    elif suggestions and not priced:
+        odds_note = "Veri eğilimi bulundu; uygun yabancı oran bulunamadı (genel alt sınır 1,30; 1,5 ÜST için 1,50)."
+    elif not suggestions:
+        odds_note = "Veri eğilimi yeterli değil; oran araması yapılmadı."
+    else:
+        odds_note = "Oranlar bilgi amaçlıdır; sağlayıcıda değişebilir."
     return jsonify({
         "id": fixture_id, "home": home_team.get("name"), "away": away_team.get("name"),
         "home_form": home, "away_form": away,
-        "suggestions": suggestions,
-        "decision": "PAS" if not suggestions else "EĞİLİM",
+        "suggestions": priced,
+        "decision": "PAS" if not priced else "EĞİLİM",
+        "candidate_count": len(suggestions), "odds_note": odds_note,
         "note": "Son maçlara dayalı ön analiz; sakatlık, kadro ve canlı gelişmeler dahil değil.",
     })
 
@@ -2720,7 +2878,7 @@ select{
       <span><span class="dot" style="background:#ff3f4f"></span>0–44 Zayıf</span>
       <span>🧠 BOT PICK</span>
     </div>
-    <div>Gol Sinyal Merkezi v2.5 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
+    <div>Gol Sinyal Merkezi v2.6 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
   </div>
 </div>
 
@@ -3114,6 +3272,7 @@ button{border:1px solid #2cab79;background:#0e6f50;color:white;cursor:pointer;fo
 .analysis{border-top:1px solid #40546e;margin-top:14px;padding-top:14px;line-height:1.5}
 .pick{border:1px solid #278966;background:#103d32;padding:9px;border-radius:8px;margin-top:9px}
 .pick b{color:#72e7b3}.reason{font-size:12px;color:#b9c9d5}
+.quote{font-weight:800;color:#e7f5ff;margin-top:4px}.odds-note{font-size:12px;color:#abc0d0;margin-top:10px}
 .form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:10px 0}
 .form div{background:#101f30;padding:9px;border-radius:7px;font-size:12px}
 .pas{color:#ffc877;font-weight:800}.error{color:#ff9da1}
@@ -3136,9 +3295,11 @@ const esc=v=>String(v??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replac
 const day=document.getElementById("day"),state=document.getElementById("state"),root=document.getElementById("fixtures"),leagueSelect=document.getElementById("league");
 let loadedMatches=[],loadedDate="";
 function shownTime(v){try{return new Intl.DateTimeFormat("tr-TR",{timeZone:"Europe/Istanbul",hour:"2-digit",minute:"2-digit"}).format(new Date(v))}catch{return "Saat bilinmiyor"}}
-function formText(v){
+function quoteTime(v){if(!v)return "";const d=new Date(v);return Number.isNaN(d.getTime())?"":new Intl.DateTimeFormat("tr-TR",{timeZone:"Europe/Istanbul",day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}).format(d)}
+function formText(v,side){
   if(!v || v.insufficient)return `Tamamlanmış son maç sayısı: ${Number(v?.count||0)} (en az 5 gerekli)`;
-  const a=v.all;return `Son ${a.count} maç: ${a.wins} galibiyet · maç başı ${a.scored} atılan / ${a.conceded} yenilen gol · ${a.btts} KG · ${a.over15} kez 1,5 üst`;
+  const a=v.all,venue=v[side],label=side==="home"?"İç saha":"Deplasman";
+  return `Son ${a.count} maç: ${a.wins} galibiyet · maç başı ${a.scored} atılan / ${a.conceded} yenilen gol · ${a.btts} KG · ${a.over25} kez 2,5 üst · ${a.under25} kez 2,5 alt. ${label} (${venue.count} maç): ${venue.wins} galibiyet, maç başı ${venue.scored ?? "—"} atılan / ${venue.conceded ?? "—"} yenilen gol.`;
 }
 async function getJson(url){
   const r=await fetch(url,{cache:"no-store"});let body;
@@ -3165,11 +3326,11 @@ function renderFixtures(){
         try{
           const a=await getJson("/api/prematch/analyze?date="+encodeURIComponent(selected)+"&fixture="+encodeURIComponent(m.id));
           const picks=a.suggestions.length
-            ? a.suggestions.map(p=>`<div class="pick"><b>${esc(p.label)}</b><div class="reason">${esc(p.reason)}</div></div>`).join("")
-            : '<div class="pas">PAS • Güvenilir bir eğilim için yeterli ortak işaret yok.</div>';
-          box.innerHTML=`<div class="form"><div><b>${esc(a.home)}</b><br>${esc(formText(a.home_form))}</div>
-            <div><b>${esc(a.away)}</b><br>${esc(formText(a.away_form))}</div></div>
-            ${picks}<div class="hint">${esc(a.note)}</div>`;
+            ? a.suggestions.map(p=>`<div class="pick"><b>${esc(p.label)}</b><div class="quote">Oran ${Number(p.quote.odd).toFixed(2)} · ${esc(p.quote.bookmaker)}</div><div class="reason">${esc(p.quote.market_name)}: ${esc(p.quote.selection)}${quoteTime(p.quote.updated)?` · Güncelleme: ${esc(quoteTime(p.quote.updated))}`:""}<br>${esc(p.reason)}</div></div>`).join("")
+            : `<div class="pas">PAS • ${a.candidate_count ? "Modelde eğilim var, ancak fiyat koşulu sağlanmadı." : "Yeterli ortak veri işareti yok."}</div>`;
+          box.innerHTML=`<div class="form"><div><b>${esc(a.home)}</b><br>${esc(formText(a.home_form,"home"))}</div>
+            <div><b>${esc(a.away)}</b><br>${esc(formText(a.away_form,"away"))}</div></div>
+            ${picks}<div class="odds-note">${esc(a.odds_note)}</div><div class="hint">${esc(a.note)}</div>`;
         }catch(e){box.innerHTML='<span class="error">'+esc(e.message)+'</span>'}
         finally{button.disabled=false}
       };
