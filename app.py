@@ -2205,7 +2205,8 @@ def api_prematch_fixtures():
             "id": fixture.get("id"), "kickoff": fixture.get("date"),
             "home": (teams.get("home") or {}).get("name"),
             "away": (teams.get("away") or {}).get("name"),
-            "league": league.get("name"), "country": league.get("country"),
+            "league_id": league.get("id"), "league": league.get("name"),
+            "country": league.get("country"),
         })
     result.sort(key=lambda x: x.get("kickoff") or "")
     return jsonify({"date": day.isoformat(), "count": len(result), "matches": result})
@@ -2706,7 +2707,7 @@ select{
       <span><span class="dot" style="background:#ff3f4f"></span>0–44 Zayıf</span>
       <span>🧠 BOT PICK</span>
     </div>
-    <div>Gol Sinyal Merkezi v2.3 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
+    <div>Gol Sinyal Merkezi v2.4 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
   </div>
 </div>
 
@@ -3091,7 +3092,8 @@ header{display:flex;justify-content:space-between;align-items:center;gap:15px;fl
 h1{font-size:25px;margin:0 0 5px}p{color:#a9bdce;margin:0;line-height:1.5}
 a{color:#70e5b0;text-decoration:none}a:hover{text-decoration:underline}
 .toolbar{display:flex;align-items:center;gap:9px;flex-wrap:wrap;padding:15px;background:#13283a;border:1px solid #305064;border-radius:13px}
-input,button{font:inherit;border-radius:9px;padding:10px 12px}input{background:#071d2d;color:#fff;border:1px solid #3c647a;color-scheme:dark}
+input,select,button{font:inherit;border-radius:9px;padding:10px 12px}input,select{background:#071d2d;color:#fff;border:1px solid #3c647a;color-scheme:dark}
+select{max-width:min(100%,320px)}select:disabled{opacity:.55}
 button{border:1px solid #2cab79;background:#0e6f50;color:white;cursor:pointer;font-weight:700}button:disabled{opacity:.5;cursor:wait}
 .hint{font-size:12px;color:#9eb2c6;margin:14px 0}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
 .match{padding:16px;border:1px solid #37536d;border-radius:14px;background:#1b293e}
@@ -3110,13 +3112,16 @@ button{border:1px solid #2cab79;background:#0e6f50;color:white;cursor:pointer;fo
   <label for="day">Maç günü</label>
   <input id="day" type="date" min="{{today}}" max="{{last_day}}" value="{{initial_day}}">
   <button id="load">Fikstürü getir</button>
+  <label for="league">Lig</label>
+  <select id="league" disabled><option value="ALL">Tüm ligler</option></select>
 </div>
 <div class="hint">Yalnızca Gol Merkezi'nde takip edilen ligler • Saatler Türkiye saatidir • Analiz, açtığın maç için yapılır.</div>
 <p id="state">Fikstür yükleniyor…</p>
 <div class="grid" id="fixtures"></div>
 </div><script>
 const esc=v=>String(v??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;");
-const day=document.getElementById("day"),state=document.getElementById("state"),root=document.getElementById("fixtures");
+const day=document.getElementById("day"),state=document.getElementById("state"),root=document.getElementById("fixtures"),leagueSelect=document.getElementById("league");
+let loadedMatches=[],loadedDate="";
 function shownTime(v){try{return new Intl.DateTimeFormat("tr-TR",{timeZone:"Europe/Istanbul",hour:"2-digit",minute:"2-digit"}).format(new Date(v))}catch{return "Saat bilinmiyor"}}
 function formText(v){
   if(!v || v.insufficient)return `Tamamlanmış son maç sayısı: ${Number(v?.count||0)} (en az 5 gerekli)`;
@@ -3128,12 +3133,15 @@ async function getJson(url){
   if(!r.ok)throw Error(body.error||"Veri alınamadı.");
   return body;
 }
-async function load(){
-  const selected=day.value;state.textContent="Fikstür yükleniyor…";root.innerHTML="";
-  try{
-    const data=await getJson("/api/prematch/fixtures?date="+encodeURIComponent(selected));
-    state.textContent=data.count ? `${data.count} maç bulundu. Analiz için bir maç seç.` : "Bu gün takip edilen liglerde başlamamış maç bulunamadı.";
-    for(const m of data.matches){
+function renderFixtures(){
+  const selected=loadedDate;
+  const filtered=leagueSelect.value==="ALL" ? loadedMatches
+    : loadedMatches.filter(m=>String(m.league_id)===leagueSelect.value);
+  state.textContent=filtered.length
+    ? `${filtered.length} maç gösteriliyor. Analiz için bir maç seç.`
+    : "Seçilen ligde başlamamış maç bulunamadı.";
+  root.innerHTML="";
+  for(const m of filtered){
       const card=document.createElement("article");card.className="match";
       card.innerHTML=`<div class="meta">🏆 ${esc(m.country)} • ${esc(m.league)} &nbsp; ⏰ ${esc(shownTime(m.kickoff))}</div>
         <div class="teams">${esc(m.home)} — ${esc(m.away)}</div>
@@ -3153,9 +3161,29 @@ async function load(){
         finally{button.disabled=false}
       };
       root.appendChild(card);
+  }
+}
+async function load(){
+  const selected=day.value;state.textContent="Fikstür yükleniyor…";root.innerHTML="";
+  leagueSelect.disabled=true;leagueSelect.innerHTML='<option value="ALL">Tüm ligler</option>';
+  loadedMatches=[];loadedDate="";
+  try{
+    const data=await getJson("/api/prematch/fixtures?date="+encodeURIComponent(selected));
+    loadedDate=selected;loadedMatches=data.matches;
+    const leagues=new Map();
+    for(const m of loadedMatches){
+      const id=String(m.league_id);
+      if(!leagues.has(id))leagues.set(id,{name:`${m.country||""} • ${m.league||"Lig"}`,count:0});
+      leagues.get(id).count++;
     }
+    const options=[...leagues.entries()].sort((a,b)=>a[1].name.localeCompare(b[1].name,"tr"));
+    leagueSelect.innerHTML=`<option value="ALL">Tüm ligler (${loadedMatches.length})</option>`+
+      options.map(([id,item])=>`<option value="${esc(id)}">${esc(item.name)} (${item.count})</option>`).join("");
+    leagueSelect.disabled=options.length===0;
+    renderFixtures();
   }catch(e){state.innerHTML='<span class="error">'+esc(e.message)+'</span>'}
 }
+leagueSelect.onchange=renderFixtures;
 document.getElementById("load").onclick=load;load();
 </script></body></html>"""
 
