@@ -4,11 +4,12 @@ import json
 import re
 import threading
 import fcntl
-from datetime import datetime
+from datetime import datetime, timedelta, date
 from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import requests
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify, render_template_string, request
 
 # ============================================================
 # GOL SİNYAL MERKEZİ - WEB ONLY
@@ -158,6 +159,12 @@ live_odds_cache = {
     "data": [],
     "error": None,
 }
+
+# Maç önü istekleri sayfa açılışlarında tekrar API kotası tüketmesin.
+prematch_cache: Dict[str, Dict[str, Any]] = {}
+PREMATCH_FIXTURE_CACHE_SECONDS = 900
+PREMATCH_FORM_CACHE_SECONDS = 1800
+ISTANBUL_TZ = ZoneInfo("Europe/Istanbul")
 
 scanner_status = {
     "running": False,
@@ -2045,6 +2052,202 @@ def ensure_scanner_started():
 # WEB API
 # ============================================================
 
+def prematch_day(raw: str) -> Optional[date]:
+    try:
+        requested = date.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return None
+    today = datetime.now(ISTANBUL_TZ).date()
+    return requested if today <= requested <= today + timedelta(days=7) else None
+
+
+def prematch_api_cached(key: str, path: str, params: Dict[str, Any], ttl: int
+                        ) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+    with cache_lock:
+        cached = prematch_cache.get(key)
+        if cached and time.time() - cached["ts"] < ttl:
+            return cached["data"], None
+    data, error = api_get(path, params)
+    if error or data is None:
+        return None, error or "Veri alınamadı."
+    response = data.get("response")
+    if not isinstance(response, list):
+        return None, "Beklenmeyen fikstür yanıtı."
+    with cache_lock:
+        prematch_cache[key] = {"ts": time.time(), "data": response}
+        if len(prematch_cache) > 300:
+            oldest = min(prematch_cache, key=lambda item: prematch_cache[item]["ts"])
+            prematch_cache.pop(oldest, None)
+    return response, None
+
+
+def prematch_fixtures(day: date) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+    items, error = prematch_api_cached(
+        f"day:{day.isoformat()}", "/fixtures",
+        {"date": day.isoformat(), "timezone": "Europe/Istanbul"},
+        PREMATCH_FIXTURE_CACHE_SECONDS,
+    )
+    if error:
+        return None, error
+    return [
+        item for item in (items or [])
+        if safe_int((item.get("league") or {}).get("id")) in ALLOWED_LEAGUES
+        and ((item.get("fixture") or {}).get("status") or {}).get("short") in ("NS", "TBD")
+    ], None
+
+
+def prematch_team_form(team_id: int, kickoff: str
+                       ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    # Son sekiz tamamlanmış maç; bugünün canlı maçı veya gelecek maç sızmasın.
+    items, error = prematch_api_cached(
+        f"form:{team_id}", "/fixtures",
+        {"team": team_id, "last": 10, "timezone": "Europe/Istanbul"},
+        PREMATCH_FORM_CACHE_SECONDS,
+    )
+    if error:
+        return None, error
+    finished = []
+    for item in items or []:
+        fixture = item.get("fixture") or {}
+        status = (fixture.get("status") or {}).get("short")
+        played_at = fixture.get("date") or ""
+        try:
+            match_time = datetime.fromisoformat(played_at)
+            kickoff_time = datetime.fromisoformat(kickoff)
+        except (TypeError, ValueError):
+            continue
+        if (status not in ("FT", "AET", "PEN") or match_time >= kickoff_time
+                or kickoff_time - match_time > timedelta(days=180)):
+            continue
+        sides = item.get("teams") or {}
+        goals = item.get("goals") or {}
+        home = safe_int((sides.get("home") or {}).get("id"))
+        away = safe_int((sides.get("away") or {}).get("id"))
+        if team_id not in (home, away) or goals.get("home") is None or goals.get("away") is None:
+            continue
+        is_home = home == team_id
+        scored = safe_int(goals.get("home" if is_home else "away"))
+        conceded = safe_int(goals.get("away" if is_home else "home"))
+        finished.append({
+            "date": played_at, "venue": "home" if is_home else "away",
+            "scored": scored, "conceded": conceded,
+            "win": scored > conceded, "btts": scored > 0 and conceded > 0,
+            "over15": scored + conceded >= 2,
+        })
+    finished.sort(key=lambda x: x["date"], reverse=True)
+    recent = finished[:8]
+    if len(recent) < 5:
+        return {"count": len(recent), "insufficient": True}, None
+
+    def metrics(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+        n = len(rows)
+        return {
+            "count": n,
+            "scored": round(sum(x["scored"] for x in rows) / n, 2) if n else None,
+            "conceded": round(sum(x["conceded"] for x in rows) / n, 2) if n else None,
+            "wins": sum(x["win"] for x in rows),
+            "btts": sum(x["btts"] for x in rows),
+            "over15": sum(x["over15"] for x in rows),
+        }
+
+    return {
+        "count": len(recent),
+        "all": metrics(recent),
+        "home": metrics([x for x in recent if x["venue"] == "home"]),
+        "away": metrics([x for x in recent if x["venue"] == "away"]),
+    }, None
+
+
+def prematch_suggestions(home: Dict[str, Any], away: Dict[str, Any]
+                         ) -> List[Dict[str, str]]:
+    if home.get("insufficient") or away.get("insufficient"):
+        return []
+    h, a = home["all"], away["all"]
+    hv, av = home["home"], away["away"]
+    picks = []
+    if (h["over15"] / h["count"] >= 0.65
+            and a["over15"] / a["count"] >= 0.65
+            and h["scored"] + h["conceded"] >= 2.6
+            and a["scored"] + a["conceded"] >= 2.6):
+        picks.append({"label": "1,5 ÜST eğilimi",
+                      "reason": f"Son {h['count']} / {a['count']} maçın {h['over15']} / {a['over15']} tanesi en az iki gollü."})
+    if (h["btts"] / h["count"] >= 0.60
+            and a["btts"] / a["count"] >= 0.60
+            and h["scored"] >= 1 and a["scored"] >= 1):
+        picks.append({"label": "KG VAR eğilimi",
+                      "reason": f"Son maçlarda karşılıklı gol: {h['btts']}/{h['count']} ve {a['btts']}/{a['count']}."})
+    if hv["count"] >= 3 and av["count"] >= 3:
+        home_edge = hv["scored"] - hv["conceded"]
+        away_edge = av["scored"] - av["conceded"]
+        if hv["wins"] / hv["count"] >= 0.67 and av["wins"] / av["count"] <= 0.33 and home_edge - away_edge >= 0.7:
+            picks.append({"label": "MS 1 eğilimi",
+                          "reason": f"Ev sahibinin iç saha galibiyeti {hv['wins']}/{hv['count']}; rakibin deplasman galibiyeti {av['wins']}/{av['count']}."})
+        elif av["wins"] / av["count"] >= 0.67 and hv["wins"] / hv["count"] <= 0.33 and away_edge - home_edge >= 0.7:
+            picks.append({"label": "MS 2 eğilimi",
+                          "reason": f"Deplasman takımının dış saha galibiyeti {av['wins']}/{av['count']}; ev sahibinin iç saha galibiyeti {hv['wins']}/{hv['count']}."})
+    return picks
+
+
+@app.route("/api/prematch/fixtures")
+def api_prematch_fixtures():
+    day = prematch_day(request.args.get("date", ""))
+    if day is None:
+        return jsonify({"error": "Bugünden sonraki 7 gün içinde geçerli bir tarih seç."}), 400
+    matches, error = prematch_fixtures(day)
+    if error:
+        return jsonify({"error": error}), 503
+    result = []
+    for match in matches or []:
+        fixture = match.get("fixture") or {}
+        teams = match.get("teams") or {}
+        league = match.get("league") or {}
+        result.append({
+            "id": fixture.get("id"), "kickoff": fixture.get("date"),
+            "home": (teams.get("home") or {}).get("name"),
+            "away": (teams.get("away") or {}).get("name"),
+            "league": league.get("name"), "country": league.get("country"),
+        })
+    result.sort(key=lambda x: x.get("kickoff") or "")
+    return jsonify({"date": day.isoformat(), "count": len(result), "matches": result})
+
+
+@app.route("/api/prematch/analyze")
+def api_prematch_analyze():
+    day = prematch_day(request.args.get("date", ""))
+    fixture_id = safe_int(request.args.get("fixture"), 0)
+    if day is None or fixture_id <= 0:
+        return jsonify({"error": "Geçerli tarih ve maç seç."}), 400
+    matches, error = prematch_fixtures(day)
+    if error:
+        return jsonify({"error": error}), 503
+    match = next((m for m in matches or []
+                  if safe_int((m.get("fixture") or {}).get("id")) == fixture_id), None)
+    if match is None:
+        return jsonify({"error": "Bu tarihte başlamamış bir maç bulunamadı."}), 404
+    fixture = match.get("fixture") or {}
+    try:
+        if datetime.fromisoformat(fixture.get("date") or "").astimezone(ISTANBUL_TZ) <= datetime.now(ISTANBUL_TZ):
+            return jsonify({"error": "Maç başladı; maç önü analizi kapandı."}), 409
+    except ValueError:
+        return jsonify({"error": "Maç başlangıç saati bulunamadı."}), 422
+    teams = match.get("teams") or {}
+    home_team, away_team = teams.get("home") or {}, teams.get("away") or {}
+    home_id, away_id = safe_int(home_team.get("id")), safe_int(away_team.get("id"))
+    if not home_id or not away_id:
+        return jsonify({"error": "Takım bilgileri eksik."}), 422
+    home, home_error = prematch_team_form(home_id, fixture.get("date") or "")
+    away, away_error = prematch_team_form(away_id, fixture.get("date") or "")
+    if home_error or away_error:
+        return jsonify({"error": home_error or away_error}), 503
+    suggestions = prematch_suggestions(home or {}, away or {})
+    return jsonify({
+        "id": fixture_id, "home": home_team.get("name"), "away": away_team.get("name"),
+        "home_form": home, "away_form": away,
+        "suggestions": suggestions,
+        "decision": "PAS" if not suggestions else "EĞİLİM",
+        "note": "Son maçlara dayalı ön analiz; sakatlık, kadro ve canlı gelişmeler dahil değil.",
+    })
+
 
 @app.route("/api/live-leagues")
 def api_live_leagues():
@@ -2468,6 +2671,7 @@ select{
     </div>
 
     <div class="header-right">
+      <a class="info-pill" href="/tahmin" style="text-decoration:none;color:inherit">📅 Maç Önü Tahminleri</a>
       <div class="status-pill" id="systemState">● Sistem Aktif</div>
       <div class="info-pill" id="lastScan">Son güncelleme: -</div>
       <div class="info-pill" id="scanEvery">↻ 30 sn'de bir</div>
@@ -2502,7 +2706,7 @@ select{
       <span><span class="dot" style="background:#ff3f4f"></span>0–44 Zayıf</span>
       <span>🧠 BOT PICK</span>
     </div>
-    <div>Gol Sinyal Merkezi v2.2 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
+    <div>Gol Sinyal Merkezi v2.3 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
   </div>
 </div>
 
@@ -2876,6 +3080,95 @@ setInterval(loadAll,5000);
 @app.route("/")
 def index():
     return render_template_string(PAGE)
+
+PREMATCH_PAGE = r"""<!doctype html>
+<html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Maç Önü Tahminleri • Gol Merkezi</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#071625;color:#ebf5ff;font:15px system-ui,Arial,sans-serif}
+.wrap{max-width:1080px;margin:auto;padding:22px 16px 60px}
+header{display:flex;justify-content:space-between;align-items:center;gap:15px;flex-wrap:wrap;margin-bottom:22px}
+h1{font-size:25px;margin:0 0 5px}p{color:#a9bdce;margin:0;line-height:1.5}
+a{color:#70e5b0;text-decoration:none}a:hover{text-decoration:underline}
+.toolbar{display:flex;align-items:center;gap:9px;flex-wrap:wrap;padding:15px;background:#13283a;border:1px solid #305064;border-radius:13px}
+input,button{font:inherit;border-radius:9px;padding:10px 12px}input{background:#071d2d;color:#fff;border:1px solid #3c647a;color-scheme:dark}
+button{border:1px solid #2cab79;background:#0e6f50;color:white;cursor:pointer;font-weight:700}button:disabled{opacity:.5;cursor:wait}
+.hint{font-size:12px;color:#9eb2c6;margin:14px 0}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.match{padding:16px;border:1px solid #37536d;border-radius:14px;background:#1b293e}
+.meta{font-size:12px;color:#adc3d5;margin-bottom:8px}.teams{font-size:18px;font-weight:800;margin-bottom:12px}
+.analysis{border-top:1px solid #40546e;margin-top:14px;padding-top:14px;line-height:1.5}
+.pick{border:1px solid #278966;background:#103d32;padding:9px;border-radius:8px;margin-top:9px}
+.pick b{color:#72e7b3}.reason{font-size:12px;color:#b9c9d5}
+.form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:10px 0}
+.form div{background:#101f30;padding:9px;border-radius:7px;font-size:12px}
+.pas{color:#ffc877;font-weight:800}.error{color:#ff9da1}
+@media(max-width:680px){.grid,.form{grid-template-columns:1fr}.teams{font-size:16px}}
+</style></head><body><div class="wrap">
+<header><div><h1>📅 Maç Önü Tahminleri</h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
+<a href="/">← Canlı Gol Merkezi</a></header>
+<div class="toolbar">
+  <label for="day">Maç günü</label>
+  <input id="day" type="date" min="{{today}}" max="{{last_day}}" value="{{initial_day}}">
+  <button id="load">Fikstürü getir</button>
+</div>
+<div class="hint">Yalnızca Gol Merkezi'nde takip edilen ligler • Saatler Türkiye saatidir • Analiz, açtığın maç için yapılır.</div>
+<p id="state">Fikstür yükleniyor…</p>
+<div class="grid" id="fixtures"></div>
+</div><script>
+const esc=v=>String(v??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;");
+const day=document.getElementById("day"),state=document.getElementById("state"),root=document.getElementById("fixtures");
+function shownTime(v){try{return new Intl.DateTimeFormat("tr-TR",{timeZone:"Europe/Istanbul",hour:"2-digit",minute:"2-digit"}).format(new Date(v))}catch{return "Saat bilinmiyor"}}
+function formText(v){
+  if(!v || v.insufficient)return `Tamamlanmış son maç sayısı: ${Number(v?.count||0)} (en az 5 gerekli)`;
+  const a=v.all;return `Son ${a.count} maç: ${a.wins} galibiyet · maç başı ${a.scored} atılan / ${a.conceded} yenilen gol · ${a.btts} KG · ${a.over15} kez 1,5 üst`;
+}
+async function getJson(url){
+  const r=await fetch(url,{cache:"no-store"});let body;
+  try{body=await r.json()}catch{throw Error("Sunucu yanıtı okunamadı.")}
+  if(!r.ok)throw Error(body.error||"Veri alınamadı.");
+  return body;
+}
+async function load(){
+  const selected=day.value;state.textContent="Fikstür yükleniyor…";root.innerHTML="";
+  try{
+    const data=await getJson("/api/prematch/fixtures?date="+encodeURIComponent(selected));
+    state.textContent=data.count ? `${data.count} maç bulundu. Analiz için bir maç seç.` : "Bu gün takip edilen liglerde başlamamış maç bulunamadı.";
+    for(const m of data.matches){
+      const card=document.createElement("article");card.className="match";
+      card.innerHTML=`<div class="meta">🏆 ${esc(m.country)} • ${esc(m.league)} &nbsp; ⏰ ${esc(shownTime(m.kickoff))}</div>
+        <div class="teams">${esc(m.home)} — ${esc(m.away)}</div>
+        <button type="button">Bu maçı analiz et</button><div class="analysis" hidden></div>`;
+      const button=card.querySelector("button"),box=card.querySelector(".analysis");
+      button.onclick=async()=>{
+        button.disabled=true;box.hidden=false;box.textContent="Son maçlar inceleniyor…";
+        try{
+          const a=await getJson("/api/prematch/analyze?date="+encodeURIComponent(selected)+"&fixture="+encodeURIComponent(m.id));
+          const picks=a.suggestions.length
+            ? a.suggestions.map(p=>`<div class="pick"><b>${esc(p.label)}</b><div class="reason">${esc(p.reason)}</div></div>`).join("")
+            : '<div class="pas">PAS • Güvenilir bir eğilim için yeterli ortak işaret yok.</div>';
+          box.innerHTML=`<div class="form"><div><b>${esc(a.home)}</b><br>${esc(formText(a.home_form))}</div>
+            <div><b>${esc(a.away)}</b><br>${esc(formText(a.away_form))}</div></div>
+            ${picks}<div class="hint">${esc(a.note)}</div>`;
+        }catch(e){box.innerHTML='<span class="error">'+esc(e.message)+'</span>'}
+        finally{button.disabled=false}
+      };
+      root.appendChild(card);
+    }
+  }catch(e){state.innerHTML='<span class="error">'+esc(e.message)+'</span>'}
+}
+document.getElementById("load").onclick=load;load();
+</script></body></html>"""
+
+
+@app.route("/tahmin")
+def prematch_page():
+    today = datetime.now(ISTANBUL_TZ).date()
+    next_saturday = today + timedelta(days=(5 - today.weekday()) % 7)
+    return render_template_string(
+        PREMATCH_PAGE, today=today.isoformat(),
+        initial_day=next_saturday.isoformat(),
+        last_day=(today + timedelta(days=7)).isoformat(),
+    )
 
 
 # Gunicorn import ettiğinde scanner başlasın.
