@@ -178,6 +178,7 @@ prematch_cache: Dict[str, Dict[str, Any]] = {}
 PREMATCH_FIXTURE_CACHE_SECONDS = 900
 PREMATCH_FORM_CACHE_SECONDS = 1800
 PREMATCH_ODDS_CACHE_SECONDS = 1800
+PREMATCH_LINEUP_CACHE_SECONDS = 300
 PREMATCH_MIN_ODD = 1.30
 ISTANBUL_TZ = ZoneInfo("Europe/Istanbul")
 
@@ -2185,7 +2186,83 @@ def prematch_team_form(team_id: int, kickoff: str
     }, None
 
 
-def prematch_suggestions(home: Dict[str, Any], away: Dict[str, Any]
+def _lineup_shape(entry: Dict[str, Any]) -> Dict[str, Any]:
+    starters = []
+    positions = {"G": 0, "D": 0, "M": 0, "F": 0}
+    for item in entry.get("startXI") or []:
+        player = item.get("player") or {}
+        pos = str(player.get("pos") or "").upper()[:1]
+        if pos in positions:
+            positions[pos] += 1
+        starters.append({
+            "id": player.get("id"), "name": player.get("name"), "pos": pos or "?",
+        })
+    formation = str(entry.get("formation") or "").strip()
+    first_band = safe_int(formation.split("-")[0], 0) if formation else 0
+    posture = 0
+    if positions["F"] >= 3 or first_band == 3:
+        posture += 1
+    if positions["F"] <= 1 and first_band >= 5:
+        posture -= 1
+    return {
+        "team_id": safe_int((entry.get("team") or {}).get("id")),
+        "team": (entry.get("team") or {}).get("name"),
+        "formation": formation or "Bilinmiyor", "starters": starters,
+        "positions": positions, "posture": posture,
+        "confirmed": len(starters) >= 10,
+    }
+
+
+def prematch_lineups(fixture_id: int, home_id: int, away_id: int
+                      ) -> Tuple[Dict[str, Any], Optional[str]]:
+    items, error = prematch_api_cached(
+        f"lineups:{fixture_id}", "/fixtures/lineups", {"fixture": fixture_id},
+        PREMATCH_LINEUP_CACHE_SECONDS,
+    )
+    if error:
+        return {"confirmed": False, "home": None, "away": None}, error
+    shaped = [_lineup_shape(item) for item in (items or [])]
+    home = next((item for item in shaped if item["team_id"] == home_id), None)
+    away = next((item for item in shaped if item["team_id"] == away_id), None)
+    confirmed = bool(home and away and home["confirmed"] and away["confirmed"])
+    return {"confirmed": confirmed, "home": home, "away": away}, None
+
+
+def lineup_market_note(market: str, lineups: Dict[str, Any]) -> Tuple[int, str]:
+    if not lineups.get("confirmed"):
+        return 0, "Kadrolar henüz açıklanmadığı için bu seçim form ve iç/dış saha verileriyle üretildi."
+    home, away = lineups["home"], lineups["away"]
+    hp, ap = home["posture"], away["posture"]
+    hf, af = home["positions"]["F"], away["positions"]["F"]
+    base = (f"Onaylı dizilişler {home['formation']} ve {away['formation']}; "
+            f"ilk 11'lerde {hf} ve {af} hücum oyuncusu görünüyor. ")
+    if market in ("OVER_2_5", "OVER_3_5", "BTTS_YES"):
+        fit = hp + ap
+        verdict = ("İki kadronun hücum yerleşimi gol tercihini destekliyor." if fit > 0
+                   else "Kadro dizilişleri gol tercihini güçlendirmiyor." if fit < 0
+                   else "Kadro dizilişleri gol tercihi açısından nötr.")
+    elif market in ("UNDER_2_5", "UNDER_3_5", "BTTS_NO"):
+        fit = -(hp + ap)
+        verdict = ("Daha temkinli kadro yerleşimi alt/KG YOK tercihini destekliyor." if fit > 0
+                   else "Hücum ağırlıklı yerleşim bu tercihin riskini artırıyor." if fit < 0
+                   else "Kadro dizilişleri bu tercih açısından nötr.")
+    elif market in ("HOME_OVER_1_5", "HOME", "DC_1X"):
+        fit = hp - max(ap, 0)
+        verdict = ("Ev sahibinin kadro yerleşimi seçimi destekliyor." if fit > 0
+                   else "Rakibin hücum yerleşimi seçimin riskini artırıyor." if fit < 0
+                   else "Kadro yerleşimleri bu seçim açısından nötr.")
+    elif market in ("AWAY_OVER_1_5", "AWAY", "DC_X2"):
+        fit = ap - max(hp, 0)
+        verdict = ("Deplasman takımının kadro yerleşimi seçimi destekliyor." if fit > 0
+                   else "Ev sahibinin hücum yerleşimi seçimin riskini artırıyor." if fit < 0
+                   else "Kadro yerleşimleri bu seçim açısından nötr.")
+    else:
+        fit, verdict = 0, "Kadro dizilişleri bu seçim açısından nötr."
+    return max(-1, min(1, fit)), base + verdict
+
+
+def prematch_suggestions(home: Dict[str, Any], away: Dict[str, Any],
+                         lineups: Optional[Dict[str, Any]] = None
                          ) -> List[Dict[str, Any]]:
     if home.get("insufficient") or away.get("insufficient"):
         return []
@@ -2249,10 +2326,12 @@ def prematch_suggestions(home: Dict[str, Any], away: Dict[str, Any]
         home_edge = hv["scored"] - hv["conceded"]
         away_edge = av["scored"] - av["conceded"]
         home_wins, away_wins = hv["wins"] / hv["count"], av["wins"] / av["count"]
-        if home_wins >= .67 and away_wins <= .33 and home_edge - away_edge >= .7:
+        if (home_wins >= .50 and away_wins <= .40
+                and home_edge - away_edge >= .7 and h["wins"] / h["count"] >= .375):
             picks.append({"market": "HOME", "label": "MS 1",
                           "reason": f"İç saha galibiyeti {hv['wins']}/{hv['count']}, rakibin deplasman galibiyeti {av['wins']}/{av['count']}; gol farkı ev sahibinden yana.", "rank": 5})
-        elif away_wins >= .67 and home_wins <= .33 and away_edge - home_edge >= .7:
+        elif (away_wins >= .50 and home_wins <= .40
+              and away_edge - home_edge >= .7 and a["wins"] / a["count"] >= .375):
             picks.append({"market": "AWAY", "label": "MS 2",
                           "reason": f"Deplasman galibiyeti {av['wins']}/{av['count']}, ev sahibinin iç saha galibiyeti {hv['wins']}/{hv['count']}; gol farkı deplasmandan yana.", "rank": 5})
         if (hv["wins"] + hv["draws"]) / hv["count"] >= .67 and away_wins <= .33 and home_edge >= away_edge:
@@ -2267,6 +2346,12 @@ def prematch_suggestions(home: Dict[str, Any], away: Dict[str, Any]
             and home_goals >= 2.4 and away_goals >= 2.4):
         picks.append({"market": "OVER_1_5", "label": "1,5 ÜST",
                       "reason": f"En az iki gol: {h['over15']}/{h['count']} ve {a['over15']}/{a['count']}; daha yüksek gol çizgisi için işaret zayıf.", "rank": 1})
+    lineup_data = lineups or {"confirmed": False}
+    for pick in picks:
+        fit, note = lineup_market_note(pick["market"], lineup_data)
+        pick["lineup_fit"] = fit
+        pick["lineup_note"] = note
+        pick["rank"] += fit
     return sorted(picks, key=lambda p: p["rank"], reverse=True)
 
 
@@ -2510,7 +2595,8 @@ def api_prematch_analyze():
     away, away_error = prematch_team_form(away_id, fixture.get("date") or "")
     if home_error or away_error:
         return jsonify({"error": home_error or away_error}), 503
-    suggestions = prematch_suggestions(home or {}, away or {})
+    lineups, lineup_error = prematch_lineups(fixture_id, home_id, away_id)
+    suggestions = prematch_suggestions(home or {}, away or {}, lineups)
     odds_entries, odds_error = prematch_fixture_odds(fixture_id) if suggestions else ([], None)
     priced = []
     if odds_entries is not None:
@@ -2525,7 +2611,9 @@ def api_prematch_analyze():
                     "label": suggestion["label"], "reason": suggestion["reason"],
                     "explanation": prematch_pick_explanation(
                         suggestion["market"], home_team.get("name") or "Ev sahibi",
-                        away_team.get("name") or "Deplasman", home, away),
+                        away_team.get("name") or "Deplasman", home, away)
+                        + " Kadro etkisi: " + suggestion["lineup_note"],
+                    "lineup_fit": suggestion["lineup_fit"],
                     "quote": quote,
                 })
     if any(item["label"] != "1,5 ÜST" for item in priced):
@@ -2536,6 +2624,10 @@ def api_prematch_analyze():
         ("1X", "3,5 ÜST"), ("X2", "3,5 ALT"), ("X2", "3,5 ÜST"),
     )
     displayed = priced[:3]
+    result_pick = next((item for item in priced
+                        if item["label"] in ("MS 1", "MS 2")), None)
+    if result_pick and result_pick not in displayed and displayed:
+        displayed[-1] = result_pick
     for first, second in paired_markets:
         if first in {x["label"] for x in displayed}:
             partner = next((x for x in priced if x["label"] == second), None)
@@ -2567,9 +2659,16 @@ def api_prematch_analyze():
         "home_form": home, "away_form": away,
         "suggestions": priced,
         "joint_notes": joint_notes,
+        "lineups": lineups,
+        "lineup_note": ("Onaylı ilk 11 analize dahil edildi."
+                        if lineups.get("confirmed")
+                        else "Kadrolar henüz açıklanmadı; analiz form verileriyle hazırlandı."),
+        "lineup_error": lineup_error,
         "decision": "PAS" if not priced else "EĞİLİM",
         "candidate_count": len(suggestions), "odds_note": odds_note,
-        "note": "Son maçlara dayalı ön analiz; sakatlık, kadro ve canlı gelişmeler dahil değil.",
+        "note": ("Son maç formu, iç/dış saha verisi, onaylı ilk 11 ve diziliş birlikte değerlendirildi."
+                 if lineups.get("confirmed") else
+                 "Son maç formu ve iç/dış saha verisi değerlendirildi; kadrolar açıklanınca analiz güncellenir."),
     })
 
 
@@ -3030,7 +3129,7 @@ select{
       <span><span class="dot" style="background:#ff3f4f"></span>0–44 Zayıf</span>
       <span>🧠 BOT PICK</span>
     </div>
-    <div>Gol Sinyal Merkezi v2.8 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
+    <div>Gol Sinyal Merkezi v3.0 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
   </div>
 </div>
 
@@ -3428,10 +3527,13 @@ button{border:1px solid #2cab79;background:#0e6f50;color:white;cursor:pointer;fo
 .pick-why{margin-top:9px;padding-top:8px;border-top:1px solid #357862;color:#e0ebe8;font-size:12px;line-height:1.5}
 .pick-why b{color:#a2f0c4}
 .joint-note{margin-top:9px;border:1px solid #4984a1;border-radius:8px;background:#173248;color:#dcefff;padding:9px;font-size:12px;line-height:1.5}
+.lineup-box{margin:10px 0;border:1px solid #5c5278;border-radius:9px;background:#211f35;padding:10px;color:#dcd8ef;font-size:12px;line-height:1.5}
+.lineup-box b{color:#b9a7ff}.lineup-teams{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:7px}
+.lineup-team{background:#17182a;border-radius:7px;padding:8px}
 .form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:10px 0}
 .form div{background:#101f30;padding:9px;border-radius:7px;font-size:12px}
 .pas{color:#ffc877;font-weight:800}.error{color:#ff9da1}
-@media(max-width:680px){.grid,.form{grid-template-columns:1fr}.teams{font-size:16px}}
+@media(max-width:680px){.grid,.form,.lineup-teams{grid-template-columns:1fr}.teams{font-size:16px}}
 </style></head><body><div class="wrap">
 <header><div><h1>📅 Maç Önü Tahminleri</h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
 <a href="/">← Canlı Gol Merkezi</a></header>
@@ -3455,6 +3557,12 @@ function formText(v,side){
   if(!v || v.insufficient)return `Tamamlanmış son maç sayısı: ${Number(v?.count||0)} (en az 5 gerekli)`;
   const a=v.all,venue=v[side],label=side==="home"?"İç saha":"Deplasman";
   return `Son ${a.count} maç: ${a.wins} galibiyet · maç başı ${a.scored} atılan / ${a.conceded} yenilen gol · ${a.scored2} kez 2+ gol attı · ${a.btts} KG · ${a.over25} kez 2,5 üst · ${a.under25} kez 2,5 alt. ${label} (${venue.count} maç): ${venue.wins} galibiyet, ${venue.scored2} kez 2+ gol attı, maç başı ${venue.scored ?? "—"} atılan / ${venue.conceded ?? "—"} yenilen gol.`;
+}
+function lineupHtml(a){
+  const l=a.lineups||{},status=l.confirmed?"✅ Onaylı ilk 11 analize dahil":"⏳ Kadrolar bekleniyor";
+  if(!l.confirmed)return `<div class="lineup-box"><b>${status}</b><br>${esc(a.lineup_note||"")}</div>`;
+  const team=x=>`<div class="lineup-team"><b>${esc(x.team)} • ${esc(x.formation)}</b><br>${(x.starters||[]).map(p=>`${esc(p.name)} (${esc(p.pos)})`).join(" · ")}</div>`;
+  return `<div class="lineup-box"><b>${status}</b><div class="lineup-teams">${team(l.home)}${team(l.away)}</div></div>`;
 }
 async function getJson(url){
   const r=await fetch(url,{cache:"no-store"});let body;
@@ -3485,7 +3593,7 @@ function renderFixtures(){
             : `<div class="pas">PAS • ${a.candidate_count ? "Modelde eğilim var, ancak fiyat koşulu sağlanmadı." : "Yeterli ortak veri işareti yok."}</div>`;
           box.innerHTML=`<div class="form"><div><b>${esc(a.home)}</b><br>${esc(formText(a.home_form,"home"))}</div>
             <div><b>${esc(a.away)}</b><br>${esc(formText(a.away_form,"away"))}</div></div>
-            ${picks}${(a.joint_notes||[]).map(n=>`<div class="joint-note"><b>Birlikte gerçekleşme ihtimali</b><br>${esc(n)}</div>`).join("")}<div class="odds-note">${esc(a.odds_note)}</div><div class="hint">${esc(a.note)}</div>`;
+            ${lineupHtml(a)}${picks}${(a.joint_notes||[]).map(n=>`<div class="joint-note"><b>Birlikte gerçekleşme ihtimali</b><br>${esc(n)}</div>`).join("")}<div class="odds-note">${esc(a.odds_note)}</div><div class="hint">${esc(a.note)}</div>`;
         }catch(e){box.innerHTML='<span class="error">'+esc(e.message)+'</span>'}
         finally{button.disabled=false}
       };
