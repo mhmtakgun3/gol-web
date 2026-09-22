@@ -2261,6 +2261,21 @@ def lineup_market_note(market: str, lineups: Dict[str, Any]) -> Tuple[int, str]:
     return max(-1, min(1, fit)), base + verdict
 
 
+def prematch_confidence(market: str, rank: int, lineups: Dict[str, Any],
+                        lineup_fit: int) -> int:
+    """Model seçim puanı; gerçek kazanma olasılığı veya garanti değildir."""
+    market_bonus = {
+        "HOME": 2, "AWAY": 2,
+        "HOME_OVER_1_5": 2, "AWAY_OVER_1_5": 2,
+        "DC_1X": 2, "DC_X2": 2,
+        "OVER_3_5": -1, "OVER_1_5": -4,
+    }.get(market, 0)
+    score = 72 + min(6, max(0, rank)) * 2 + market_bonus
+    if lineups.get("confirmed"):
+        score += 2 + lineup_fit * 2
+    return max(60, min(90, int(round(score))))
+
+
 def prematch_suggestions(home: Dict[str, Any], away: Dict[str, Any],
                          lineups: Optional[Dict[str, Any]] = None
                          ) -> List[Dict[str, Any]]:
@@ -2608,12 +2623,16 @@ def api_prematch_analyze():
                 quote = None
             if quote:
                 priced.append({
+                    "market": suggestion["market"],
                     "label": suggestion["label"], "reason": suggestion["reason"],
                     "explanation": prematch_pick_explanation(
                         suggestion["market"], home_team.get("name") or "Ev sahibi",
                         away_team.get("name") or "Deplasman", home, away)
                         + " Kadro etkisi: " + suggestion["lineup_note"],
                     "lineup_fit": suggestion["lineup_fit"],
+                    "confidence": prematch_confidence(
+                        suggestion["market"], suggestion["rank"], lineups,
+                        suggestion["lineup_fit"]),
                     "quote": quote,
                 })
     if any(item["label"] != "1,5 ÜST" for item in priced):
@@ -2669,6 +2688,32 @@ def api_prematch_analyze():
         "note": ("Son maç formu, iç/dış saha verisi, onaylı ilk 11 ve diziliş birlikte değerlendirildi."
                  if lineups.get("confirmed") else
                  "Son maç formu ve iç/dış saha verisi değerlendirildi; kadrolar açıklanınca analiz güncellenir."),
+    })
+
+
+@app.route("/api/prematch/result")
+def api_prematch_result():
+    fixture_id = safe_int(request.args.get("fixture"), 0)
+    if fixture_id <= 0:
+        return jsonify({"error": "Geçerli maç numarası gerekli."}), 400
+    items, error = prematch_api_cached(
+        f"result:{fixture_id}", "/fixtures", {"id": fixture_id}, 300)
+    if error:
+        return jsonify({"error": error}), 503
+    if not items:
+        return jsonify({"error": "Maç sonucu bulunamadı."}), 404
+    item = items[0]
+    status = ((item.get("fixture") or {}).get("status") or {}).get("short")
+    goals = item.get("goals") or {}
+    fulltime = ((item.get("score") or {}).get("fulltime") or {})
+    finished = status in ("FT", "AET", "PEN")
+    home_goals = fulltime.get("home")
+    away_goals = fulltime.get("away")
+    if home_goals is None or away_goals is None:
+        home_goals, away_goals = goals.get("home"), goals.get("away")
+    return jsonify({
+        "fixture": fixture_id, "status": status, "finished": finished,
+        "home_goals": home_goals, "away_goals": away_goals,
     })
 
 
@@ -3129,7 +3174,7 @@ select{
       <span><span class="dot" style="background:#ff3f4f"></span>0–44 Zayıf</span>
       <span>🧠 BOT PICK</span>
     </div>
-    <div>Gol Sinyal Merkezi v3.0 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
+    <div>Gol Sinyal Merkezi v3.1 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
   </div>
 </div>
 
@@ -3533,7 +3578,14 @@ button{border:1px solid #2cab79;background:#0e6f50;color:white;cursor:pointer;fo
 .form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:10px 0}
 .form div{background:#101f30;padding:9px;border-radius:7px;font-size:12px}
 .pas{color:#ffc877;font-weight:800}.error{color:#ff9da1}
-@media(max-width:680px){.grid,.form,.lineup-teams{grid-template-columns:1fr}.teams{font-size:16px}}
+.coupon-panel{margin:14px 0;padding:14px;border:1px solid #7657a8;border-radius:13px;background:#1d2038}
+.coupon-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
+.coupon-head h2{font-size:18px;margin:0}.coupon-help{font-size:12px;color:#b8c5d7;margin-top:5px}
+.coupons{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px;margin-top:11px}
+.coupon{background:#121a2c;border:1px solid #4c6381;border-radius:9px;padding:10px}
+.coupon-title{font-weight:800;color:#cdb8ff;margin-bottom:7px}.coupon-leg{font-size:12px;border-top:1px solid #2f3c55;padding:7px 0;line-height:1.45}
+.coupon-total{font-size:12px;color:#80e8b6;margin-top:7px;font-weight:800}.won{color:#72e7a9}.lost{color:#ff9198}.open{color:#ffd379}
+@media(max-width:680px){.grid,.form,.lineup-teams,.coupons{grid-template-columns:1fr}.teams{font-size:16px}}
 </style></head><body><div class="wrap">
 <header><div><h1>📅 Maç Önü Tahminleri</h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
 <a href="/">← Canlı Gol Merkezi</a></header>
@@ -3545,12 +3597,17 @@ button{border:1px solid #2cab79;background:#0e6f50;color:white;cursor:pointer;fo
   <select id="league" disabled><option value="ALL">Tüm ligler</option></select>
 </div>
 <div class="hint">Seçilen maç önü ligleri • Saatler Türkiye saatidir • Analiz, açtığın maç için yapılır.</div>
+<section class="coupon-panel">
+  <div class="coupon-head"><div><h2>🎟️ Günün 3 Maçlık Kuponları</h2><div class="coupon-help">Önce maçları analiz et; sistem 80+ model güven puanlı seçimlerden en fazla 3 kupon oluşturur.</div></div>
+  <button id="makeCoupons" type="button">Analiz edilenlerden kupon yap</button></div>
+  <div id="couponState" class="coupon-help">Henüz kupon oluşturulmadı.</div><div id="coupons" class="coupons"></div>
+</section>
 <p id="state">Fikstür yükleniyor…</p>
 <div class="grid" id="fixtures"></div>
 </div><script>
 const esc=v=>String(v??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;");
 const day=document.getElementById("day"),state=document.getElementById("state"),root=document.getElementById("fixtures"),leagueSelect=document.getElementById("league");
-let loadedMatches=[],loadedDate="";
+let loadedMatches=[],loadedDate="",analyzedMatches=new Map();
 function shownTime(v){try{return new Intl.DateTimeFormat("tr-TR",{timeZone:"Europe/Istanbul",hour:"2-digit",minute:"2-digit"}).format(new Date(v))}catch{return "Saat bilinmiyor"}}
 function quoteTime(v){if(!v)return "";const d=new Date(v);return Number.isNaN(d.getTime())?"":new Intl.DateTimeFormat("tr-TR",{timeZone:"Europe/Istanbul",day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}).format(d)}
 function formText(v,side){
@@ -3570,6 +3627,98 @@ async function getJson(url){
   if(!r.ok)throw Error(body.error||"Veri alınamadı.");
   return body;
 }
+const couponStoreKey="golPrematchCouponsV1";
+function couponStore(){try{return JSON.parse(localStorage.getItem(couponStoreKey)||"{}")||{}}catch{return {}}}
+function saveCouponStore(store){localStorage.setItem(couponStoreKey,JSON.stringify(store))}
+function candidatePool(){
+  const pool=[];
+  for(const [fixture,item] of analyzedMatches){
+    for(const pick of item.analysis.suggestions||[]){
+      const confidence=Number(pick.confidence||0),odd=Number(pick.quote?.odd||0);
+      if(confidence<80||confidence>90||odd<1.30)continue;
+      pool.push({fixture:Number(fixture),home:item.match.home,away:item.match.away,kickoff:item.match.kickoff,
+        market:pick.market,label:pick.label,confidence,odd,bookmaker:pick.quote.bookmaker,status:"OPEN"});
+    }
+  }
+  return pool.sort((a,b)=>b.confidence-a.confidence||a.odd-b.odd);
+}
+function buildCoupons(){
+  const existingStore=couponStore();
+  if((existingStore[loadedDate]||[]).length){
+    renderCoupons(existingStore[loadedDate]);
+    document.getElementById("couponState").textContent+=" • Ölçüm bozulmasın diye kayıt kilitli.";return;
+  }
+  const pool=candidatePool(),combos=[];
+  for(let i=0;i<pool.length;i++)for(let j=i+1;j<pool.length;j++)for(let k=j+1;k<pool.length;k++){
+    const legs=[pool[i],pool[j],pool[k]];
+    if(new Set(legs.map(x=>x.fixture)).size!==3)continue;
+    const min=Math.min(...legs.map(x=>x.confidence)),avg=legs.reduce((s,x)=>s+x.confidence,0)/3;
+    const total=legs.reduce((s,x)=>s*x.odd,1);
+    combos.push({legs,min,avg,total,score:min*1000+avg*10-total});
+  }
+  combos.sort((a,b)=>b.score-a.score);
+  const chosen=[];
+  for(const combo of combos){
+    const signature=combo.legs.map(x=>`${x.fixture}:${x.market}`).sort().join("|");
+    if(chosen.some(x=>x.signature===signature))continue;
+    chosen.push({...combo,signature,status:"OPEN",created:new Date().toISOString()});
+    if(chosen.length===3)break;
+  }
+  if(!chosen.length){
+    document.getElementById("couponState").textContent=`${pool.length} uygun seçim bulundu. Kupon için 3 farklı maçta 80+ güven puanı gerekiyor.`;
+    renderCoupons([]);return;
+  }
+  const store=couponStore();store[loadedDate]=chosen;saveCouponStore(store);
+  renderCoupons(chosen);
+}
+function legResult(market,h,a){
+  const total=h+a;
+  if(market==="HOME")return h>a;if(market==="AWAY")return a>h;
+  if(market==="DC_1X")return h>=a;if(market==="DC_X2")return a>=h;
+  if(market==="HOME_OVER_1_5")return h>=2;if(market==="AWAY_OVER_1_5")return a>=2;
+  if(market==="BTTS_YES")return h>0&&a>0;if(market==="BTTS_NO")return h===0||a===0;
+  if(market==="OVER_1_5")return total>=2;if(market==="OVER_2_5")return total>=3;
+  if(market==="UNDER_2_5")return total<=2;if(market==="OVER_3_5")return total>=4;
+  if(market==="UNDER_3_5")return total<=3;return false;
+}
+async function settleCoupons(){
+  const store=couponStore();let changed=false;
+  for(const coupons of Object.values(store))for(const coupon of coupons||[])for(const leg of coupon.legs||[]){
+    if(leg.status!=="OPEN")continue;
+    try{
+      const r=await getJson(`/api/prematch/result?fixture=${encodeURIComponent(leg.fixture)}`);
+      if(r.finished&&r.home_goals!==null&&r.away_goals!==null){
+        leg.status=legResult(leg.market,Number(r.home_goals),Number(r.away_goals))?"WON":"LOST";
+        leg.score=`${r.home_goals}-${r.away_goals}`;changed=true;
+      }
+    }catch{}
+  }
+  for(const coupons of Object.values(store))for(const coupon of coupons||[]){
+    coupon.status=coupon.legs.some(x=>x.status==="LOST")?"LOST":coupon.legs.every(x=>x.status==="WON")?"WON":"OPEN";
+  }
+  if(changed)saveCouponStore(store);
+  renderCoupons(store[loadedDate]||[]);
+}
+function renderCoupons(coupons){
+  const root=document.getElementById("coupons"),store=couponStore();root.innerHTML="";
+  let won=0,lost=0,legWon=0,legLost=0;
+  for(const list of Object.values(store))for(const c of list||[]){
+    if(c.status==="WON")won++;if(c.status==="LOST")lost++;
+    for(const l of c.legs||[]){if(l.status==="WON")legWon++;if(l.status==="LOST")legLost++;}
+  }
+  const settled=won+lost,settledLegs=legWon+legLost;
+  document.getElementById("couponState").textContent=coupons.length
+    ? `${coupons.length} kupon • Sonuçlanan kupon başarısı: ${settled?Math.round(won/settled*100):0}% (${won}/${settled}) • Seçim başarısı: ${settledLegs?Math.round(legWon/settledLegs*100):0}% (${legWon}/${settledLegs})`
+    : "Bu tarih için kayıtlı kupon yok.";
+  coupons.forEach((c,i)=>{
+    const el=document.createElement("div");el.className="coupon";
+    const status=c.status||"OPEN",statusText=status==="WON"?"TUTTU":status==="LOST"?"YATMADI":"BEKLİYOR";
+    el.innerHTML=`<div class="coupon-title">Kupon ${i+1} • <span class="${status.toLowerCase()}">${statusText}</span></div>`+
+      c.legs.map(l=>`<div class="coupon-leg"><b>${esc(l.home)} — ${esc(l.away)}</b><br>${esc(l.label)} • ${l.odd.toFixed(2)} ${esc(l.bookmaker)}<br>Model güveni ${l.confidence}/100${l.score?` • Skor ${esc(l.score)}`:""} • <span class="${l.status.toLowerCase()}">${l.status==="WON"?"TUTTU":l.status==="LOST"?"YATTI":"AÇIK"}</span></div>`).join("")+
+      `<div class="coupon-total">Toplam oran ${c.total.toFixed(2)} • Ortalama güven ${c.avg.toFixed(0)}/100</div>`;
+    root.appendChild(el);
+  });
+}
 function renderFixtures(){
   const selected=loadedDate;
   const filtered=leagueSelect.value==="ALL" ? loadedMatches
@@ -3588,6 +3737,7 @@ function renderFixtures(){
         button.disabled=true;box.hidden=false;box.textContent="Son maçlar inceleniyor…";
         try{
           const a=await getJson("/api/prematch/analyze?date="+encodeURIComponent(selected)+"&fixture="+encodeURIComponent(m.id));
+          analyzedMatches.set(Number(m.id),{match:m,analysis:a});
           const picks=a.suggestions.length
             ? a.suggestions.map(p=>`<div class="pick"><b>${esc(p.label)}</b><div class="quote">Oran ${Number(p.quote.odd).toFixed(2)} · ${esc(p.quote.bookmaker)}</div><div class="reason">${esc(p.quote.market_name)}: ${esc(p.quote.selection)}${quoteTime(p.quote.updated)?` · Güncelleme: ${esc(quoteTime(p.quote.updated))}`:""}</div><div class="pick-why"><b>Neden bu tercih?</b><br>${esc(p.explanation || p.reason)}</div></div>`).join("")
             : `<div class="pas">PAS • ${a.candidate_count ? "Modelde eğilim var, ancak fiyat koşulu sağlanmadı." : "Yeterli ortak veri işareti yok."}</div>`;
@@ -3603,7 +3753,7 @@ function renderFixtures(){
 async function load(){
   const selected=day.value;state.textContent="Fikstür yükleniyor…";root.innerHTML="";
   leagueSelect.disabled=true;leagueSelect.innerHTML='<option value="ALL">Tüm ligler</option>';
-  loadedMatches=[];loadedDate="";
+  loadedMatches=[];loadedDate="";analyzedMatches=new Map();
   try{
     const data=await getJson("/api/prematch/fixtures?date="+encodeURIComponent(selected));
     loadedDate=selected;loadedMatches=data.matches;
@@ -3617,10 +3767,11 @@ async function load(){
     leagueSelect.innerHTML=`<option value="ALL">Tüm ligler (${loadedMatches.length})</option>`+
       options.map(([id,item])=>`<option value="${esc(id)}">${esc(item.name)} (${item.count})</option>`).join("");
     leagueSelect.disabled=options.length===0;
-    renderFixtures();
+    renderFixtures();renderCoupons(couponStore()[loadedDate]||[]);settleCoupons();
   }catch(e){state.innerHTML='<span class="error">'+esc(e.message)+'</span>'}
 }
 leagueSelect.onchange=renderFixtures;
+document.getElementById("makeCoupons").onclick=buildCoupons;
 document.getElementById("load").onclick=load;load();
 </script></body></html>"""
 
