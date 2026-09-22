@@ -23,8 +23,12 @@ API_BASE = "https://v3.football.api-sports.io"
 API_KEY = os.getenv("API_KEY", "").strip()
 
 CHECK_SECONDS = int(os.getenv("CHECK_SECONDS", "30"))
+FIRST_HALF_CHECK_SECONDS = int(os.getenv("FIRST_HALF_CHECK_SECONDS", "15"))
 SIGNAL_LIMIT = int(os.getenv("SIGNAL_LIMIT", "65"))
-FIRST_HALF_LIMIT = int(os.getenv("FIRST_HALF_LIMIT", "65"))
+# Yeni ayrı değişken, Render'da kalmış eski FIRST_HALF_LIMIT=65 ayarının
+# İY 0,5 iyileştirmesini sessizce geçersiz kılmasını önler.
+FIRST_HALF_LIMIT = int(os.getenv("FIRST_HALF_05_LIMIT", "60"))
+FIRST_HALF_15_LIMIT = int(os.getenv("FIRST_HALF_15_LIMIT", "72"))
 BOT_PICK_LIMIT = 78
 BOT_PICK_MINUTE = 55
 BOT_PICK_CONFIRM_SCANS = 2
@@ -249,10 +253,20 @@ def serialize_matches_for_web() -> List[Dict[str, Any]]:
                 "first_half_signal": item.get("first_half_signal", 0),
                 "first_half_active": (
                     match.get("status") == "1H"
+                    and (match.get("minute") or 0) >= 10
                     and (match.get("home_goals") or 0) + (match.get("away_goals") or 0) <= 1
                     and ((match.get("home_goals") or 0) + (match.get("away_goals") or 0) == 0
-                         or (match.get("minute") or 0) <= 40)
-                    and item.get("first_half_signal", 0) >= FIRST_HALF_LIMIT
+                         or (match.get("minute") or 0) <= 38)
+                    and item.get("first_half_signal", 0) >= (
+                        FIRST_HALF_LIMIT
+                        if (match.get("home_goals") or 0) + (match.get("away_goals") or 0) == 0
+                        else FIRST_HALF_15_LIMIT
+                    )
+                ),
+                "first_half_limit": (
+                    FIRST_HALF_LIMIT
+                    if (match.get("home_goals") or 0) + (match.get("away_goals") or 0) == 0
+                    else FIRST_HALF_15_LIMIT
                 ),
                 "first_half_reasons": item.get("first_half_reasons", []),
                 "expected_team": expected_team_name,
@@ -1551,9 +1565,9 @@ def calculate_first_half_signal(
 ) -> Tuple[int, List[str], Optional[str]]:
 
     goals_scored = home_goals + away_goals
-    # İki veya daha fazla golde İY seçimlerini kapat. Tek gol sonrası
-    # İY 1,5 ÜST için de 40. dakikadan sonra yeni seçim üretme.
-    if minute < 15 or minute > 45 or goals_scored >= 2 or (goals_scored == 1 and minute > 40):
+    # 0-0'da İY 0,5; tek gol sonrasında İY 1,5 değerlendirilir.
+    # Gerçekleşmiş pazarı tekrar önerme ve ikinci golü çok geç dakikada açma.
+    if minute < 10 or minute > 45 or goals_scored >= 2 or (goals_scored == 1 and minute > 38):
         return 0, [], None
 
     score = 0
@@ -1564,44 +1578,71 @@ def calculate_first_half_signal(
     corners = total["corners"]
     inside = total["inside"]
 
+    # Zayıf ve tesadüfi hücumları ele: en az bir isabet ve devam eden üretim şart.
+    if target < 1 or (shots < 4 and inside < 3):
+        return 0, [], None
+    if goals_scored == 1 and (target < 2 or (shots < 5 and inside < 3)):
+        return 0, [], None
+
     # ŞUT
-    if shots >= 12:
+    if shots >= 10:
         score += 22
         reasons.append("İlk yarıda şut sayısı çok yüksek")
-    elif shots >= 9:
-        score += 16
+    elif shots >= 7:
+        score += 17
         reasons.append("İlk yarıda şut sayısı yüksek")
-    elif shots >= 6:
-        score += 9
+    elif shots >= 4:
+        score += 10
 
     # İSABETLİ ŞUT
-    if target >= 6:
-        score += 25
+    if target >= 5:
+        score += 26
         reasons.append("İlk yarıda isabetli şut çok yüksek")
-    elif target >= 4:
-        score += 17
-        reasons.append("İlk yarıda isabetli şut yüksek")
     elif target >= 3:
-        score += 9
+        score += 20
+        reasons.append("İlk yarıda isabetli şut yüksek")
+    elif target >= 2:
+        score += 14
+    elif target >= 1:
+        score += 6
 
     # KORNER
-    if corners >= 6:
-        score += 15
+    if corners >= 5:
+        score += 13
         reasons.append("İlk yarıda korner baskısı çok yüksek")
-    elif corners >= 4:
+    elif corners >= 3:
         score += 9
+    elif corners >= 2:
+        score += 5
 
     # CEZA SAHASI İÇİ
     if inside >= 7:
-        score += 15
+        score += 18
         reasons.append("İlk yarıda ceza sahası içi şut çok yüksek")
     elif inside >= 5:
+        score += 14
+    elif inside >= 3:
         score += 9
+    elif inside >= 2:
+        score += 5
 
     # 0-0
     if home_goals == 0 and away_goals == 0:
-        score += 8
+        score += 6
         reasons.append("İlk yarı 0-0, gol baskısı değerlendiriliyor")
+
+    # 10-20. dakikada bu rakamlar yüksek tempoya işaret eder; erken güçlü
+    # maçları 25-30. dakikayı beklemeden yakala.
+    if minute <= 20 and target >= 2 and inside >= 3:
+        score += 10
+        reasons.append("İlk 20 dakikada yüksek hücum temposu")
+    elif minute <= 20 and shots >= 5 and target >= 1:
+        score += 5
+
+    # Bir gol olduysa yalnızca golden sonraki istatistikler buraya gelir.
+    if goals_scored == 1 and target >= 3 and inside >= 4:
+        score += 8
+        reasons.append("İlk golden sonra ikinci gol baskısı güçlü")
 
     home = total["home"]
     away = total["away"]
@@ -1801,9 +1842,11 @@ def analyze_match(match: Dict[str, Any]) -> bool:
         away_goals,
     )
 
-    # İlk yarı analizi toplam istatistik üzerinden kalır.
+    # İY 0,5 için maçın toplam ilk yarı istatistiği; bir gol olduktan sonra
+    # İY 1,5 için yalnızca golden sonra oluşan yeni baskı kullanılır.
+    first_half_total = evaluation_total if home_goals + away_goals == 1 else total
     first_half_signal, first_half_reasons, expected_team = calculate_first_half_signal(
-        total,
+        first_half_total,
         minute,
         home_goals,
         away_goals,
@@ -1918,7 +1961,10 @@ def analyze_match(match: Dict[str, Any]) -> bool:
         if normal_signal >= SIGNAL_LIMIT:
             current["signal_sent"] = True
 
-        if first_half_signal >= FIRST_HALF_LIMIT:
+        first_half_required = (
+            FIRST_HALF_LIMIT if home_goals + away_goals == 0 else FIRST_HALF_15_LIMIT
+        )
+        if first_half_signal >= first_half_required:
             current["first_half_sent"] = True
 
     return True
@@ -1980,6 +2026,7 @@ def scanner_loop():
 
         analyzed_count = 0
         should_sleep = True
+        next_sleep = CHECK_SECONDS
 
         try:
             print("\n" + "=" * 60, flush=True)
@@ -1990,6 +2037,15 @@ def scanner_loop():
 
             print(f"📡 API canlı maç sayısı: {api_live_count}", flush=True)
             print(f"✅ Uygun liglerde canlı maç: {len(live_matches)}", flush=True)
+
+            # 10-38. dakikada aktif ilk yarı maçı varsa İY pazarlarını daha
+            # sık yenile; diğer zamanlarda normal API temposunu koru.
+            if any(
+                ((m.get("fixture") or {}).get("status") or {}).get("short") == "1H"
+                and 10 <= safe_int(((m.get("fixture") or {}).get("status") or {}).get("elapsed"), 0) <= 38
+                for m in live_matches
+            ):
+                next_sleep = min(CHECK_SECONDS, FIRST_HALF_CHECK_SECONDS)
 
             with status_lock:
                 scanner_status["api_live_count"] = api_live_count
@@ -2044,9 +2100,9 @@ def scanner_loop():
             write_shared_state()
 
             print(f"⏱ Tarama süresi: {duration} saniye", flush=True)
-            print(f"😴 {CHECK_SECONDS} saniye sonra yeni tarama başlayacak.", flush=True)
+            print(f"😴 {next_sleep} saniye sonra yeni tarama başlayacak.", flush=True)
 
-        time.sleep(CHECK_SECONDS)
+        time.sleep(next_sleep)
 
 def ensure_scanner_started():
     global scanner_started
@@ -2823,8 +2879,10 @@ def api_status():
         "ok": True,
         "api_key_configured": bool(API_KEY),
         "check_seconds": CHECK_SECONDS,
+        "first_half_check_seconds": FIRST_HALF_CHECK_SECONDS,
         "signal_limit": SIGNAL_LIMIT,
         "first_half_limit": FIRST_HALF_LIMIT,
+        "first_half_15_limit": FIRST_HALF_15_LIMIT,
         "bot_pick_limit": BOT_PICK_LIMIT,
         "bot_pick_confirm_scans": BOT_PICK_CONFIRM_SCANS,
         "momentum_window_seconds": MOMENTUM_WINDOW_SECONDS,
@@ -3174,7 +3232,7 @@ select{
       <span><span class="dot" style="background:#ff3f4f"></span>0–44 Zayıf</span>
       <span>🧠 BOT PICK</span>
     </div>
-    <div>Gol Sinyal Merkezi v3.3 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
+    <div>Gol Sinyal Merkezi v3.4 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
   </div>
 </div>
 
@@ -3266,9 +3324,9 @@ function categoryFor(m){
 function firstHalfMarket(m){
   const minute=Number(m.minute||0);
   const goals=homeGoalsOf(m)+awayGoalsOf(m);
-  if(m.status!=="1H" || minute<15 || minute>45) return "";
+  if(m.status!=="1H" || minute<10 || minute>45) return "";
   if(goals===0) return "0,5";
-  if(goals===1 && minute<=40) return "1,5";
+  if(goals===1 && minute<=38) return "1,5";
   return "";
 }
 
@@ -3489,6 +3547,24 @@ function tryNotifications(ms){
 
     const score=`${m.home_goals||0}-${m.away_goals||0}`;
     const periodKey=`MATCH:${fixture}:${score}`;
+    const fhLine=firstHalfMarket(m);
+    const fhLimit=Number(m.first_half_limit||(fhLine==="1,5"?72:60));
+    const fhScore=Number(m.first_half_signal||0);
+    const fhKey=`FH:${fixture}:${score}:${fhLine}`;
+
+    // İlk yarı sinyali ayrı bir bildirim kanalıdır. Maç geneli bildirimi daha
+    // önce gönderilmiş olsa bile güçlü İY 0,5 / 1,5 sinyali kaybolmaz.
+    if(fhLine && fhScore>=fhLimit && !saved[fhKey]){
+      new Notification(`⏱️ İY ${fhLine} ÜST • ${fhScore}/100`,{
+        body:
+          `${m.home_team} ${score} ${m.away_team}`+
+          ` • ${m.minute||0}'`+
+          ` • İlk yarı gol baskısı güçlü`+
+          (m.expected_team?` • Gol beklenen: ${m.expected_team}`:"")
+      });
+      saved[fhKey]=now;
+      continue;
+    }
 
     if(saved[periodKey]) continue;
 
@@ -3588,7 +3664,7 @@ button{border:1px solid #2cab79;background:#0e6f50;color:white;cursor:pointer;fo
 .coupon-total{font-size:12px;color:#80e8b6;margin-top:7px;font-weight:800}.won{color:#72e7a9}.lost{color:#ff9198}.open{color:#ffd379}
 @media(max-width:680px){.grid,.form,.lineup-teams,.coupons{grid-template-columns:1fr}.teams{font-size:16px}}
 </style></head><body><div class="wrap">
-<header><div><h1>📅 Maç Önü Tahminleri <span class="version">v3.3</span></h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
+<header><div><h1>📅 Maç Önü Tahminleri <span class="version">v3.4</span></h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
 <a href="/">← Canlı Gol Merkezi</a></header>
 <div class="toolbar">
   <label for="day">Maç günü</label>
