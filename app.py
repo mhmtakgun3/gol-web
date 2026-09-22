@@ -135,6 +135,69 @@ ALLOWED_LEAGUES = {
     164,
 }
 
+# Büyükler düzeyindeki milli takım organizasyonları. İsim kontrolü de
+# kullanıldığı için API yeni sezonlarda kimliği değiştirmese bile yalnızca
+# sabit ID listesine bağımlı kalmayız. U21/U19 ve kulüp turnuvaları dahil değil.
+NATIONAL_TEAM_LEAGUE_IDS = {
+    1,  # FIFA World Cup
+    4,  # Euro Championship
+    5,  # UEFA Nations League
+    6,  # Africa Cup of Nations
+    7,  # Asian Cup
+    9,  # Copa America
+}
+NATIONAL_TEAM_LEAGUE_NAMES = {
+    "friendlies",
+    "world cup",
+    "world cup - qualification africa",
+    "world cup - qualification asia",
+    "world cup - qualification concacaf",
+    "world cup - qualification europe",
+    "world cup - qualification oceania",
+    "world cup - qualification south america",
+    "euro championship",
+    "euro championship - qualification",
+    "uefa nations league",
+    "africa cup of nations",
+    "africa cup of nations - qualification",
+    "asian cup",
+    "asian cup - qualification",
+    "copa america",
+    "concacaf nations league",
+    "concacaf gold cup",
+    "ofc nations cup",
+}
+NATIONAL_TEAM_NAME_MARKERS = (
+    "uefa nations league",
+    "concacaf nations league",
+    "world cup",
+    "euro championship",
+    "copa america",
+    "africa cup of nations",
+    "asian cup",
+    "concacaf gold cup",
+    "ofc nations cup",
+)
+NATIONAL_TEAM_EXCLUDED_MARKERS = (
+    "club", "women", "u17", "u18", "u19", "u20", "u21", "u23", "youth",
+)
+
+
+def is_allowed_competition(league: Dict[str, Any], prematch: bool = False) -> bool:
+    league_id = safe_int(league.get("id"), 0)
+    if league_id in NATIONAL_TEAM_LEAGUE_IDS:
+        return True
+    league_name = re.sub(r"\s+", " ", str(league.get("name") or "").strip().lower())
+    if league_name in NATIONAL_TEAM_LEAGUE_NAMES:
+        return True
+    # Elemelerin kıta/round ekleri sağlayıcıda dönem dönem değişebiliyor.
+    # Büyükler turnuvasını kök adından tanı; genç/kadın/kulüp turnuvasını alma.
+    if (not any(word in league_name for word in NATIONAL_TEAM_EXCLUDED_MARKERS)
+            and any(marker in league_name for marker in NATIONAL_TEAM_NAME_MARKERS)):
+        return True
+    allowed = PREMATCH_LEAGUES if prematch else ALLOWED_LEAGUES
+    return league_id in allowed
+
 # Yalnızca maç önü analizinden çıkarılan ligler. Canlı Gol Merkezi bu ligleri
 # taramaya devam eder; Romanya ve Güney Afrika ise yukarıdaki ortak listeden çıkarıldı.
 PREMATCH_EXCLUDED_LEAGUES = {
@@ -445,8 +508,8 @@ def get_live_matches() -> Tuple[List[Dict[str, Any]], Optional[str], int]:
 
     filtered = []
     for match in response:
-        league_id = ((match.get("league") or {}).get("id"))
-        if league_id in ALLOWED_LEAGUES:
+        league = match.get("league") or {}
+        if is_allowed_competition(league):
             filtered.append(match)
 
     with cache_lock:
@@ -2163,7 +2226,7 @@ def prematch_fixtures(day: date) -> Tuple[Optional[List[Dict[str, Any]]], Option
         return None, error
     return [
         item for item in (items or [])
-        if safe_int((item.get("league") or {}).get("id")) in PREMATCH_LEAGUES
+        if is_allowed_competition(item.get("league") or {}, prematch=True)
         and ((item.get("fixture") or {}).get("status") or {}).get("short") in ("NS", "TBD")
     ], None
 
@@ -2861,7 +2924,7 @@ def api_live_leagues():
                 "league_id": league_id,
                 "league": league.get("name", ""),
                 "country": league.get("country", ""),
-                "allowed": league_id in ALLOWED_LEAGUES,
+                "allowed": is_allowed_competition(league),
                 "match_count": 0,
                 "matches": [],
             }
@@ -3274,7 +3337,7 @@ select{
       <span><span class="dot" style="background:#ff3f4f"></span>0–44 Zayıf</span>
       <span>🧠 BOT PICK</span>
     </div>
-    <div>Gol Sinyal Merkezi v3.6 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
+    <div>Gol Sinyal Merkezi v3.8 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
   </div>
 </div>
 
@@ -3706,7 +3769,7 @@ button{border:1px solid #2cab79;background:#0e6f50;color:white;cursor:pointer;fo
 .coupon-total{font-size:12px;color:#80e8b6;margin-top:7px;font-weight:800}.won{color:#72e7a9}.lost{color:#ff9198}.open{color:#ffd379}
 @media(max-width:680px){.grid,.form,.lineup-teams,.coupons{grid-template-columns:1fr}.teams{font-size:16px}}
 </style></head><body><div class="wrap">
-<header><div><h1>📅 Maç Önü Tahminleri <span class="version">v3.6</span></h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
+<header><div><h1>📅 Maç Önü Tahminleri <span class="version">v3.8</span></h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
 <a href="/">← Canlı Gol Merkezi</a></header>
 <div class="toolbar">
   <label for="day">Maç günü</label>
