@@ -3174,7 +3174,7 @@ select{
       <span><span class="dot" style="background:#ff3f4f"></span>0–44 Zayıf</span>
       <span>🧠 BOT PICK</span>
     </div>
-    <div>Gol Sinyal Merkezi v3.1 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
+    <div>Gol Sinyal Merkezi v3.3 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
   </div>
 </div>
 
@@ -3557,6 +3557,7 @@ PREMATCH_PAGE = r"""<!doctype html>
 .wrap{max-width:1080px;margin:auto;padding:22px 16px 60px}
 header{display:flex;justify-content:space-between;align-items:center;gap:15px;flex-wrap:wrap;margin-bottom:22px}
 h1{font-size:25px;margin:0 0 5px}p{color:#a9bdce;margin:0;line-height:1.5}
+.version{font-size:11px;color:#c9b5ff;border:1px solid #68548c;border-radius:12px;padding:3px 7px;vertical-align:middle}
 a{color:#70e5b0;text-decoration:none}a:hover{text-decoration:underline}
 .toolbar{display:flex;align-items:center;gap:9px;flex-wrap:wrap;padding:15px;background:#13283a;border:1px solid #305064;border-radius:13px}
 input,select,button{font:inherit;border-radius:9px;padding:10px 12px}input,select{background:#071d2d;color:#fff;border:1px solid #3c647a;color-scheme:dark}
@@ -3587,7 +3588,7 @@ button{border:1px solid #2cab79;background:#0e6f50;color:white;cursor:pointer;fo
 .coupon-total{font-size:12px;color:#80e8b6;margin-top:7px;font-weight:800}.won{color:#72e7a9}.lost{color:#ff9198}.open{color:#ffd379}
 @media(max-width:680px){.grid,.form,.lineup-teams,.coupons{grid-template-columns:1fr}.teams{font-size:16px}}
 </style></head><body><div class="wrap">
-<header><div><h1>📅 Maç Önü Tahminleri</h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
+<header><div><h1>📅 Maç Önü Tahminleri <span class="version">v3.3</span></h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
 <a href="/">← Canlı Gol Merkezi</a></header>
 <div class="toolbar">
   <label for="day">Maç günü</label>
@@ -3598,7 +3599,7 @@ button{border:1px solid #2cab79;background:#0e6f50;color:white;cursor:pointer;fo
 </div>
 <div class="hint">Seçilen maç önü ligleri • Saatler Türkiye saatidir • Analiz, açtığın maç için yapılır.</div>
 <section class="coupon-panel">
-  <div class="coupon-head"><div><h2>🎟️ Günün 3 Maçlık Kuponları</h2><div class="coupon-help">Önce maçları analiz et; sistem 80+ model güven puanlı seçimlerden en fazla 3 kupon oluşturur.</div></div>
+  <div class="coupon-head"><div><h2>🎟️ Günün 3 Maçlık Kuponları</h2><div class="coupon-help">Önce maçları analiz et; sistem 80+ seçimlerden en fazla 3 kupon oluşturur. Bir maç gün içinde yalnızca bir kupona girebilir.</div></div>
   <button id="makeCoupons" type="button">Analiz edilenlerden kupon yap</button></div>
   <div id="couponState" class="coupon-help">Henüz kupon oluşturulmadı.</div><div id="coupons" class="coupons"></div>
 </section>
@@ -3630,6 +3631,14 @@ async function getJson(url){
 const couponStoreKey="golPrematchCouponsV1";
 function couponStore(){try{return JSON.parse(localStorage.getItem(couponStoreKey)||"{}")||{}}catch{return {}}}
 function saveCouponStore(store){localStorage.setItem(couponStoreKey,JSON.stringify(store))}
+function couponsRepeatFixtures(coupons){
+  const seen=new Set();
+  for(const coupon of coupons||[])for(const leg of coupon.legs||[]){
+    if(seen.has(Number(leg.fixture)))return true;
+    seen.add(Number(leg.fixture));
+  }
+  return false;
+}
 function candidatePool(){
   const pool=[];
   for(const [fixture,item] of analyzedMatches){
@@ -3643,12 +3652,16 @@ function candidatePool(){
   return pool.sort((a,b)=>b.confidence-a.confidence||a.odd-b.odd);
 }
 function buildCoupons(){
-  const existingStore=couponStore();
-  if((existingStore[loadedDate]||[]).length){
-    renderCoupons(existingStore[loadedDate]);
+  const existingStore=couponStore(),existing=existingStore[loadedDate]||[],pool=candidatePool();
+  if(existing.length&&!couponsRepeatFixtures(existing)){
+    renderCoupons(existing);
     document.getElementById("couponState").textContent+=" • Ölçüm bozulmasın diye kayıt kilitli.";return;
   }
-  const pool=candidatePool(),combos=[];
+  if(existing.length&&couponsRepeatFixtures(existing)&&new Set(pool.map(x=>x.fixture)).size<3){
+    renderCoupons(existing);
+    document.getElementById("couponState").textContent+=" • Eski kuponlarda maç tekrarı var. Maçları yeniden analiz edip düğmeye tekrar bas.";return;
+  }
+  const combos=[];
   for(let i=0;i<pool.length;i++)for(let j=i+1;j<pool.length;j++)for(let k=j+1;k<pool.length;k++){
     const legs=[pool[i],pool[j],pool[k]];
     if(new Set(legs.map(x=>x.fixture)).size!==3)continue;
@@ -3657,11 +3670,14 @@ function buildCoupons(){
     combos.push({legs,min,avg,total,score:min*1000+avg*10-total});
   }
   combos.sort((a,b)=>b.score-a.score);
-  const chosen=[];
+  const chosen=[],usedFixtures=new Set();
   for(const combo of combos){
+    const fixtures=combo.legs.map(x=>Number(x.fixture));
+    if(fixtures.some(id=>usedFixtures.has(id)))continue;
     const signature=combo.legs.map(x=>`${x.fixture}:${x.market}`).sort().join("|");
     if(chosen.some(x=>x.signature===signature))continue;
     chosen.push({...combo,signature,status:"OPEN",created:new Date().toISOString()});
+    fixtures.forEach(id=>usedFixtures.add(id));
     if(chosen.length===3)break;
   }
   if(!chosen.length){
@@ -3701,6 +3717,10 @@ async function settleCoupons(){
 }
 function renderCoupons(coupons){
   const root=document.getElementById("coupons"),store=couponStore();root.innerHTML="";
+  if(couponsRepeatFixtures(coupons)){
+    document.getElementById("couponState").textContent="Eski sürümden kalan tekrarlı kupon kaydı bulundu. Maçları yeniden analiz edip ‘Analiz edilenlerden kupon yap’ düğmesine bas.";
+    return;
+  }
   let won=0,lost=0,legWon=0,legLost=0;
   for(const list of Object.values(store))for(const c of list||[]){
     if(c.status==="WON")won++;if(c.status==="LOST")lost++;
