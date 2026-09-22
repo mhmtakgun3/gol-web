@@ -2321,7 +2321,9 @@ def prematch_confidence(market: str, rank: int, lineups: Dict[str, Any],
                         lineup_fit: int) -> int:
     """Model seçim puanı; gerçek kazanma olasılığı veya garanti değildir."""
     market_bonus = {
-        "HOME": 2, "AWAY": 2,
+        # Maç sonucu, gol/çifte şans pazarlarından daha oynaktır. Kadro
+        # onayı yokken sırf form sıralamasıyla 80+ güvene çıkmasın.
+        "HOME": -4, "AWAY": -4,
         "HOME_OVER_1_5": 2, "AWAY_OVER_1_5": 2,
         "DC_1X": 2, "DC_X2": 2,
         "OVER_3_5": -1, "OVER_1_5": -4,
@@ -2614,6 +2616,43 @@ def prematch_odd_for_market(entries: List[Dict[str, Any]], market_code: str
     return chosen
 
 
+def prematch_result_market_check(entries: List[Dict[str, Any]], market_code: str,
+                                 quote: Dict[str, Any]) -> Tuple[bool, str]:
+    """MS seçiminde aynı sağlayıcının 1/2 fiyatlarını karşılaştır."""
+    if market_code not in ("HOME", "AWAY"):
+        return True, ""
+    wanted_book = re.sub(r"[^a-z0-9]", "", str(quote.get("bookmaker") or "").lower())
+    home_odd = away_odd = None
+    for entry in entries:
+        for bookmaker in entry.get("bookmakers") or []:
+            book_key = re.sub(r"[^a-z0-9]", "", str(bookmaker.get("name") or "").lower())
+            if book_key != wanted_book:
+                continue
+            for bet in bookmaker.get("bets") or []:
+                name = str(bet.get("name") or "").strip().lower()
+                if name not in ("match winner", "1x2", "full time result", "fulltime result"):
+                    continue
+                for value in bet.get("values") or []:
+                    selection = re.sub(r"\s+", "", str(value.get("value") or "").lower())
+                    odd = _float_odd(value.get("odd"))
+                    if selection in ("home", "1"):
+                        home_odd = odd
+                    elif selection in ("away", "2"):
+                        away_odd = odd
+                if home_odd is not None and away_odd is not None:
+                    break
+    if home_odd is None or away_odd is None:
+        return False, "MS piyasa karşılaştırması tamamlanamadı."
+    selected = home_odd if market_code == "HOME" else away_odd
+    opponent = away_odd if market_code == "HOME" else home_odd
+    note = f" Piyasa kontrolü: seçilen taraf {selected:.2f}, rakip {opponent:.2f}."
+    # 3.23'e karşı 1.60 gibi açık favori terslerini ve belirgin fiyat
+    # ayrışmalarını ele; küçük farklarda modele hareket alanı bırak.
+    if (opponent <= 1.90 and selected >= 2.50) or selected >= opponent * 1.45:
+        return False, note.strip()
+    return True, note
+
+
 @app.route("/api/prematch/fixtures")
 def api_prematch_fixtures():
     day = prematch_day(request.args.get("date", ""))
@@ -2673,6 +2712,12 @@ def api_prematch_analyze():
     if odds_entries is not None:
         for suggestion in suggestions:
             quote = prematch_odd_for_market(odds_entries, suggestion["market"])
+            market_note = ""
+            if quote and suggestion["market"] in ("HOME", "AWAY"):
+                market_ok, market_note = prematch_result_market_check(
+                    odds_entries, suggestion["market"], quote)
+                if not market_ok:
+                    quote = None
             # 1,5 ÜST yalnızca gerçek bir alternatif kalmadığında ve daha
             # anlamlı bir fiyatla gösterilir; ekranı kolay seçimlerle doldurma.
             if suggestion["market"] == "OVER_1_5" and quote and quote["odd"] < 1.50:
@@ -2684,7 +2729,7 @@ def api_prematch_analyze():
                     "explanation": prematch_pick_explanation(
                         suggestion["market"], home_team.get("name") or "Ev sahibi",
                         away_team.get("name") or "Deplasman", home, away)
-                        + " Kadro etkisi: " + suggestion["lineup_note"],
+                        + " Kadro etkisi: " + suggestion["lineup_note"] + market_note,
                     "lineup_fit": suggestion["lineup_fit"],
                     "confidence": prematch_confidence(
                         suggestion["market"], suggestion["rank"], lineups,
@@ -2698,11 +2743,8 @@ def api_prematch_analyze():
         ("KG VAR", "2,5 ÜST"), ("1X", "3,5 ALT"),
         ("1X", "3,5 ÜST"), ("X2", "3,5 ALT"), ("X2", "3,5 ÜST"),
     )
-    displayed = priced[:3]
-    result_pick = next((item for item in priced
-                        if item["label"] in ("MS 1", "MS 2")), None)
-    if result_pick and result_pick not in displayed and displayed:
-        displayed[-1] = result_pick
+    # MS seçimini ilk üçe zorla sokma; model sırası ve fiyat koşulu belirlesin.
+    displayed = priced[:5]
     for first, second in paired_markets:
         if first in {x["label"] for x in displayed}:
             partner = next((x for x in priced if x["label"] == second), None)
@@ -3232,7 +3274,7 @@ select{
       <span><span class="dot" style="background:#ff3f4f"></span>0–44 Zayıf</span>
       <span>🧠 BOT PICK</span>
     </div>
-    <div>Gol Sinyal Merkezi v3.4 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
+    <div>Gol Sinyal Merkezi v3.6 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
   </div>
 </div>
 
@@ -3664,7 +3706,7 @@ button{border:1px solid #2cab79;background:#0e6f50;color:white;cursor:pointer;fo
 .coupon-total{font-size:12px;color:#80e8b6;margin-top:7px;font-weight:800}.won{color:#72e7a9}.lost{color:#ff9198}.open{color:#ffd379}
 @media(max-width:680px){.grid,.form,.lineup-teams,.coupons{grid-template-columns:1fr}.teams{font-size:16px}}
 </style></head><body><div class="wrap">
-<header><div><h1>📅 Maç Önü Tahminleri <span class="version">v3.4</span></h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
+<header><div><h1>📅 Maç Önü Tahminleri <span class="version">v3.6</span></h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
 <a href="/">← Canlı Gol Merkezi</a></header>
 <div class="toolbar">
   <label for="day">Maç günü</label>
@@ -3704,7 +3746,7 @@ async function getJson(url){
   if(!r.ok)throw Error(body.error||"Veri alınamadı.");
   return body;
 }
-const couponStoreKey="golPrematchCouponsV1";
+const couponStoreKey="golPrematchCouponsV2";
 function couponStore(){try{return JSON.parse(localStorage.getItem(couponStoreKey)||"{}")||{}}catch{return {}}}
 function saveCouponStore(store){localStorage.setItem(couponStoreKey,JSON.stringify(store))}
 function couponsRepeatFixtures(coupons){
@@ -3735,7 +3777,7 @@ function buildCoupons(){
   }
   if(existing.length&&couponsRepeatFixtures(existing)&&new Set(pool.map(x=>x.fixture)).size<3){
     renderCoupons(existing);
-    document.getElementById("couponState").textContent+=" • Eski kuponlarda maç tekrarı var. Maçları yeniden analiz edip düğmeye tekrar bas.";return;
+    document.getElementById("couponState").textContent+=" • Eski kupon dağılımı geçersiz. Maçları yeniden analiz edip düğmeye tekrar bas.";return;
   }
   const combos=[];
   for(let i=0;i<pool.length;i++)for(let j=i+1;j<pool.length;j++)for(let k=j+1;k<pool.length;k++){
@@ -3794,7 +3836,7 @@ async function settleCoupons(){
 function renderCoupons(coupons){
   const root=document.getElementById("coupons"),store=couponStore();root.innerHTML="";
   if(couponsRepeatFixtures(coupons)){
-    document.getElementById("couponState").textContent="Eski sürümden kalan tekrarlı kupon kaydı bulundu. Maçları yeniden analiz edip ‘Analiz edilenlerden kupon yap’ düğmesine bas.";
+    document.getElementById("couponState").textContent="Eski sürümden kalan geçersiz kupon dağılımı bulundu. Maçları yeniden analiz edip ‘Analiz edilenlerden kupon yap’ düğmesine bas.";
     return;
   }
   let won=0,lost=0,legWon=0,legLost=0;
