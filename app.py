@@ -2231,12 +2231,32 @@ def prematch_fixtures(day: date) -> Tuple[Optional[List[Dict[str, Any]]], Option
     ], None
 
 
+def _prematch_metrics(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    n = len(rows)
+    return {
+        "count": n,
+        "scored": round(sum(x["scored"] for x in rows) / n, 2) if n else None,
+        "conceded": round(sum(x["conceded"] for x in rows) / n, 2) if n else None,
+        "wins": sum(x["win"] for x in rows),
+        "draws": sum(x["draw"] for x in rows),
+        "losses": sum(x["scored"] < x["conceded"] for x in rows),
+        "btts": sum(x["btts"] for x in rows),
+        "over15": sum(x["over15"] for x in rows),
+        "over25": sum(x["over25"] for x in rows),
+        "under25": sum(x["under25"] for x in rows),
+        "over35": sum(x["over35"] for x in rows),
+        "under35": sum(x["under35"] for x in rows),
+        "scored2": sum(x["scored2"] for x in rows),
+        "conceded2": sum(x["conceded"] >= 2 for x in rows),
+    }
+
+
 def prematch_team_form(team_id: int, kickoff: str
                        ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    # Son sekiz tamamlanmış maç; bugünün canlı maçı veya gelecek maç sızmasın.
+    # Genel son 8 ile gerçek son 5 iç/dış saha maçını ayrı örneklemlerden al.
     items, error = prematch_api_cached(
         f"form:{team_id}", "/fixtures",
-        {"team": team_id, "last": 16, "timezone": "Europe/Istanbul"},
+        {"team": team_id, "last": 30, "timezone": "Europe/Istanbul"},
         PREMATCH_FORM_CACHE_SECONDS,
     )
     if error:
@@ -2252,7 +2272,7 @@ def prematch_team_form(team_id: int, kickoff: str
         except (TypeError, ValueError):
             continue
         if (status not in ("FT", "AET", "PEN") or match_time >= kickoff_time
-                or kickoff_time - match_time > timedelta(days=180)):
+                or kickoff_time - match_time > timedelta(days=365)):
             continue
         sides = item.get("teams") or {}
         goals = item.get("goals") or {}
@@ -2279,30 +2299,55 @@ def prematch_team_form(team_id: int, kickoff: str
     recent = finished[:8]
     if len(recent) < 5:
         return {"count": len(recent), "insufficient": True}, None
-
-    def metrics(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-        n = len(rows)
-        return {
-            "count": n,
-            "scored": round(sum(x["scored"] for x in rows) / n, 2) if n else None,
-            "conceded": round(sum(x["conceded"] for x in rows) / n, 2) if n else None,
-            "wins": sum(x["win"] for x in rows),
-            "draws": sum(x["draw"] for x in rows),
-            "btts": sum(x["btts"] for x in rows),
-            "over15": sum(x["over15"] for x in rows),
-            "over25": sum(x["over25"] for x in rows),
-            "under25": sum(x["under25"] for x in rows),
-            "over35": sum(x["over35"] for x in rows),
-            "under35": sum(x["under35"] for x in rows),
-            "scored2": sum(x["scored2"] for x in rows),
-        }
-
+    home_five = [x for x in finished if x["venue"] == "home"][:5]
+    away_five = [x for x in finished if x["venue"] == "away"][:5]
     return {
         "count": len(recent),
-        "all": metrics(recent),
-        "home": metrics([x for x in recent if x["venue"] == "home"]),
-        "away": metrics([x for x in recent if x["venue"] == "away"]),
+        "all": _prematch_metrics(recent),
+        "home": _prematch_metrics(home_five),
+        "away": _prematch_metrics(away_five),
     }, None
+
+
+def prematch_h2h(home_id: int, away_id: int, kickoff: str
+                 ) -> Tuple[Dict[str, Any], Optional[str]]:
+    items, error = prematch_api_cached(
+        f"h2h:{home_id}:{away_id}", "/fixtures/headtohead",
+        {"h2h": f"{home_id}-{away_id}", "last": 8, "timezone": "Europe/Istanbul"},
+        PREMATCH_FORM_CACHE_SECONDS,
+    )
+    if error:
+        return {"count": 0, "insufficient": True}, error
+    rows = []
+    for item in items or []:
+        fixture, teams, goals = item.get("fixture") or {}, item.get("teams") or {}, item.get("goals") or {}
+        status, played_at = (fixture.get("status") or {}).get("short"), fixture.get("date") or ""
+        try:
+            if datetime.fromisoformat(played_at) >= datetime.fromisoformat(kickoff):
+                continue
+        except (TypeError, ValueError):
+            continue
+        if status not in ("FT", "AET", "PEN") or goals.get("home") is None or goals.get("away") is None:
+            continue
+        fixture_home = safe_int((teams.get("home") or {}).get("id"))
+        fixture_away = safe_int((teams.get("away") or {}).get("id"))
+        if home_id not in (fixture_home, fixture_away) or away_id not in (fixture_home, fixture_away):
+            continue
+        home_is_fixture_home = fixture_home == home_id
+        scored = safe_int(goals.get("home" if home_is_fixture_home else "away"))
+        conceded = safe_int(goals.get("away" if home_is_fixture_home else "home"))
+        rows.append({
+            "date": played_at, "scored": scored, "conceded": conceded,
+            "win": scored > conceded, "draw": scored == conceded,
+            "btts": scored > 0 and conceded > 0,
+            "over15": scored + conceded >= 2, "over25": scored + conceded >= 3,
+            "under25": scored + conceded <= 2, "over35": scored + conceded >= 4,
+            "under35": scored + conceded <= 3, "scored2": scored >= 2,
+        })
+    rows.sort(key=lambda x: x["date"], reverse=True)
+    recent = rows[:5]
+    return {"count": len(recent), "insufficient": len(recent) < 2,
+            "all": _prematch_metrics(recent) if recent else _prematch_metrics([])}, None
 
 
 def _lineup_shape(entry: Dict[str, Any]) -> Dict[str, Any]:
@@ -2397,8 +2442,41 @@ def prematch_confidence(market: str, rank: int, lineups: Dict[str, Any],
     return max(60, min(90, int(round(score))))
 
 
+def h2h_market_context(market: str, h2h: Dict[str, Any]) -> Tuple[int, str]:
+    """H2H verisini en fazla bir kademe etkili yardımcı sinyal olarak kullan."""
+    if h2h.get("insufficient") or h2h.get("count", 0) < 2:
+        return 0, "İki takım arasında yeterli yakın dönem karşılaşması yok."
+    m, n = h2h["all"], h2h["all"]["count"]
+    positive = negative = False
+    if market in ("OVER_1_5", "OVER_2_5", "OVER_3_5"):
+        key = {"OVER_1_5": "over15", "OVER_2_5": "over25", "OVER_3_5": "over35"}[market]
+        positive, negative = m[key] / n >= .60, m[key] / n <= .25
+    elif market in ("UNDER_2_5", "UNDER_3_5"):
+        key = "under25" if market == "UNDER_2_5" else "under35"
+        positive, negative = m[key] / n >= .60, m[key] / n <= .25
+    elif market == "BTTS_YES":
+        positive, negative = m["btts"] / n >= .60, m["btts"] / n <= .25
+    elif market == "BTTS_NO":
+        positive, negative = m["btts"] / n <= .40, m["btts"] / n >= .75
+    elif market in ("HOME", "DC_1X"):
+        rate = (m["wins"] + (m["draws"] if market == "DC_1X" else 0)) / n
+        positive, negative = rate >= .60, rate <= .25
+    elif market in ("AWAY", "DC_X2"):
+        rate = (m["losses"] + (m["draws"] if market == "DC_X2" else 0)) / n
+        positive, negative = rate >= .60, rate <= .25
+    elif market == "HOME_OVER_1_5":
+        positive, negative = m["scored2"] / n >= .60, m["scored2"] / n <= .25
+    elif market == "AWAY_OVER_1_5":
+        positive, negative = m["conceded2"] / n >= .60, m["conceded2"] / n <= .25
+    effect = 1 if positive else -1 if negative else 0
+    note = (f"İkili rekabet son {n} maç: ev sahibi {m['wins']} galibiyet, "
+            f"{m['draws']} beraberlik; KG {m['btts']}/{n}, 2,5 ÜST {m['over25']}/{n}.")
+    return effect, note
+
+
 def prematch_suggestions(home: Dict[str, Any], away: Dict[str, Any],
-                         lineups: Optional[Dict[str, Any]] = None
+                         lineups: Optional[Dict[str, Any]] = None,
+                         h2h: Optional[Dict[str, Any]] = None
                          ) -> List[Dict[str, Any]]:
     if home.get("insufficient") or away.get("insufficient"):
         return []
@@ -2484,6 +2562,11 @@ def prematch_suggestions(home: Dict[str, Any], away: Dict[str, Any],
                       "reason": f"En az iki gol: {h['over15']}/{h['count']} ve {a['over15']}/{a['count']}; daha yüksek gol çizgisi için işaret zayıf.", "rank": 1})
     lineup_data = lineups or {"confirmed": False}
     for pick in picks:
+        h2h_fit, h2h_note = h2h_market_context(pick["market"], h2h or {})
+        pick["h2h_fit"] = h2h_fit
+        pick["h2h_note"] = h2h_note
+        pick["reason"] += " " + h2h_note
+        pick["rank"] += h2h_fit
         fit, note = lineup_market_note(pick["market"], lineup_data)
         pick["lineup_fit"] = fit
         pick["lineup_note"] = note
@@ -2768,8 +2851,9 @@ def api_prematch_analyze():
     away, away_error = prematch_team_form(away_id, fixture.get("date") or "")
     if home_error or away_error:
         return jsonify({"error": home_error or away_error}), 503
+    h2h, h2h_error = prematch_h2h(home_id, away_id, fixture.get("date") or "")
     lineups, lineup_error = prematch_lineups(fixture_id, home_id, away_id)
-    suggestions = prematch_suggestions(home or {}, away or {}, lineups)
+    suggestions = prematch_suggestions(home or {}, away or {}, lineups, h2h)
     odds_entries, odds_error = prematch_fixture_odds(fixture_id) if suggestions else ([], None)
     priced = []
     if odds_entries is not None:
@@ -2792,6 +2876,7 @@ def api_prematch_analyze():
                     "explanation": prematch_pick_explanation(
                         suggestion["market"], home_team.get("name") or "Ev sahibi",
                         away_team.get("name") or "Deplasman", home, away)
+                        + " İkili rekabet: " + suggestion["h2h_note"]
                         + " Kadro etkisi: " + suggestion["lineup_note"] + market_note,
                     "lineup_fit": suggestion["lineup_fit"],
                     "confidence": prematch_confidence(
@@ -2837,6 +2922,7 @@ def api_prematch_analyze():
     return jsonify({
         "id": fixture_id, "home": home_team.get("name"), "away": away_team.get("name"),
         "home_form": home, "away_form": away,
+        "h2h": h2h, "h2h_error": h2h_error,
         "suggestions": priced,
         "joint_notes": joint_notes,
         "lineups": lineups,
@@ -3337,7 +3423,7 @@ select{
       <span><span class="dot" style="background:#ff3f4f"></span>0–44 Zayıf</span>
       <span>🧠 BOT PICK</span>
     </div>
-    <div>Gol Sinyal Merkezi v3.8 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
+    <div>Gol Sinyal Merkezi v3.9 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
   </div>
 </div>
 
@@ -3769,7 +3855,7 @@ button{border:1px solid #2cab79;background:#0e6f50;color:white;cursor:pointer;fo
 .coupon-total{font-size:12px;color:#80e8b6;margin-top:7px;font-weight:800}.won{color:#72e7a9}.lost{color:#ff9198}.open{color:#ffd379}
 @media(max-width:680px){.grid,.form,.lineup-teams,.coupons{grid-template-columns:1fr}.teams{font-size:16px}}
 </style></head><body><div class="wrap">
-<header><div><h1>📅 Maç Önü Tahminleri <span class="version">v3.8</span></h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
+<header><div><h1>📅 Maç Önü Tahminleri <span class="version">v3.9</span></h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
 <a href="/">← Canlı Gol Merkezi</a></header>
 <div class="toolbar">
   <label for="day">Maç günü</label>
@@ -3796,6 +3882,12 @@ function formText(v,side){
   if(!v || v.insufficient)return `Tamamlanmış son maç sayısı: ${Number(v?.count||0)} (en az 5 gerekli)`;
   const a=v.all,venue=v[side],label=side==="home"?"İç saha":"Deplasman";
   return `Son ${a.count} maç: ${a.wins} galibiyet · maç başı ${a.scored} atılan / ${a.conceded} yenilen gol · ${a.scored2} kez 2+ gol attı · ${a.btts} KG · ${a.over25} kez 2,5 üst · ${a.under25} kez 2,5 alt. ${label} (${venue.count} maç): ${venue.wins} galibiyet, ${venue.scored2} kez 2+ gol attı, maç başı ${venue.scored ?? "—"} atılan / ${venue.conceded ?? "—"} yenilen gol.`;
+}
+function h2hHtml(a){
+  const h=a.h2h||{},m=h.all||{},n=Number(h.count||0);
+  if(n<2)return `<div class="lineup-box"><b>🤝 İkili rekabet</b><br>Analize etki edecek yeterli yakın dönem karşılaşması bulunamadı.</div>`;
+  const awayWins=Number(m.losses||0),avg=(Number(m.scored||0)+Number(m.conceded||0)).toFixed(1);
+  return `<div class="lineup-box"><b>🤝 İki takımın kendi arasındaki son ${n} maç</b><br>Ev sahibi ${Number(m.wins||0)} galibiyet · ${Number(m.draws||0)} beraberlik · Deplasman ${awayWins} galibiyet · KG ${Number(m.btts||0)}/${n} · 2,5 ÜST ${Number(m.over25||0)}/${n} · Gol ortalaması ${avg}</div>`;
 }
 function lineupHtml(a){
   const l=a.lineups||{},status=l.confirmed?"✅ Onaylı ilk 11 analize dahil":"⏳ Kadrolar bekleniyor";
@@ -3944,7 +4036,7 @@ function renderFixtures(){
             : `<div class="pas">PAS • ${a.candidate_count ? "Modelde eğilim var, ancak fiyat koşulu sağlanmadı." : "Yeterli ortak veri işareti yok."}</div>`;
           box.innerHTML=`<div class="form"><div><b>${esc(a.home)}</b><br>${esc(formText(a.home_form,"home"))}</div>
             <div><b>${esc(a.away)}</b><br>${esc(formText(a.away_form,"away"))}</div></div>
-            ${lineupHtml(a)}${picks}${(a.joint_notes||[]).map(n=>`<div class="joint-note"><b>Birlikte gerçekleşme ihtimali</b><br>${esc(n)}</div>`).join("")}<div class="odds-note">${esc(a.odds_note)}</div><div class="hint">${esc(a.note)}</div>`;
+            ${h2hHtml(a)}${lineupHtml(a)}${picks}${(a.joint_notes||[]).map(n=>`<div class="joint-note"><b>Birlikte gerçekleşme ihtimali</b><br>${esc(n)}</div>`).join("")}<div class="odds-note">${esc(a.odds_note)}</div><div class="hint">${esc(a.note)}</div>`;
         }catch(e){box.innerHTML='<span class="error">'+esc(e.message)+'</span>'}
         finally{button.disabled=false}
       };
