@@ -1,127 +1,192 @@
-function legResult(market,h,a){
-  const total=h+a;
-  if(market==="HOME")return h>a;if(market==="AWAY")return a>h;
-  if(market==="DC_1X")return h>=a;if(market==="DC_X2")return a>=h;
-  if(market==="HOME_OVER_1_5")return h>=2;if(market==="AWAY_OVER_1_5")return a>=2;
-  if(market==="BTTS_YES")return h>0&&a>0;if(market==="BTTS_NO")return h===0||a===0;
-  if(market==="OVER_1_5")return total>=2;if(market==="OVER_2_5")return total>=3;
-  if(market==="UNDER_2_5")return total<=2;if(market==="OVER_3_5")return total>=4;
-  if(market==="UNDER_3_5")return total<=3;return false;
+    172,
+    # İRLANDA
+    357,
+    # FİNLANDİYA
+    244,
+    # İZLANDA
+    164,
 }
-async function settleCoupons(){
-  const store=couponStore();let changed=false;
-  for(const coupons of Object.values(store))for(const coupon of coupons||[])for(const leg of coupon.legs||[]){
-    if(leg.status!=="OPEN")continue;
-    try{
-      const r=await getJson(`/api/prematch/result?fixture=${encodeURIComponent(leg.fixture)}`);
-      if(r.finished&&r.home_goals!==null&&r.away_goals!==null){
-        leg.status=legResult(leg.market,Number(r.home_goals),Number(r.away_goals))?"WON":"LOST";
-        leg.score=`${r.home_goals}-${r.away_goals}`;changed=true;
-      }
-    }catch{}
-  }
-  for(const coupons of Object.values(store))for(const coupon of coupons||[]){
-    coupon.status=coupon.legs.some(x=>x.status==="LOST")?"LOST":coupon.legs.every(x=>x.status==="WON")?"WON":"OPEN";
-  }
-  if(changed)saveCouponStore(store);
-  renderCoupons(store[loadedDate]||[]);
+
+# Büyükler düzeyindeki milli takım organizasyonları. İsim kontrolü de
+# kullanıldığı için API yeni sezonlarda kimliği değiştirmese bile yalnızca
+# sabit ID listesine bağımlı kalmayız. U21/U19 ve kulüp turnuvaları dahil değil.
+NATIONAL_TEAM_LEAGUE_IDS = {
+    1,  # FIFA World Cup
+    4,  # Euro Championship
+    5,  # UEFA Nations League
+    6,  # Africa Cup of Nations
+    7,  # Asian Cup
+    9,  # Copa America
 }
-function renderCoupons(coupons){
-  const root=document.getElementById("coupons"),store=couponStore();root.innerHTML="";
-  if(couponsRepeatFixtures(coupons)){
-    document.getElementById("couponState").textContent="Eski sürümden kalan geçersiz kupon dağılımı bulundu. Maçları yeniden analiz edip ‘Analiz edilenlerden kupon yap’ düğmesine bas.";
-    return;
-  }
-  let won=0,lost=0,legWon=0,legLost=0;
-  for(const list of Object.values(store))for(const c of list||[]){
-    if(c.status==="WON")won++;if(c.status==="LOST")lost++;
-    for(const l of c.legs||[]){if(l.status==="WON")legWon++;if(l.status==="LOST")legLost++;}
-  }
-  const settled=won+lost,settledLegs=legWon+legLost;
-  document.getElementById("couponState").textContent=coupons.length
-    ? `${coupons.length} kupon • Sonuçlanan kupon başarısı: ${settled?Math.round(won/settled*100):0}% (${won}/${settled}) • Seçim başarısı: ${settledLegs?Math.round(legWon/settledLegs*100):0}% (${legWon}/${settledLegs})`
-    : "Bu tarih için kayıtlı kupon yok.";
-  coupons.forEach((c,i)=>{
-    const el=document.createElement("div");el.className="coupon";
-    const status=c.status||"OPEN",statusText=status==="WON"?"TUTTU":status==="LOST"?"YATMADI":"BEKLİYOR";
-    el.innerHTML=`<div class="coupon-title">Kupon ${i+1} • <span class="${status.toLowerCase()}">${statusText}</span></div>`+
-      c.legs.map(l=>`<div class="coupon-leg"><b>${esc(l.home)} — ${esc(l.away)}</b><br>${esc(l.label)} • ${l.odd.toFixed(2)} ${esc(l.bookmaker)}<br>Model güveni ${l.confidence}/100${l.score?` • Skor ${esc(l.score)}`:""} • <span class="${l.status.toLowerCase()}">${l.status==="WON"?"TUTTU":l.status==="LOST"?"YATTI":"AÇIK"}</span></div>`).join("")+
-      `<div class="coupon-total">Toplam oran ${c.total.toFixed(2)} • Ortalama güven ${c.avg.toFixed(0)}/100</div>`;
-    root.appendChild(el);
-  });
+NATIONAL_TEAM_LEAGUE_NAMES = {
+    "friendlies",
+    "world cup",
+    "world cup - qualification africa",
+    "world cup - qualification asia",
+    "world cup - qualification concacaf",
+    "world cup - qualification europe",
+    "world cup - qualification oceania",
+    "world cup - qualification south america",
+    "euro championship",
+    "euro championship - qualification",
+    "uefa nations league",
+    "africa cup of nations",
+    "africa cup of nations - qualification",
+    "asian cup",
+    "asian cup - qualification",
+    "copa america",
+    "concacaf nations league",
+    "concacaf gold cup",
+    "ofc nations cup",
 }
-function renderFixtures(){
-  const selected=loadedDate;
-  const filtered=leagueSelect.value==="ALL" ? loadedMatches
-    : loadedMatches.filter(m=>String(m.league_id)===leagueSelect.value);
-  state.textContent=filtered.length
-    ? `${filtered.length} maç gösteriliyor. Analiz için bir maç seç.`
-    : "Seçilen ligde başlamamış maç bulunamadı.";
-  root.innerHTML="";
-  for(const m of filtered){
-      const card=document.createElement("article");card.className="match";
-      card.innerHTML=`<div class="meta">🏆 ${esc(m.country)} • ${esc(m.league)} &nbsp; ⏰ ${esc(shownTime(m.kickoff))}</div>
-        <div class="teams">${esc(m.home)} — ${esc(m.away)}</div>
-        <button type="button">Bu maçı analiz et</button><div class="analysis" hidden></div>`;
-      const button=card.querySelector("button"),box=card.querySelector(".analysis");
-      button.onclick=async()=>{
-        button.disabled=true;box.hidden=false;box.textContent="Son maçlar inceleniyor…";
-        try{
-          const a=await getJson("/api/prematch/analyze?date="+encodeURIComponent(selected)+"&fixture="+encodeURIComponent(m.id));
-          analyzedMatches.set(Number(m.id),{match:m,analysis:a});
-          const picks=a.suggestions.length
-            ? a.suggestions.map(p=>`<div class="pick"><b>${esc(p.label)}</b><div class="quote">Oran ${Number(p.quote.odd).toFixed(2)} · ${esc(p.quote.bookmaker)}</div><div class="reason">${esc(p.quote.market_name)}: ${esc(p.quote.selection)}${quoteTime(p.quote.updated)?` · Güncelleme: ${esc(quoteTime(p.quote.updated))}`:""}</div><div class="pick-why"><b>Neden bu tercih?</b><br>${esc(p.explanation || p.reason)}</div></div>`).join("")
-            : `<div class="pas">PAS • ${a.candidate_count ? "Modelde eğilim var, ancak fiyat koşulu sağlanmadı." : "Yeterli ortak veri işareti yok."}</div>`;
-          box.innerHTML=`<div class="form"><div><b>${esc(a.home)}</b><br>${esc(formText(a.home_form,"home"))}</div>
-            <div><b>${esc(a.away)}</b><br>${esc(formText(a.away_form,"away"))}</div></div>
-            ${h2hHtml(a)}${lineupHtml(a)}${picks}${(a.joint_notes||[]).map(n=>`<div class="joint-note"><b>Birlikte gerçekleşme ihtimali</b><br>${esc(n)}</div>`).join("")}<div class="odds-note">${esc(a.odds_note)}</div><div class="hint">${esc(a.note)}</div>`;
-        }catch(e){box.innerHTML='<span class="error">'+esc(e.message)+'</span>'}
-        finally{button.disabled=false}
-      };
-      root.appendChild(card);
-  }
+NATIONAL_TEAM_NAME_MARKERS = (
+    "uefa nations league",
+    "concacaf nations league",
+    "world cup",
+    "euro championship",
+    "copa america",
+    "africa cup of nations",
+    "asian cup",
+    "concacaf gold cup",
+    "ofc nations cup",
+)
+NATIONAL_TEAM_EXCLUDED_MARKERS = (
+    "club", "women", "u17", "u18", "u19", "u20", "u21", "u23", "youth",
+)
+
+
+def is_allowed_competition(league: Dict[str, Any], prematch: bool = False) -> bool:
+    league_id = safe_int(league.get("id"), 0)
+    if league_id in NATIONAL_TEAM_LEAGUE_IDS:
+        return True
+    league_name = re.sub(r"\s+", " ", str(league.get("name") or "").strip().lower())
+    if league_name in NATIONAL_TEAM_LEAGUE_NAMES:
+        return True
+    # Elemelerin kıta/round ekleri sağlayıcıda dönem dönem değişebiliyor.
+    # Büyükler turnuvasını kök adından tanı; genç/kadın/kulüp turnuvasını alma.
+    if (not any(word in league_name for word in NATIONAL_TEAM_EXCLUDED_MARKERS)
+            and any(marker in league_name for marker in NATIONAL_TEAM_NAME_MARKERS)):
+        return True
+    allowed = PREMATCH_LEAGUES if prematch else ALLOWED_LEAGUES
+    return league_id in allowed
+
+# Yalnızca maç önü analizinden çıkarılan ligler. Canlı Gol Merkezi bu ligleri
+# taramaya devam eder; Romanya ve Güney Afrika ise yukarıdaki ortak listeden çıkarıldı.
+PREMATCH_EXCLUDED_LEAGUES = {
+    128,       # Arjantin
+    219,       # Avusturya 2. lig
+    71, 72,    # Brezilya ligleri
+    172,       # Bulgaristan
+    210,       # Hırvatistan
+    62, 63,    # Fransa 2. ve 3. lig
+    120,       # Danimarka 2. lig
+    262, 263,  # Meksika ligleri
+    107,       # Polonya 2. lig
+    293,       # Güney Kore 2. lig
+    435,       # İspanya 3. lig
 }
-async function load(){
-  const selected=day.value;state.textContent="Fikstür yükleniyor…";root.innerHTML="";
-  leagueSelect.disabled=true;leagueSelect.innerHTML='<option value="ALL">Tüm ligler</option>';
-  loadedMatches=[];loadedDate="";analyzedMatches=new Map();
-  try{
-    const data=await getJson("/api/prematch/fixtures?date="+encodeURIComponent(selected));
-    loadedDate=selected;loadedMatches=data.matches;
-    const leagues=new Map();
-    for(const m of loadedMatches){
-      const id=String(m.league_id);
-      if(!leagues.has(id))leagues.set(id,{name:`${m.country||""} • ${m.league||"Lig"}`,count:0});
-      leagues.get(id).count++;
-    }
-    const options=[...leagues.entries()].sort((a,b)=>a[1].name.localeCompare(b[1].name,"tr"));
-    leagueSelect.innerHTML=`<option value="ALL">Tüm ligler (${loadedMatches.length})</option>`+
-      options.map(([id,item])=>`<option value="${esc(id)}">${esc(item.name)} (${item.count})</option>`).join("");
-    leagueSelect.disabled=options.length===0;
-    renderFixtures();renderCoupons(couponStore()[loadedDate]||[]);settleCoupons();
-  }catch(e){state.innerHTML='<span class="error">'+esc(e.message)+'</span>'}
+PREMATCH_LEAGUES = ALLOWED_LEAGUES - PREMATCH_EXCLUDED_LEAGUES
+
+# ------------------------------------------------------------
+# Ortak durum
+# ------------------------------------------------------------
+
+memory_lock = threading.Lock()
+cache_lock = threading.Lock()
+status_lock = threading.Lock()
+
+match_memory: Dict[int, Dict[str, Any]] = {}
+bot_pick_history: List[Dict[str, Any]] = []
+
+live_cache = {
+    "ts": 0.0,
+    "data": [],
+    "all_live": [],
 }
-leagueSelect.onchange=renderFixtures;
-document.getElementById("makeCoupons").onclick=buildCoupons;
-document.getElementById("load").onclick=load;load();
-</script></body></html>"""
+
+stats_cache: Dict[int, Dict[str, Any]] = {}
+
+live_odds_cache = {
+    "ts": 0.0,
+    "data": [],
+    "error": None,
+}
+
+# Maç önü istekleri sayfa açılışlarında tekrar API kotası tüketmesin.
+prematch_cache: Dict[str, Dict[str, Any]] = {}
+PREMATCH_FIXTURE_CACHE_SECONDS = 900
+PREMATCH_FORM_CACHE_SECONDS = 1800
+PREMATCH_ODDS_CACHE_SECONDS = 1800
+PREMATCH_LINEUP_CACHE_SECONDS = 300
+PREMATCH_MIN_ODD = 1.30
+ISTANBUL_TZ = ZoneInfo("Europe/Istanbul")
+
+scanner_status = {
+    "running": False,
+    "last_scan_started": None,
+    "last_scan_finished": None,
+    "last_scan_duration": None,
+    "last_scan_error": None,
+    "api_live_count": 0,
+    "eligible_live_count": 0,
+    "analyzed_count": 0,
+    "last_api_message": None,
+}
+
+scanner_started = False
+scanner_start_lock = threading.Lock()
 
 
-@app.route("/tahmin")
-def prematch_page():
-    today = datetime.now(ISTANBUL_TZ).date()
-    next_saturday = today + timedelta(days=(5 - today.weekday()) % 7)
-    return render_template_string(
-        PREMATCH_PAGE, today=today.isoformat(),
-        initial_day=next_saturday.isoformat(),
-        last_day=(today + timedelta(days=7)).isoformat(),
-    )
 
+# ============================================================
+# PROCESS'LER ARASI ORTAK DURUM
+# ============================================================
 
-# Gunicorn import ettiğinde scanner başlasın.
-ensure_scanner_started()
+def serialize_matches_for_web() -> List[Dict[str, Any]]:
+    """Scanner process'indeki match_memory verisini web için JSON'a çevirir."""
+    with memory_lock:
+        items = []
 
+        for fixture_id, item in match_memory.items():
+            match = item.get("match") or {}
+            stats = item.get("current_stats") or {}
+            period_stats = item.get("period_stats") or stats
 
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", "5000"))
-    app.run(host="0.0.0.0", port=port, debug=False)
+            expected_team_key = item.get("expected_team")
+            expected_team_name = None
+
+            if expected_team_key == "home":
+                expected_team_name = match.get("home_team")
+            elif expected_team_key == "away":
+                expected_team_name = match.get("away_team")
+
+            match_expected_key = item.get("match_expected_team")
+            match_expected_name = None
+
+            if match_expected_key == "home":
+                match_expected_name = match.get("home_team")
+            elif match_expected_key == "away":
+                match_expected_name = match.get("away_team")
+            elif match_expected_key == "both":
+                match_expected_name = "İki takım da"
+
+            items.append({
+                "fixture_id": fixture_id,
+                "league": match.get("league"),
+                "country": match.get("country"),
+                "home_team": match.get("home_team"),
+                "away_team": match.get("away_team"),
+                "home_logo": match.get("home_logo"),
+                "away_logo": match.get("away_logo"),
+                "minute": match.get("minute"),
+                "status": match.get("status"),
+                "home_goals": match.get("home_goals"),
+                "away_goals": match.get("away_goals"),
+                "signal": item.get("current_signal", 0),
+                "signal_active": item.get("current_signal", 0) >= SIGNAL_LIMIT,
+                "reasons": item.get("current_reasons", []),
+                "first_half_signal": item.get("first_half_signal", 0),
+                "first_half_active": (
+                    match.get("status") == "1H"
+                    and (match.get("minute") or 0) >= 10
+                    and (match.get("home_goals") or 0) + (match.get("away_goals") or 0) <= 1
