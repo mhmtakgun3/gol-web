@@ -3525,7 +3525,7 @@ select{
       <span><span class="dot" style="background:#ff3f4f"></span>0–44 Zayıf</span>
       <span>🧠 BOT PICK</span>
     </div>
-    <div>Gol Sinyal Merkezi v4.5 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
+    <div>Gol Sinyal Merkezi v4.6 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
   </div>
 </div>
 
@@ -3960,7 +3960,7 @@ button{border:1px solid #2cab79;background:#0e6f50;color:white;cursor:pointer;fo
 .coupon-total{font-size:12px;color:#80e8b6;margin-top:7px;font-weight:800}.won{color:#72e7a9}.lost{color:#ff9198}.open{color:#ffd379}.void{color:#9aa7b8}
 @media(max-width:680px){.grid,.form,.lineup-teams,.coupons{grid-template-columns:1fr}.bankroll{grid-template-columns:repeat(2,minmax(0,1fr))}.teams{font-size:16px}}
 </style></head><body><div class="wrap">
-<header><div><h1>📅 Maç Önü Tahminleri <span class="version">v4.5</span></h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
+<header><div><h1>📅 Maç Önü Tahminleri <span class="version">v4.6</span></h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
 <a href="/">← Canlı Gol Merkezi</a></header>
 <div class="toolbar">
   <label for="day">Maç günü</label>
@@ -3971,7 +3971,7 @@ button{border:1px solid #2cab79;background:#0e6f50;color:white;cursor:pointer;fo
 </div>
 <div class="hint">Seçilen maç önü ligleri • Saatler Türkiye saatidir • Analiz, açtığın maç için yapılır.</div>
 <section class="coupon-panel">
-  <div class="coupon-head"><div><h2>🎟️ Botun Sanal Bahis Defteri</h2><div class="coupon-help">Bot yalnızca 2–3 maçlı, yüksek birlikte tutma ihtimalli kombineleri oynar. Her kupon 1.000 TL; kupon sayısı sabit değildir. Aynı maç günün aktif kuponlarında yalnız bir kez kullanılır.</div></div>
+  <div class="coupon-head"><div><h2>🎟️ Botun Sanal Bahis Defteri</h2><div class="coupon-help">Bot yalnızca 3 farklı maçtan oluşan, yüksek birlikte tutma ihtimalli kombineleri oynar. Her kupon 1.000 TL; kupon sayısı sabit değildir. Aynı maç günün aktif kuponlarında yalnız bir kez kullanılır.</div></div>
   <button id="makeCoupons" type="button">Botun oynayacağı kuponları oluştur</button></div>
   <div id="bankroll" class="bankroll"></div><div id="couponState" class="coupon-help">Henüz kupon oluşturulmadı.</div><div id="coupons" class="coupons"></div>
 </section>
@@ -4030,7 +4030,12 @@ function buildCoupons(){
   // v4.3'ün aşırı maç tekrarına sahip henüz oynanmamış kuponlarını silmeden
   // iptal et; başarı ve para hesabını yeni stratejiyle temiz başlat.
   for(const coupon of existing){
-    if((coupon.status||"OPEN")==="OPEN"&&!['v4.4','v4.5'].includes(coupon.strategyVersion)){
+    if((coupon.status||"OPEN")==="OPEN"&&(coupon.legs||[]).length<3){
+      coupon.status="VOID";coupon.voidReason="Yeni kupon kuralı: en az 3 maç";
+      for(const leg of coupon.legs||[])if((leg.status||"OPEN")==="OPEN")leg.status="VOID";
+      continue;
+    }
+    if((coupon.status||"OPEN")==="OPEN"&&!['v4.4','v4.5','v4.6'].includes(coupon.strategyVersion)){
       coupon.status="VOID";coupon.voidReason="Yeni risk dağılımı: aynı maç tek kupon";
       for(const leg of coupon.legs||[])if((leg.status||"OPEN")==="OPEN")leg.status="VOID";
     }
@@ -4050,14 +4055,13 @@ function buildCoupons(){
     const expectedReturn=couponStake*total*probability;
     const expectedProfit=expectedReturn-couponStake;
     const expectedRoi=expectedProfit/couponStake;
-    const minProbability=legs.length===2?.55:.48;
+    const minProbability=.48;
     if(total<1.60||total>5.00){rejected.totalOdd++;return;}
     if(probability<minProbability){rejected.probability++;return;}
     if(expectedRoi<.10){rejected.roi++;return;}
     combos.push({legs,min,avg,total,probability,expectedReturn,expectedProfit,expectedRoi,
       signature,score:expectedRoi*10000+probability*1000+min});
   }
-  for(let i=0;i<pool.length;i++)for(let j=i+1;j<pool.length;j++)consider([pool[i],pool[j]]);
   for(let i=0;i<pool.length;i++)for(let j=i+1;j<pool.length;j++)for(let k=j+1;k<pool.length;k++)consider([pool[i],pool[j],pool[k]]);
   combos.sort((a,b)=>b.score-a.score);
   const chosen=[],newUsedFixtures=new Set();
@@ -4067,7 +4071,7 @@ function buildCoupons(){
   for(const combo of combos){
     const fixtures=combo.legs.map(x=>Number(x.fixture));
     if(fixtures.some(id=>newUsedFixtures.has(id)))continue;
-    chosen.push({...combo,stake:couponStake,status:"OPEN",strategyVersion:"v4.5",created:new Date().toISOString()});
+    chosen.push({...combo,stake:couponStake,status:"OPEN",strategyVersion:"v4.6",created:new Date().toISOString()});
     fixtures.forEach(id=>newUsedFixtures.add(id));
     if(chosen.length>=batchLimit)break;
   }
@@ -4075,7 +4079,7 @@ function buildCoupons(){
     saveCouponStore(store);
     renderCoupons(existing);
     const s=pool.stats||{};
-    document.getElementById("couponState").textContent=`Yeni kupon bulunamadı: ${s.suggestions||0} tercih incelendi; ${s.lowConfidence||0} tercih 80 güvenin altında, ${s.lowOdd||0} tercih 1,30 oranın altında kaldı. Kupon havuzuna ${pool.length} tercih girdi. Kombinelerde ${rejected.probability} olasılık, ${rejected.roi} beklenen değer, ${rejected.totalOdd} toplam oran ve ${rejected.usedMatch} daha önce kullanılmış maç nedeniyle elendi.`;
+    document.getElementById("couponState").textContent=`Yeni 3 maçlı kupon bulunamadı: ${s.suggestions||0} tercih incelendi; ${s.lowConfidence||0} tercih 80 güvenin altında, ${s.lowOdd||0} tercih 1,30 oranın altında kaldı. Kupon havuzuna ${pool.length} tercih girdi. Kombinelerde ${rejected.probability} olasılık, ${rejected.roi} beklenen değer, ${rejected.totalOdd} toplam oran ve ${rejected.usedMatch} daha önce kullanılmış maç nedeniyle elendi.`;
     return;
   }
   store[loadedDate]=[...existing,...chosen];saveCouponStore(store);
