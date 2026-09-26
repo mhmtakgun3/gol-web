@@ -3146,6 +3146,71 @@ def api_live_leagues():
     })
 
 
+@app.route("/api/live-ticker")
+def api_live_ticker():
+    """Scanner'ın mevcut fikstür snapshot'ından canlı skor ve son golü döndürür."""
+    all_live = []
+    snapshot_ts = 0.0
+    try:
+        with open(LIVE_SNAPSHOT_FILE, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        all_live = payload.get("all_live", []) or []
+        snapshot_ts = float(payload.get("ts", 0.0) or 0.0)
+    except Exception:
+        with cache_lock:
+            all_live = list(live_cache.get("all_live", []))
+            snapshot_ts = float(live_cache.get("ts", 0.0) or 0.0)
+
+    matches = []
+    for match in all_live:
+        league = match.get("league") or {}
+        if not is_allowed_competition(league):
+            continue
+        fixture = match.get("fixture") or {}
+        teams = match.get("teams") or {}
+        goals = match.get("goals") or {}
+        status = fixture.get("status") or {}
+        goal_events = []
+        for event in match.get("events") or []:
+            if str(event.get("type") or "").lower() != "goal":
+                continue
+            detail = str(event.get("detail") or "")
+            if "missed" in detail.lower():
+                continue
+            goal_events.append(event)
+        last_goal = goal_events[-1] if goal_events else None
+        last_goal_data = None
+        if last_goal:
+            event_time = last_goal.get("time") or {}
+            last_goal_data = {
+                "team": (last_goal.get("team") or {}).get("name"),
+                "player": (last_goal.get("player") or {}).get("name"),
+                "assist": (last_goal.get("assist") or {}).get("name"),
+                "minute": event_time.get("elapsed"),
+                "extra": event_time.get("extra"),
+                "detail": last_goal.get("detail"),
+            }
+        matches.append({
+            "fixture_id": fixture.get("id"),
+            "status": status.get("short"),
+            "minute": status.get("elapsed"),
+            "league": league.get("name"),
+            "country": league.get("country"),
+            "home": (teams.get("home") or {}).get("name"),
+            "away": (teams.get("away") or {}).get("name"),
+            "home_goals": safe_int(goals.get("home"), 0),
+            "away_goals": safe_int(goals.get("away"), 0),
+            "last_goal": last_goal_data,
+        })
+    matches.sort(key=lambda x: (safe_int(x.get("minute"), 0), x.get("league") or ""), reverse=True)
+    return jsonify({
+        "count": len(matches),
+        "matches": matches,
+        "snapshot_age_seconds": (round(max(0.0, time.time() - snapshot_ts), 1)
+                                 if snapshot_ts else None),
+    })
+
+
 @app.route("/api/status")
 def api_status():
     # API çağrısı YAPMAZ. Scanner'ın /tmp ortak state dosyasını okur.
@@ -3240,7 +3305,7 @@ PAGE = r"""<!doctype html>
 }
 *{box-sizing:border-box}
 html,body{margin:0;min-height:100%;background:linear-gradient(180deg,#04101b 0%,#061522 100%);color:var(--text);font-family:Inter,Segoe UI,Arial,sans-serif}
-body{overflow-x:hidden}
+body{overflow-x:hidden;padding-bottom:42px}
 .wrap{width:min(1880px,calc(100% - 26px));margin:0 auto;padding:16px 0 22px}
 
 /* HEADER */
@@ -3467,6 +3532,17 @@ select{
 .legend{display:flex;gap:14px;flex-wrap:wrap}
 .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px}
 
+/* CANLI SKOR BANDI */
+.live-ticker{position:fixed;left:0;right:0;bottom:0;height:38px;z-index:1000;display:flex;align-items:center;background:#020b13;border-top:1px solid #17618a;box-shadow:0 -5px 18px rgba(0,0,0,.35);overflow:hidden}
+.ticker-label{height:100%;display:flex;align-items:center;gap:6px;padding:0 14px;background:#e7193f;color:#fff;font-size:11px;font-weight:950;letter-spacing:.5px;flex:0 0 auto;z-index:2}
+.ticker-dot{width:7px;height:7px;border-radius:50%;background:#fff;box-shadow:0 0 0 4px rgba(255,255,255,.16);animation:tickerPulse 1.2s infinite}
+.ticker-window{overflow:hidden;white-space:nowrap;flex:1}
+.ticker-track{display:inline-flex;align-items:center;gap:30px;padding-left:100%;font-size:12px;font-weight:800;color:#edf7ff;animation:tickerMove 35s linear infinite}
+.ticker-item{display:inline-flex;align-items:center;gap:7px}.ticker-minute{color:#55efad}.ticker-score{color:#ffd75d;font-size:14px}.ticker-league{color:#7f9ab0;font-size:10px}
+.goal-toast{position:fixed;left:50%;bottom:54px;z-index:1100;transform:translate(-50%,20px);min-width:min(520px,calc(100% - 24px));padding:15px 18px;border:1px solid #3ef09b;border-radius:14px;background:linear-gradient(135deg,#073a28,#09223a);box-shadow:0 12px 40px rgba(0,0,0,.55),0 0 28px rgba(20,218,131,.24);opacity:0;pointer-events:none;transition:.3s;text-align:center}
+.goal-toast.show{opacity:1;transform:translate(-50%,0)}.goal-toast-title{color:#62f2ab;font-size:19px;font-weight:950}.goal-toast-body{margin-top:5px;color:#fff;font-size:13px;font-weight:800}
+@keyframes tickerMove{to{transform:translateX(-100%)}}@keyframes tickerPulse{50%{opacity:.35}}
+
 @media(max-width:1450px){.grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:1080px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.header{align-items:flex-start}.subtitle{max-width:420px}}
 @media(max-width:760px){
@@ -3525,14 +3601,23 @@ select{
       <span><span class="dot" style="background:#ff3f4f"></span>0–44 Zayıf</span>
       <span>🧠 BOT PICK</span>
     </div>
-    <div>Gol Sinyal Merkezi v4.8 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
+    <div>Gol Sinyal Merkezi v4.9 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
   </div>
 </div>
+
+<div class="live-ticker" aria-label="Canlı maç skorları">
+  <div class="ticker-label"><span class="ticker-dot"></span> CANLI</div>
+  <div class="ticker-window"><div class="ticker-track" id="tickerTrack"><span>Canlı skorlar yükleniyor…</span></div></div>
+</div>
+<div class="goal-toast" id="goalToast"><div class="goal-toast-title">⚽ GOL!</div><div class="goal-toast-body" id="goalToastBody"></div></div>
 
 <script>
 let currentMatches = [];
 let currentLeague = "ALL";
 let currentBotPickStats = null;
+let liveScoreMemory = new Map();
+let tickerInitialized = false;
+let goalToastTimer = null;
 
 function esc(v){
   return String(v ?? "")
@@ -3787,15 +3872,64 @@ function renderMatches(){
   root.innerHTML=html;
 }
 
+function goalMinuteText(goal,fallback){
+  if(!goal) return `${Number(fallback||0)}'`;
+  const minute=Number(goal.minute||fallback||0),extra=Number(goal.extra||0);
+  return extra>0?`${minute}+${extra}'`:`${minute}'`;
+}
+
+function showGoalToast(m,detectedTeam){
+  const goal=m.last_goal||{};
+  const goalTeam=goal.team||detectedTeam||"Gol atan takım bilinmiyor";
+  const scorer=goal.player?`${goal.player}`:goalTeam;
+  const assist=goal.assist?` • Asist: ${goal.assist}`:"";
+  document.getElementById("goalToastBody").innerHTML=
+    `${esc(m.home)} <b>${Number(m.home_goals||0)} – ${Number(m.away_goals||0)}</b> ${esc(m.away)}`+
+    `<br>${esc(goalTeam)} • ${esc(scorer)}${esc(assist)} • ${esc(goalMinuteText(goal,m.minute))}`;
+  const toast=document.getElementById("goalToast");
+  toast.classList.add("show");
+  clearTimeout(goalToastTimer);
+  goalToastTimer=setTimeout(()=>toast.classList.remove("show"),9000);
+}
+
+function renderLiveTicker(ms){
+  const list=Array.isArray(ms)?ms:[];
+  const nextMemory=new Map();
+  for(const m of list){
+    const id=String(m.fixture_id||"");
+    if(!id) continue;
+    const home=Number(m.home_goals||0),away=Number(m.away_goals||0);
+    nextMemory.set(id,{home,away});
+    const previous=liveScoreMemory.get(id);
+    if(tickerInitialized && previous && (home>previous.home||away>previous.away)){
+      const detectedTeam=home>previous.home?m.home:m.away;
+      showGoalToast(m,detectedTeam);
+    }
+  }
+  liveScoreMemory=nextMemory;tickerInitialized=true;
+
+  const track=document.getElementById("tickerTrack");
+  if(!list.length){track.innerHTML="<span>Şu anda uygun liglerde canlı maç yok.</span>";return;}
+  const items=list.map(m=>
+    `<span class="ticker-item"><span class="ticker-minute">${Number(m.minute||0)}'</span>`+
+    `<span>${esc(m.home)}</span><span class="ticker-score">${Number(m.home_goals||0)}-${Number(m.away_goals||0)}</span>`+
+    `<span>${esc(m.away)}</span><span class="ticker-league">${esc(m.country||"")} • ${esc(m.league||"")}</span></span>`
+  ).join("");
+  const signature=list.map(m=>`${m.fixture_id}:${m.home_goals}-${m.away_goals}:${m.minute}`).join("|");
+  if(track.dataset.signature!==signature){track.dataset.signature=signature;track.innerHTML=items+items;}
+}
+
 async function loadAll(){
   try{
-    const [sr,mr]=await Promise.all([
+    const [sr,mr,tr]=await Promise.all([
       fetch("/api/status",{cache:"no-store"}),
-      fetch("/api/matches",{cache:"no-store"})
+      fetch("/api/matches",{cache:"no-store"}),
+      fetch("/api/live-ticker",{cache:"no-store"}).catch(()=>null)
     ]);
 
     const s=await sr.json();
     const m=await mr.json();
+    const t=tr&&tr.ok?await tr.json():null;
 
     document.getElementById("lastScan").textContent="Son güncelleme: "+(s.last_scan_finished||"-");
     document.getElementById("scanEvery").textContent=`↻ Genel ${s.check_seconds||30} sn • İY ${s.first_half_check_seconds||15} sn • Oran ${s.live_odds_cache_ttl||30} sn`;
@@ -3804,6 +3938,7 @@ async function loadAll(){
     currentBotPickStats=m.bot_pick_stats||s.bot_pick_stats||null;
     renderLeagueTabs(currentMatches);
     renderMatches();
+    if(t) renderLiveTicker(t.matches);
     tryNotifications(currentMatches);
 
     document.getElementById("errorBox").style.display="none";
@@ -3960,7 +4095,7 @@ button{border:1px solid #2cab79;background:#0e6f50;color:white;cursor:pointer;fo
 .coupon-total{font-size:12px;color:#80e8b6;margin-top:7px;font-weight:800}.won{color:#72e7a9}.lost{color:#ff9198}.open{color:#ffd379}.void{color:#9aa7b8}
 @media(max-width:680px){.grid,.form,.lineup-teams,.coupons{grid-template-columns:1fr}.bankroll{grid-template-columns:repeat(2,minmax(0,1fr))}.teams{font-size:16px}}
 </style></head><body><div class="wrap">
-<header><div><h1>📅 Maç Önü Tahminleri <span class="version">v4.8</span></h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
+<header><div><h1>📅 Maç Önü Tahminleri <span class="version">v4.9</span></h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
 <a href="/">← Canlı Gol Merkezi</a></header>
 <div class="toolbar">
   <label for="day">Maç günü</label>
