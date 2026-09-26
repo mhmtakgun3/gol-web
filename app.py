@@ -3525,7 +3525,7 @@ select{
       <span><span class="dot" style="background:#ff3f4f"></span>0–44 Zayıf</span>
       <span>🧠 BOT PICK</span>
     </div>
-    <div>Gol Sinyal Merkezi v4.7 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
+    <div>Gol Sinyal Merkezi v4.8 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
   </div>
 </div>
 
@@ -3960,16 +3960,16 @@ button{border:1px solid #2cab79;background:#0e6f50;color:white;cursor:pointer;fo
 .coupon-total{font-size:12px;color:#80e8b6;margin-top:7px;font-weight:800}.won{color:#72e7a9}.lost{color:#ff9198}.open{color:#ffd379}.void{color:#9aa7b8}
 @media(max-width:680px){.grid,.form,.lineup-teams,.coupons{grid-template-columns:1fr}.bankroll{grid-template-columns:repeat(2,minmax(0,1fr))}.teams{font-size:16px}}
 </style></head><body><div class="wrap">
-<header><div><h1>📅 Maç Önü Tahminleri <span class="version">v4.7</span></h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
+<header><div><h1>📅 Maç Önü Tahminleri <span class="version">v4.8</span></h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
 <a href="/">← Canlı Gol Merkezi</a></header>
 <div class="toolbar">
   <label for="day">Maç günü</label>
   <input id="day" type="date" min="{{today}}" max="{{last_day}}" value="{{initial_day}}">
   <button id="load">Fikstürü getir</button>
-  <label for="league">Lig</label>
-  <select id="league" disabled><option value="ALL">Tüm ligler</option></select>
+  <label for="league">Ülke</label>
+  <select id="league" disabled><option value="ALL">Tüm ülkeler</option></select>
 </div>
-<div class="hint">Seçilen maç önü ligleri • Saatler Türkiye saatidir • Analiz, açtığın maç için yapılır.</div>
+<div class="hint">Bir ülke seçildiğinde o ülkenin uygun tüm alt ligleri birlikte gösterilir • Saatler Türkiye saatidir • Analiz, açtığın maç için yapılır.</div>
 <section class="coupon-panel">
   <div class="coupon-head"><div><h2>🎟️ Botun Sanal Bahis Defteri</h2><div class="coupon-help">Bot yalnızca 3 farklı maçtan oluşan, yüksek birlikte tutma ihtimalli kombineleri oynar. Her kupon 1.000 TL; kupon sayısı sabit değildir. Aynı maç günün aktif kuponlarında yalnız bir kez kullanılır.</div></div>
   <button id="makeCoupons" type="button">Botun oynayacağı kuponları oluştur</button></div>
@@ -4169,7 +4169,7 @@ function renderCoupons(coupons){
 function renderFixtures(){
   const selected=loadedDate;
   const filtered=leagueSelect.value==="ALL" ? loadedMatches
-    : loadedMatches.filter(m=>String(m.league_id)===leagueSelect.value);
+    : loadedMatches.filter(m=>String(m.country||"Diğer")===leagueSelect.value);
   state.textContent=filtered.length
     ? `${filtered.length} maç gösteriliyor. Analiz için bir maç seç.`
     : "Seçilen ligde başlamamış maç bulunamadı.";
@@ -4199,20 +4199,21 @@ function renderFixtures(){
 }
 async function load(){
   const selected=day.value;state.textContent="Fikstür yükleniyor…";root.innerHTML="";
-  leagueSelect.disabled=true;leagueSelect.innerHTML='<option value="ALL">Tüm ligler</option>';
+  leagueSelect.disabled=true;leagueSelect.innerHTML='<option value="ALL">Tüm ülkeler</option>';
   loadedMatches=[];loadedDate="";analyzedMatches=new Map();
   try{
     const data=await getJson("/api/prematch/fixtures?date="+encodeURIComponent(selected));
     loadedDate=selected;loadedMatches=data.matches;
-    const leagues=new Map();
+    const countries=new Map();
     for(const m of loadedMatches){
-      const id=String(m.league_id);
-      if(!leagues.has(id))leagues.set(id,{name:`${m.country||""} • ${m.league||"Lig"}`,count:0});
-      leagues.get(id).count++;
+      const country=String(m.country||"Diğer");
+      if(!countries.has(country))countries.set(country,{count:0,leagues:new Set()});
+      countries.get(country).count++;
+      countries.get(country).leagues.add(String(m.league||"Lig"));
     }
-    const options=[...leagues.entries()].sort((a,b)=>a[1].name.localeCompare(b[1].name,"tr"));
-    leagueSelect.innerHTML=`<option value="ALL">Tüm ligler (${loadedMatches.length})</option>`+
-      options.map(([id,item])=>`<option value="${esc(id)}">${esc(item.name)} (${item.count})</option>`).join("");
+    const options=[...countries.entries()].sort((a,b)=>a[0].localeCompare(b[0],"tr"));
+    leagueSelect.innerHTML=`<option value="ALL">Tüm ülkeler (${loadedMatches.length} maç)</option>`+
+      options.map(([country,item])=>`<option value="${esc(country)}">${esc(country)} · ${item.leagues.size} lig (${item.count} maç)</option>`).join("");
     leagueSelect.disabled=options.length===0;
     renderFixtures();renderCoupons(couponStore()[loadedDate]||[]);settleCoupons();
   }catch(e){state.innerHTML='<span class="error">'+esc(e.message)+'</span>'}
