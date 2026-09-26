@@ -3537,7 +3537,7 @@ select{
 .ticker-label{height:100%;display:flex;align-items:center;gap:6px;padding:0 14px;background:#e7193f;color:#fff;font-size:11px;font-weight:950;letter-spacing:.5px;flex:0 0 auto;z-index:2}
 .ticker-dot{width:7px;height:7px;border-radius:50%;background:#fff;box-shadow:0 0 0 4px rgba(255,255,255,.16);animation:tickerPulse 1.2s infinite}
 .ticker-window{overflow:hidden;white-space:nowrap;flex:1}
-.ticker-track{display:inline-flex;align-items:center;gap:30px;padding-left:100%;font-size:12px;font-weight:800;color:#edf7ff;animation:tickerMove 35s linear infinite}
+.ticker-track{display:inline-flex;align-items:center;gap:30px;padding-left:100%;font-size:12px;font-weight:800;color:#edf7ff;animation:tickerMove 90s linear infinite}
 .ticker-item{display:inline-flex;align-items:center;gap:7px}.ticker-minute{color:#55efad}.ticker-score{color:#ffd75d;font-size:14px}.ticker-league{color:#7f9ab0;font-size:10px}
 .goal-toast{position:fixed;left:50%;bottom:54px;z-index:1100;transform:translate(-50%,20px);min-width:min(520px,calc(100% - 24px));padding:15px 18px;border:1px solid #3ef09b;border-radius:14px;background:linear-gradient(135deg,#073a28,#09223a);box-shadow:0 12px 40px rgba(0,0,0,.55),0 0 28px rgba(20,218,131,.24);opacity:0;pointer-events:none;transition:.3s;text-align:center}
 .goal-toast.show{opacity:1;transform:translate(-50%,0)}.goal-toast-title{color:#62f2ab;font-size:19px;font-weight:950}.goal-toast-body{margin-top:5px;color:#fff;font-size:13px;font-weight:800}
@@ -3601,7 +3601,7 @@ select{
       <span><span class="dot" style="background:#ff3f4f"></span>0–44 Zayıf</span>
       <span>🧠 BOT PICK</span>
     </div>
-    <div>Gol Sinyal Merkezi v4.9 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
+    <div>Gol Sinyal Merkezi v4.10 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
   </div>
 </div>
 
@@ -3916,7 +3916,11 @@ function renderLiveTicker(ms){
     `<span>${esc(m.away)}</span><span class="ticker-league">${esc(m.country||"")} • ${esc(m.league||"")}</span></span>`
   ).join("");
   const signature=list.map(m=>`${m.fixture_id}:${m.home_goals}-${m.away_goals}:${m.minute}`).join("|");
-  if(track.dataset.signature!==signature){track.dataset.signature=signature;track.innerHTML=items+items;}
+  if(track.dataset.signature!==signature){
+    track.dataset.signature=signature;
+    track.innerHTML=items+items;
+    track.style.animationDuration=`${Math.max(90,list.length*12)}s`;
+  }
 }
 
 async function loadAll(){
@@ -4095,7 +4099,7 @@ button{border:1px solid #2cab79;background:#0e6f50;color:white;cursor:pointer;fo
 .coupon-total{font-size:12px;color:#80e8b6;margin-top:7px;font-weight:800}.won{color:#72e7a9}.lost{color:#ff9198}.open{color:#ffd379}.void{color:#9aa7b8}
 @media(max-width:680px){.grid,.form,.lineup-teams,.coupons{grid-template-columns:1fr}.bankroll{grid-template-columns:repeat(2,minmax(0,1fr))}.teams{font-size:16px}}
 </style></head><body><div class="wrap">
-<header><div><h1>📅 Maç Önü Tahminleri <span class="version">v4.9</span></h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
+<header><div><h1>📅 Maç Önü Tahminleri <span class="version">v4.10</span></h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
 <a href="/">← Canlı Gol Merkezi</a></header>
 <div class="toolbar">
   <label for="day">Maç günü</label>
