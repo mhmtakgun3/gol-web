@@ -4149,7 +4149,7 @@ button{border:1px solid #2cab79;background:#0e6f50;color:white;cursor:pointer;fo
 .coupons{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px;margin-top:11px}
 .coupon{background:#121a2c;border:1px solid #4c6381;border-radius:9px;padding:10px}
 .coupon-title{font-weight:800;color:#cdb8ff;margin-bottom:7px}.coupon-leg{font-size:12px;border-top:1px solid #2f3c55;padding:7px 0;line-height:1.45}
-.coupon-total{font-size:12px;color:#80e8b6;margin-top:7px;font-weight:800}.won{color:#72e7a9}.lost{color:#ff9198}.open{color:#ffd379}.void{color:#9aa7b8}
+.coupon-total{font-size:12px;color:#80e8b6;margin-top:7px;font-weight:800}.won{color:#72e7a9}.lost{color:#ff9198}.open{color:#ffd379}.void{color:#9aa7b8}.remove-coupon{margin-top:9px;font-size:11px;padding:6px 9px;background:#3a2028;border:1px solid #75404c;color:#ffb7bf;border-radius:7px;cursor:pointer}.close-analysis{font-size:11px;padding:6px 9px;background:#263247;border:1px solid #536783;color:#dce7f5;border-radius:7px;cursor:pointer}
 @media(max-width:680px){.grid,.form,.lineup-teams,.coupons{grid-template-columns:1fr}.bankroll{grid-template-columns:repeat(2,minmax(0,1fr))}.teams{font-size:16px}}
 </style></head><body><div class="wrap">
 <header><div><h1>📅 Maç Önü Tahminleri <span class="version">v4.11</span></h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
@@ -4354,8 +4354,20 @@ function renderCoupons(coupons){
     const probability=Number(c.probability||0),expectedProfit=Number(c.expectedProfit||0);
     el.innerHTML=`<div class="coupon-title">Kupon ${i+1} • <span class="${status.toLowerCase()}">${statusText}</span></div>`+
       c.legs.map(l=>`<div class="coupon-leg"><b>${esc(l.home)} — ${esc(l.away)}</b><br>${esc(l.label)} • ${l.odd.toFixed(2)} ${esc(l.bookmaker)}<br>Model güveni ${l.confidence}/100${l.score?` • Skor ${esc(l.score)}`:""} • <span class="${String(l.status||"OPEN").toLowerCase()}">${l.status==="WON"?"TUTTU":l.status==="LOST"?"YATTI":l.status==="VOID"?"İPTAL":"AÇIK"}</span></div>`).join("")+
-      `<div class="coupon-total">Toplam oran ${total.toFixed(2)} • ${status==="VOID"?`Bahis iptal • Para ve başarı hesabına dahil değil`: `Bahis ${stake.toLocaleString("tr-TR")} TL • ${status==="OPEN"?`Potansiyel dönüş ${potential.toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`:status==="WON"?`Dönüş ${potential.toLocaleString("tr-TR",{maximumFractionDigits:0})} TL • Net +${(potential-stake).toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`:`Net -${stake.toLocaleString("tr-TR")} TL`}`}<br>${probability?`Kuponun birlikte tutma ihtimali %${(probability*100).toFixed(1).replace(".",",")} • Teorik beklenen değer ${expectedProfit>=0?"+":""}${expectedProfit.toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`:"Eski kupon • olasılık kaydı yok"}</div>`;
+      `<div class="coupon-total">Toplam oran ${total.toFixed(2)} • ${status==="VOID"?`Bahis iptal • Para ve başarı hesabına dahil değil`: `Bahis ${stake.toLocaleString("tr-TR")} TL • ${status==="OPEN"?`Potansiyel dönüş ${potential.toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`:status==="WON"?`Dönüş ${potential.toLocaleString("tr-TR",{maximumFractionDigits:0})} TL • Net +${(potential-stake).toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`:`Net -${stake.toLocaleString("tr-TR")} TL`}`}<br>${probability?`Kuponun birlikte tutma ihtimali %${(probability*100).toFixed(1).replace(".",",")} • Teorik beklenen değer ${expectedProfit>=0?"+":""}${expectedProfit.toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`:"Eski kupon • olasılık kaydı yok"}</div>`+
+      `<button type="button" class="remove-coupon">Kuponu kaldır</button>`;
     root.appendChild(el);
+    el.querySelector(".remove-coupon").onclick=()=>{
+      if(!confirm("Bu kuponu listeden kaldırmak istediğine emin misin? Kaldırılan kupon başarı ve kâr/zarar hesabına dahil edilmez."))return;
+      const current=couponStore();
+      const signature=c.signature||c.legs.map(l=>`${l.fixture}:${l.market}`).sort().join("|");
+      current[loadedDate]=(current[loadedDate]||[]).filter(x=>{
+        const xs=x.signature||x.legs.map(l=>`${l.fixture}:${l.market}`).sort().join("|");
+        return xs!==signature;
+      });
+      saveCouponStore(current);
+      renderCoupons(current[loadedDate]||[]);
+    };
   });
 }
 function renderFixtures(){
@@ -4370,8 +4382,8 @@ function renderFixtures(){
       const card=document.createElement("article");card.className="match";
       card.innerHTML=`<div class="meta">🏆 ${esc(m.country)} • ${esc(m.league)} &nbsp; ⏰ ${esc(shownTime(m.kickoff))}</div>
         <div class="teams">${esc(m.home)} — ${esc(m.away)}</div>
-        <button type="button">Bu maçı analiz et</button><div class="analysis" hidden></div>`;
-      const button=card.querySelector("button"),box=card.querySelector(".analysis");
+        <button type="button" class="analyze-btn">Bu maçı analiz et</button><div class="analysis" hidden></div>`;
+      const button=card.querySelector(".analyze-btn"),box=card.querySelector(".analysis");
       button.onclick=async()=>{
         button.disabled=true;box.hidden=false;box.textContent="Son maçlar inceleniyor…";
         try{
@@ -4380,9 +4392,16 @@ function renderFixtures(){
           const picks=a.suggestions.length
             ? a.suggestions.map(p=>`<div class="pick"><b>${esc(p.label)}</b><div class="quote">Oran ${Number(p.quote.odd).toFixed(2)} · ${esc(p.quote.bookmaker)}</div><div class="reason">${esc(p.quote.market_name)}: ${esc(p.quote.selection)}${quoteTime(p.quote.updated)?` · Güncelleme: ${esc(quoteTime(p.quote.updated))}`:""}</div><div class="pick-why"><b>Neden bu tercih?</b><br>${esc(p.explanation || p.reason)}</div><div class="reason">Model ${p.model_probability!=null?`${(Number(p.model_probability)*100).toFixed(1).replace(".",",")}%`:"-"} · Oranın ima ettiği ${p.implied_probability!=null?`${(Number(p.implied_probability)*100).toFixed(1).replace(".",",")}%`:"-"} · Değer farkı ${p.value_edge_pct!=null?`${Number(p.value_edge_pct)>=0?"+":""}${Number(p.value_edge_pct).toFixed(1).replace(".",",")}%`:"-"}</div></div>`).join("")
             : `<div class="pas">PAS • ${a.candidate_count ? "Modelde eğilim var, ancak fiyat koşulu sağlanmadı." : "Yeterli ortak veri işareti yok."}</div>`;
-          box.innerHTML=`<div class="form"><div><b>${esc(a.home)}</b><br>${esc(formText(a.home_form,"home"))}</div>
+          box.innerHTML=`<div style="display:flex;justify-content:flex-end;margin-bottom:8px"><button type="button" class="close-analysis">✕ Analizi kapat</button></div><div class="form"><div><b>${esc(a.home)}</b><br>${esc(formText(a.home_form,"home"))}</div>
             <div><b>${esc(a.away)}</b><br>${esc(formText(a.away_form,"away"))}</div></div>
             ${h2hHtml(a)}${lineupHtml(a)}${picks}${(a.joint_notes||[]).map(n=>`<div class="joint-note"><b>Birlikte gerçekleşme ihtimali</b><br>${esc(n)}</div>`).join("")}<div class="odds-note">${esc(a.odds_note)}</div><div class="hint">${esc(a.note)}</div>`;
+          box.querySelector(".close-analysis").onclick=()=>{
+            analyzedMatches.delete(Number(m.id));
+            box.hidden=true;
+            box.innerHTML="";
+            button.disabled=false;
+            button.textContent="Bu maçı tekrar analiz et";
+          };
         }catch(e){box.innerHTML='<span class="error">'+esc(e.message)+'</span>'}
         finally{button.disabled=false}
       };
