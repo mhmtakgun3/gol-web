@@ -4263,7 +4263,7 @@ button{border:1px solid #2cab79;background:#0e6f50;color:white;cursor:pointer;fo
 .coupon-total{font-size:12px;color:#80e8b6;margin-top:7px;font-weight:800}.won{color:#72e7a9}.lost{color:#ff9198}.open{color:#ffd379}.void{color:#9aa7b8}.remove-coupon{margin-top:9px;font-size:11px;padding:6px 9px;background:#3a2028;border:1px solid #75404c;color:#ffb7bf;border-radius:7px;cursor:pointer}.close-analysis{font-size:11px;padding:6px 9px;background:#263247;border:1px solid #536783;color:#dce7f5;border-radius:7px;cursor:pointer}
 @media(max-width:680px){.grid,.form,.lineup-teams,.coupons{grid-template-columns:1fr}.bankroll{grid-template-columns:repeat(2,minmax(0,1fr))}.teams{font-size:16px}}
 </style></head><body><div class="wrap">
-<header><div><h1>📅 Maç Önü Tahminleri <span class="version">v4.11</span></h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
+<header><div><h1>📅 Maç Önü Tahminleri <span class="version">v4.12</span></h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
 <a href="/">← Canlı Gol Merkezi</a></header>
 <div class="toolbar">
   <label for="day">Maç günü</label>
