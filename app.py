@@ -4258,6 +4258,11 @@ button{border:1px solid #2cab79;background:#0e6f50;color:white;cursor:pointer;fo
 .bankroll b{display:block;color:#f2f6ff;font-size:15px;margin-top:3px}.profit{color:#72e7a9!important}.loss{color:#ff9198!important}
 .learning-stats{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}.learning-stats span{background:#10182a;border:1px solid #3b4963;border-radius:7px;padding:6px 8px;font-size:11px;color:#c3d0df}.learning-stats b{color:#f1f6ff}.learning-stats .good{color:#72e7a9}.learning-stats .bad{color:#ff9ba1}
 .coupons{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px;margin-top:11px}
+.coupon-risk{display:inline-block;margin:0 0 8px;padding:4px 8px;border-radius:7px;font-size:11px;font-weight:900;letter-spacing:.2px}
+.coupon-risk.safe{background:#123b2a;border:1px solid #2c9b6b;color:#72e7a9}
+.coupon-risk.balanced{background:#403717;border:1px solid #a88d28;color:#ffe082}
+.coupon-risk.value{background:#43252a;border:1px solid #b14d5c;color:#ffabb4}
+.coupon-meta{font-size:11px;color:#b8c5d7;line-height:1.5;margin-bottom:7px}
 .coupon{background:#121a2c;border:1px solid #4c6381;border-radius:9px;padding:10px}
 .coupon-title{font-weight:800;color:#cdb8ff;margin-bottom:7px}.coupon-leg{font-size:12px;border-top:1px solid #2f3c55;padding:7px 0;line-height:1.45}
 .coupon-total{font-size:12px;color:#80e8b6;margin-top:7px;font-weight:800}.won{color:#72e7a9}.lost{color:#ff9198}.open{color:#ffd379}.void{color:#9aa7b8}.remove-coupon{margin-top:9px;font-size:11px;padding:6px 9px;background:#3a2028;border:1px solid #75404c;color:#ffb7bf;border-radius:7px;cursor:pointer}.close-analysis{font-size:11px;padding:6px 9px;background:#263247;border:1px solid #536783;color:#dce7f5;border-radius:7px;cursor:pointer}
@@ -4274,7 +4279,7 @@ button{border:1px solid #2cab79;background:#0e6f50;color:white;cursor:pointer;fo
 </div>
 <div class="hint">Bir ülke seçildiğinde o ülkenin uygun tüm alt ligleri birlikte gösterilir • Saatler Türkiye saatidir • Analiz, açtığın maç için yapılır.</div>
 <section class="coupon-panel">
-  <div class="coupon-head"><div><h2>🎟️ Botun Sanal Bahis Defteri</h2><div class="coupon-help">Bot yalnızca 3 farklı maçtan oluşan, yüksek birlikte tutma ihtimalli kombineleri oynar. Her kupon 1.000 TL; kupon sayısı sabit değildir. Aynı maç günün aktif kuponlarında yalnız bir kez kullanılır.</div></div>
+  <div class="coupon-head"><div><h2>🎟️ Botun Sanal Bahis Defteri</h2><div class="coupon-help">Bot artık zorunlu 3 maç kuralı kullanmaz. Kaliteye göre 2, 3 veya 4 farklı maçtan kupon oluşturur. Her kupon 1.000 TL'dir; kupon sayısı sabit değildir. Aynı maç aktif kuponlarda en fazla 2 kez kullanılabilir.</div></div>
   <button id="makeCoupons" type="button">Botun oynayacağı kuponları oluştur</button></div>
   <div id="bankroll" class="bankroll"></div><div id="learningStats" class="learning-stats"></div><div id="couponState" class="coupon-help">Henüz kupon oluşturulmadı.</div><div id="coupons" class="coupons"></div>
 </section>
@@ -4387,6 +4392,13 @@ function marketFamily(m){
   return "OTHER";
 }
 function marketCompatible(a,b){ return true; }
+function couponRisk(probability){
+  const p=Number(probability||0);
+  if(p>=0.50)return {key:"safe",label:"🟢 GÜVENLİ",risk:"DÜŞÜK"};
+  if(p>=0.35)return {key:"balanced",label:"🟡 DENGELİ",risk:"ORTA"};
+  if(p>=0.25)return {key:"value",label:"🔴 DEĞER",risk:"YÜKSEK"};
+  return {key:"none",label:"❌ NO BET",risk:"ÇOK YÜKSEK"};
+}
 function buildCoupons(){
   const store=couponStore(),existing=store[loadedDate]||[],pool=candidatePool();
   const activeExisting=existing.filter(c=>c.status!=="VOID"&&c.strategyVersion===couponStrategyVersion);
@@ -4395,6 +4407,7 @@ function buildCoupons(){
   for(const c of activeExisting)for(const l of c.legs||[]){const id=Number(l.fixture);usedToday.set(id,(usedToday.get(id)||0)+1)}
   const combos=[],rejected={sameMatch:0,repeatLimit:0,duplicate:0,totalOdd:0,probability:0,roi:0,correlation:0};
   function consider(legs){
+    if(legs.length<2||legs.length>4)return;
     if(new Set(legs.map(x=>x.fixture)).size!==legs.length){rejected.sameMatch++;return;}
     if(legs.some(x=>(usedToday.get(Number(x.fixture))||0)>=2)){rejected.repeatLimit++;return;}
     for(let i=0;i<legs.length;i++)for(let j=i+1;j<legs.length;j++)if(!marketCompatible(legs[i],legs[j])){rejected.correlation++;return;}
@@ -4403,43 +4416,51 @@ function buildCoupons(){
     if(existingSignatures.has(signature)){rejected.duplicate++;return;}
     const total=legs.reduce((s,x)=>s*x.odd,1);
     const rawProbability=legs.reduce((p,x)=>p*x.modelProbability,1);
-    // Farklı maçlar bağımsız kabul edilse de model hatası için küçük muhafazakâr kesinti.
     const probability=rawProbability*0.94;
     const expectedReturn=couponStake*total*probability;
     const expectedProfit=expectedReturn-couponStake;
     const expectedRoi=expectedProfit/couponStake;
-    const minProbability=.36;
+    const minProbability=legs.length===2?.40:legs.length===3?.32:.27;
     const minEdge=Math.min(...legs.map(x=>x.valueEdge));
     const avgP=legs.reduce((s,x)=>s+x.modelProbability,0)/legs.length;
-    if(total<1.90||total>5.50){rejected.totalOdd++;return;}
+    if(total<1.70||total>8.00){rejected.totalOdd++;return;}
     if(probability<minProbability||avgP<.70||minEdge<3.0){rejected.probability++;return;}
-    if(expectedRoi<.05){rejected.roi++;return;}
+    if(expectedRoi<.03){rejected.roi++;return;}
+    const risk=couponRisk(probability);
+    if(risk.key==="none")return;
     const historicalBonus=legs.reduce((s,x)=>s+Math.min(5,Math.max(0,(x.historicalRate-.60)*20)),0);
-    const score=minEdge*30+probability*1000+expectedRoi*900+historicalBonus*10;
-    combos.push({legs,total,probability,expectedReturn,expectedProfit,expectedRoi,signature,score});
+    const sizeBonus=legs.length===2?3:legs.length===3?2:1;
+    const score=minEdge*30+probability*1000+expectedRoi*900+historicalBonus*10+sizeBonus;
+    combos.push({legs,total,probability,expectedReturn,expectedProfit,expectedRoi,signature,score,riskKey:risk.key,riskLabel:risk.label,riskLevel:risk.risk});
   }
+  // Zorunlu 3 maç yok: kaliteye göre 2, 3 veya 4 maçlı kombinasyonlar taranır.
+  for(let i=0;i<pool.length;i++)for(let j=i+1;j<pool.length;j++)consider([pool[i],pool[j]]);
   for(let i=0;i<pool.length;i++)for(let j=i+1;j<pool.length;j++)for(let k=j+1;k<pool.length;k++)consider([pool[i],pool[j],pool[k]]);
+  for(let i=0;i<pool.length;i++)for(let j=i+1;j<pool.length;j++)for(let k=j+1;k<pool.length;k++)for(let l=k+1;l<pool.length;l++)consider([pool[i],pool[j],pool[k],pool[l]]);
   combos.sort((a,b)=>b.score-a.score);
   const chosen=[],newUse=new Map();
-  // Kaliteye göre 1-5 kupon. Çok sayıda kupon üretmek yerine gerçekten iyi kombinasyon yoksa susar.
-  const batchLimit=Math.min(5,Math.max(1,Math.floor(pool.length/5)));
+  // Sabit kupon adedi yok. Kalite filtresini geçen ve çeşitlendirme kuralına uyan tüm kombinasyonlar değerlendirilir.
   for(const combo of combos){
     const fixtures=combo.legs.map(x=>Number(x.fixture));
     if(fixtures.some(id=>(newUse.get(id)||0)+(usedToday.get(id)||0)>=2))continue;
-    if(chosen.some(c=>c.legs.some(l=>fixtures.includes(Number(l.fixture))) && c.legs.filter(l=>fixtures.includes(Number(l.fixture))).length>=2))continue;
+    if(chosen.some(c=>{
+      const overlap=c.legs.filter(l=>fixtures.includes(Number(l.fixture))).length;
+      return overlap>=2;
+    }))continue;
     chosen.push({...combo,stake:couponStake,status:"OPEN",strategyVersion:couponStrategyVersion,created:new Date().toISOString()});
     fixtures.forEach(id=>newUse.set(id,(newUse.get(id)||0)+1));
-    if(chosen.length>=batchLimit)break;
   }
   if(!chosen.length){
     saveCouponStore(store);renderCoupons(existing);
     const s=pool.stats||{};
-    document.getElementById("couponState").textContent=`v4.12 bu turda kupon üretmedi: ${s.suggestions||0} tercih incelendi; ${s.lowProbability||0} düşük olasılık, ${s.lowValue||0} düşük değer, ${s.weakHistory||0} zayıf geçmiş, ${s.lowOdd||0} düşük oran nedeniyle elendi. Bu, zorla kupon oynamak yerine NO BET kararıdır.`;
+    document.getElementById("couponState").textContent=`v4.12 bu turda kaliteli kupon üretmedi: ${s.suggestions||0} tercih incelendi; ${s.lowProbability||0} düşük olasılık, ${s.lowValue||0} düşük değer, ${s.weakHistory||0} zayıf geçmiş, ${s.lowOdd||0} düşük oran nedeniyle elendi. Zorla kupon oynamak yerine NO BET.`;
     return;
   }
   store[loadedDate]=[...existing,...chosen];saveCouponStore(store);renderCoupons(store[loadedDate]);
-  document.getElementById("couponState").textContent=`v4.12: ${chosen.length} kaliteli kupon oluşturuldu • toplam ${chosen.length*couponStake.toLocaleString("tr-TR")} TL sanal bahis • aynı maç farklı kuponlarda en fazla 2 kez kullanıldı.`;
+  const safe=chosen.filter(c=>c.riskKey==="safe").length,balanced=chosen.filter(c=>c.riskKey==="balanced").length,value=chosen.filter(c=>c.riskKey==="value").length;
+  document.getElementById("couponState").textContent=`v4.12: ${chosen.length} kaliteli kupon oluşturuldu • 🟢 ${safe} güvenli • 🟡 ${balanced} dengeli • 🔴 ${value} değer • toplam ${chosen.length*couponStake.toLocaleString("tr-TR")} TL sanal bahis • kupon boyutu 2-4 maç.`;
 }
+
 function legResult(market,h,a,hh=null,ha=null){
   const total=h+a;
   const htTotal=(hh===null||ha===null)?null:hh+ha;
@@ -4537,9 +4558,13 @@ function renderCoupons(coupons){
     const status=c.status||"OPEN",statusText=status==="WON"?"TUTTU":status==="LOST"?"YATMADI":status==="VOID"?"İPTAL":"BEKLİYOR";
     const stake=Number(c.stake||couponStake),total=Number(c.total||1),potential=stake*total;
     const probability=Number(c.probability||0),expectedProfit=Number(c.expectedProfit||0);
+    const risk=couponRisk(probability);
+    const riskHtml=risk.key!=="none"?`<span class="coupon-risk ${risk.key}">${risk.label} • RİSK: ${risk.risk}</span>`:"";
+    const couponType=c.legs?.length===2?"2 MAÇ":c.legs?.length===3?"3 MAÇ":c.legs?.length===4?"4 MAÇ":`${c.legs?.length||0} MAÇ`;
     el.innerHTML=`<div class="coupon-title">Kupon ${i+1} • <span class="${status.toLowerCase()}">${statusText}</span></div>`+
-      c.legs.map(l=>`<div class="coupon-leg"><b>${esc(l.home)} — ${esc(l.away)}</b><br>${esc(l.label)} • ${Number(l.odd||0).toFixed(2)} ${esc(l.bookmaker||"")}<br>Tahmini olasılık %${(Number(l.modelProbability||0)*100).toFixed(1).replace(".",",")} • Değer +${Number(l.valueEdge||0).toFixed(1).replace(".",",")}%${l.historicalN?` • Market geçmişi %${(Number(l.historicalRate||0)*100).toFixed(0)} (${l.historicalN} analiz)`:""} • <span class="${String(l.status||"OPEN").toLowerCase()}">${l.status==="WON"?"TUTTU":l.status==="LOST"?"YATTI":l.status==="VOID"?"İPTAL":"AÇIK"}</span></div>`).join("")+
-      `<div class="coupon-total">Toplam oran ${total.toFixed(2)} • ${status==="VOID"?`Bahis iptal • Para ve başarı hesabına dahil değil`: `Bahis ${stake.toLocaleString("tr-TR")} TL • ${status==="OPEN"?`Potansiyel dönüş ${potential.toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`:status==="WON"?`Dönüş ${potential.toLocaleString("tr-TR",{maximumFractionDigits:0})} TL • Net +${(potential-stake).toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`:`Net -${stake.toLocaleString("tr-TR")} TL`}`}<br>${probability?`Kuponun birlikte tutma ihtimali %${(probability*100).toFixed(1).replace(".",",")} • Teorik beklenen değer ${expectedProfit>=0?"+":""}${expectedProfit.toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`:"Eski kupon • olasılık kaydı yok"}</div>`+
+      riskHtml+`<div class="coupon-meta"><b>${couponType}</b> • Birlikte tutma ihtimali <b>%${(probability*100).toFixed(1).replace(".",",")}</b> • Risk <b>${risk.risk}</b></div>`+
+      c.legs.map(l=>`<div class="coupon-leg"><b>${esc(l.home)} — ${esc(l.away)}</b><br>${esc(l.label)} • ${Number(l.odd||0).toFixed(2)} ${esc(l.bookmaker||"")}<br>Model olasılığı %${(Number(l.modelProbability||0)*100).toFixed(1).replace(".",",")} • Değer +${Number(l.valueEdge||0).toFixed(1).replace(".",",")}%${l.historicalN?` • Market geçmişi %${(Number(l.historicalRate||0)*100).toFixed(0)} (${l.historicalN} analiz)`:""} • <span class="${String(l.status||"OPEN").toLowerCase()}">${l.status==="WON"?"TUTTU":l.status==="LOST"?"YATTI":l.status==="VOID"?"İPTAL":"AÇIK"}</span></div>`).join("")+
+      `<div class="coupon-total">Toplam oran ${total.toFixed(2)} • ${status==="VOID"?`Bahis iptal • Para ve başarı hesabına dahil değil`: `Bahis ${stake.toLocaleString("tr-TR")} TL • ${status==="OPEN"?`Potansiyel dönüş ${potential.toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`:status==="WON"?`Dönüş ${potential.toLocaleString("tr-TR",{maximumFractionDigits:0})} TL • Net +${(potential-stake).toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`:`Net -${stake.toLocaleString("tr-TR")} TL`}`}<br>${probability?`Kuponun birlikte tutma ihtimali %${(probability*100).toFixed(1).replace(".",",")} • Teorik beklenen değer ${expectedProfit>=0?"+":""}${expectedProfit.toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`:`Eski kupon • olasılık kaydı yok`}</div>`+
       `<button type="button" class="remove-coupon">Kuponu kaldır</button>`;
     root.appendChild(el);
     el.querySelector(".remove-coupon").onclick=()=>{
