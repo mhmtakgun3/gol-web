@@ -3730,7 +3730,6 @@ select{
 
     <div class="header-right">
       <a class="info-pill" href="/tahmin" style="text-decoration:none;color:inherit">📅 Maç Önü Tahminleri</a>
-      <a class="info-pill" href="/takip" style="text-decoration:none;color:inherit">🎮 Maç Takip</a>
       <div class="status-pill" id="systemState">● Sistem Aktif</div>
       <div class="info-pill" id="lastScan">Son güncelleme: -</div>
       <div class="info-pill" id="scanEvery">↻ 30 sn'de bir</div>
@@ -3765,7 +3764,7 @@ select{
       <span><span class="dot" style="background:#ff3f4f"></span>0–44 Zayıf</span>
       <span>🧠 BOT PICK</span>
     </div>
-    <div>Gol Sinyal Merkezi v4.14 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
+    <div>Gol Sinyal Merkezi v4.12 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
   </div>
 </div>
 
@@ -4269,7 +4268,7 @@ button{border:1px solid #2cab79;background:#0e6f50;color:white;cursor:pointer;fo
 .coupon-total{font-size:12px;color:#80e8b6;margin-top:7px;font-weight:800}.won{color:#72e7a9}.lost{color:#ff9198}.open{color:#ffd379}.void{color:#9aa7b8}.remove-coupon{margin-top:9px;font-size:11px;padding:6px 9px;background:#3a2028;border:1px solid #75404c;color:#ffb7bf;border-radius:7px;cursor:pointer}.close-analysis{font-size:11px;padding:6px 9px;background:#263247;border:1px solid #536783;color:#dce7f5;border-radius:7px;cursor:pointer}
 @media(max-width:680px){.grid,.form,.lineup-teams,.coupons{grid-template-columns:1fr}.bankroll{grid-template-columns:repeat(2,minmax(0,1fr))}.teams{font-size:16px}}
 </style></head><body><div class="wrap">
-<header><div><h1>📅 Maç Önü Tahminleri <span class="version">v4.14</span></h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
+<header><div><h1>📅 Maç Önü Tahminleri <span class="version">v4.12</span></h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
 <a href="/">← Canlı Gol Merkezi</a></header>
 <div class="toolbar">
   <label for="day">Maç günü</label>
@@ -4656,131 +4655,6 @@ def prematch_page():
         initial_day=next_saturday.isoformat(),
         last_day=(today + timedelta(days=7)).isoformat(),
     )
-
-
-TRACKER_PAGE = r"""<!doctype html>
-<html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Maç Takip v4.14 • Gol Merkezi</title>
-<style>
-:root{--bg:#04111d;--panel:#0b1d31;--line:#244c69;--txt:#f5f9fd;--muted:#91abc0;--green:#18dc83;--cyan:#28d8f2;--yellow:#ffd34f;--red:#ff5967}
-*{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#04101b,#061522);color:var(--txt);font-family:Inter,Segoe UI,Arial,sans-serif}.wrap{width:min(1600px,calc(100% - 24px));margin:auto;padding:18px}.top{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:14px}.top a{border:1px solid var(--line);background:#09233a;color:white;padding:10px 13px;border-radius:10px;text-decoration:none;font-weight:800}.layout{display:grid;grid-template-columns:320px minmax(600px,1fr) 370px;gap:14px}.panel{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:14px}.matches{max-height:790px;overflow:auto}.match{padding:11px;border:1px solid #294b67;border-radius:11px;margin:8px 0;cursor:pointer}.match.active{border-color:var(--green);box-shadow:0 0 0 1px var(--green)}.teamline{display:flex;align-items:center;gap:7px;font-weight:900}.teamline img,.scoreTeam img{width:22px;height:22px;object-fit:contain}.small{color:var(--muted);font-size:12px}.score{display:flex;align-items:center;justify-content:center;gap:14px;font-size:23px;font-weight:950;margin:0 0 12px}.scoreTeam{display:flex;align-items:center;gap:8px}.pitch{position:relative;aspect-ratio:1.58;background:linear-gradient(90deg,#167842,#19864a);border:3px solid rgba(255,255,255,.72);border-radius:12px;overflow:hidden}.pitch:before{content:"";position:absolute;left:50%;top:0;bottom:0;border-left:2px solid rgba(255,255,255,.7)}.pitch:after{content:"";position:absolute;left:50%;top:50%;width:110px;height:110px;border:2px solid rgba(255,255,255,.7);border-radius:50%;transform:translate(-50%,-50%)}.box{position:absolute;top:23%;width:15%;height:54%;border:2px solid rgba(255,255,255,.65)}.box.l{left:0}.box.r{right:0}.player{position:absolute;transform:translate(-50%,-50%);min-width:27px;height:27px;padding:0 5px;border-radius:50%;display:grid;place-items:center;font-size:9px;font-weight:950;border:2px solid white;z-index:4}.home{background:#2aa7ff}.away{background:#ff5d67}.pname{position:absolute;transform:translate(-50%,15px);font-size:9px;font-weight:800;text-shadow:0 1px 3px #000;white-space:nowrap;z-index:5}.stats{display:grid;grid-template-columns:1fr 1fr;gap:8px}.stat{background:#071624;border:1px solid #1c425d;border-radius:10px;padding:9px}.stat .lab{text-align:center;color:#b9cede;font-size:11px}.duo{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;margin-top:4px;font-weight:950;font-size:17px}.duo span:first-child{text-align:left;color:#5db9ff}.duo span:last-child{text-align:right;color:#ff7b84}.pressure{margin-top:10px;padding:11px;border-radius:12px;background:#071624;border:1px solid #1c425d}.meter{height:9px;background:#24384a;border-radius:99px;overflow:hidden;margin-top:8px}.meter i{display:block;height:100%;background:var(--green);width:0;transition:.5s}.badge{display:inline-block;background:#123652;border:1px solid #2b607f;border-radius:99px;padding:5px 9px;color:#bfeeff;font-size:11px;font-weight:900}.notice{margin-top:10px;color:#a8bfd1;font-size:11px;line-height:1.5}.empty{color:var(--muted);padding:15px}.events{margin-top:12px;border-top:1px solid var(--line);padding-top:10px;max-height:165px;overflow:auto}.event{padding:6px 0;border-bottom:1px solid #17354b;font-size:12px}.event b{color:var(--yellow)}.live{color:var(--green);font-weight:900}.loading{opacity:.65}@media(max-width:1150px){.layout{grid-template-columns:1fr}.matches{max-height:250px}}
-</style></head><body><div class="wrap"><div class="top"><div><h1 style="margin:0">🎮 Maç Takip <span class="badge">v4.14 GERÇEK VERİ</span></h1><div class="small">Gerçek takım • gerçek kadro/diziliş • gerçek canlı istatistik • gerçek maç olayları</div></div><a href="/">← Gol Merkezi</a></div>
-<div class="layout"><section class="panel"><b>🔴 Canlı Maçlar</b><div id="matches" class="matches"><div class="empty">Yükleniyor…</div></div></section>
-<main class="panel"><div id="score" class="score">Bir maç seç</div><div class="pitch" id="pitch"><div class="box l"></div><div class="box r"></div></div><div class="notice"><b>Canlı saha:</b> oyuncular API'nin gerçek ilk 11 ve <code>grid</code> diziliş verisine yerleştirilir. API canlı X/Y tracking vermediği için oyuncular rastgele hareket ettirilmez. Gol, kart ve değişiklikler gerçek olay akışından gelir.</div><div id="events" class="events"><div class="empty">Maç seçildiğinde olaylar burada görünür.</div></div></main>
-<aside class="panel"><b>📊 Canlı İstatistik</b><div id="stats" class="stats" style="margin-top:12px"></div><div class="pressure"><b>🎯 Şut Baskısı</b><div id="pressureText" style="margin-top:7px">-</div><div class="meter"><i id="meter"></i></div></div><div id="update" class="small" style="margin-top:10px"></div></aside></div></div>
-<script>
-const esc=v=>String(v??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;");
-let matches=[],selectedId=null,detail=null;
-const num=v=>{let n=Number(String(v??0).replace("%",""));return Number.isFinite(n)?n:0};
-function nameOf(m,side){return m[side+"_team"]||m[side+"_name"]||m.teams?.[side]?.name||(side==="home"?"Ev Sahibi":"Deplasman")}
-function logoOf(m,side){return m[side+"_logo"]||m.teams?.[side]?.logo||""}
-function goalsOf(m,side){return m[side+"_goals"]??m.goals?.[side]??0}
-function minuteOf(m){return num(m.minute??m.elapsed??m.fixture?.status?.elapsed)}
-function statObj(arr){let o={};for(const x of arr||[])o[x.type]=x.value;return o}
-function renderList(){
- const root=document.getElementById("matches");
- root.innerHTML=matches.length?matches.map(m=>`<div class="match ${m.fixture_id===selectedId?'active':''}" onclick="selectMatch(${Number(m.fixture_id)})">
- <div class=teamline>${logoOf(m,"home")?`<img src="${esc(logoOf(m,"home"))}">`:""}<span>${esc(nameOf(m,"home"))}</span><b>${goalsOf(m,"home")}</b></div>
- <div class=teamline>${logoOf(m,"away")?`<img src="${esc(logoOf(m,"away"))}">`:""}<span>${esc(nameOf(m,"away"))}</span><b>${goalsOf(m,"away")}</b></div>
- <div class=small>${esc(m.league||m.league_name||"")} • ${minuteOf(m)}'</div></div>`).join(""):'<div class=empty>Şu anda takip edilecek canlı maç yok.</div>';
-}
-function gridXY(grid,away){
- if(!grid)return null;let [row,col]=String(grid).split(":").map(Number);if(!row||!col)return null;
- const counts={1:1,2:5,3:5,4:5,5:5};let c=counts[row]||5;
- let x=7+(row-1)*11.5;if(away)x=100-x;
- let y=c===1?50:12+((col-1)*76/Math.max(1,c-1));
- return [x,y];
-}
-function renderPitch(lineups){
- const p=document.getElementById("pitch");p.querySelectorAll(".player,.pname").forEach(e=>e.remove());
- if(!lineups||lineups.length<2)return;
- lineups.slice(0,2).forEach((team,ti)=>{
-   (team.startXI||[]).forEach((it,i)=>{
-    const pl=it.player||{},xy=gridXY(pl.grid,ti===1);if(!xy)return;
-    let e=document.createElement("div");e.className="player "+(ti?"away":"home");e.style.left=xy[0]+"%";e.style.top=xy[1]+"%";e.textContent=pl.number??"";e.title=pl.name||"";p.appendChild(e);
-    let n=document.createElement("div");n.className="pname";n.style.left=xy[0]+"%";n.style.top=xy[1]+"%";n.textContent=pl.name||"";p.appendChild(n);
-   });
- });
-}
-function renderStats(d){
- let s=d.statistics||[],h=statObj(s[0]?.statistics),a=statObj(s[1]?.statistics);
- const keys=[["Total Shots","Toplam Şut"],["Shots on Goal","İsabetli"],["Shots insidebox","Ceza İçi"],["Shots outsidebox","Ceza Dışı"],["Blocked Shots","Bloklanan"],["Corner Kicks","Korner"],["Ball Possession","Topa Sahip Olma"],["Goalkeeper Saves","Kaleci Kurtarış"]];
- document.getElementById("stats").innerHTML=keys.map(([k,l])=>`<div class=stat><div class=lab>${l}</div><div class=duo><span>${esc(h[k]??0)}</span><small>-</small><span>${esc(a[k]??0)}</span></div></div>`).join("");
- let hs=num(h["Total Shots"])+num(h["Shots on Goal"])*2+num(h["Shots insidebox"])*1.2+num(h["Corner Kicks"])*.7;
- let as=num(a["Total Shots"])+num(a["Shots on Goal"])*2+num(a["Shots insidebox"])*1.2+num(a["Corner Kicks"])*.7,total=Math.max(1,hs+as),pct=Math.round(hs/total*100);
- document.getElementById("pressureText").innerHTML=`<span style="color:#5db9ff">${Math.round(hs)}</span> Ev &nbsp;•&nbsp; <span style="color:#ff7b84">${Math.round(as)}</span> Dep`;
- document.getElementById("meter").style.width=pct+"%";
-}
-function renderEvents(events){
- const root=document.getElementById("events"), icon={Goal:"⚽",Card:"🟨",Subst:"🔄",Var:"📺"};
- root.innerHTML=(events||[]).length?(events||[]).slice().reverse().map(e=>`<div class=event><b>${e.time?.elapsed??""}' ${icon[e.type]||"•"} ${esc(e.type||"Olay")}</b> · ${esc(e.team?.name||"")} · ${esc(e.player?.name||"")} ${e.assist?.name?`→ ${esc(e.assist.name)}`:""} <span class=small>${esc(e.detail||"")}</span></div>`).join(""):'<div class=empty>Henüz kayıtlı maç olayı yok.</div>';
-}
-function renderDetail(d){
- detail=d;let m=d.match||{},hn=nameOf(m,"home"),an=nameOf(m,"away"),hl=logoOf(m,"home"),al=logoOf(m,"away");
- document.getElementById("score").innerHTML=`<span class=scoreTeam>${hl?`<img src="${esc(hl)}">`:""}${esc(hn)}</span><span>${goalsOf(m,"home")} - ${goalsOf(m,"away")} <small class=live>${minuteOf(m)}'</small></span><span class=scoreTeam>${esc(an)}${al?`<img src="${esc(al)}">`:""}</span>`;
- renderPitch(d.lineups);renderStats(d);renderEvents(d.events);document.getElementById("update").textContent="Son gerçek veri: "+new Date().toLocaleTimeString("tr-TR");
-}
-async function selectMatch(id){selectedId=id;renderList();await loadDetail()}
-async function loadDetail(){if(!selectedId)return;try{let r=await fetch("/api/tracker/"+selectedId,{cache:"no-store"}),j=await r.json();if(!r.ok)throw Error(j.error||"Veri alınamadı");renderDetail(j)}catch(e){document.getElementById("update").textContent=e.message}}
-async function loadMatches(){try{let r=await fetch("/api/matches",{cache:"no-store"}),j=await r.json();matches=j.matches||[];renderList();if(selectedId==null&&matches.length){selectedId=Number(matches[0].fixture_id);renderList();await loadDetail()}else if(selectedId)await loadDetail()}catch(e){document.getElementById("matches").innerHTML='<div class=empty>Canlı veri alınamadı.</div>'}}
-loadMatches();setInterval(loadMatches,15000);
-</script></body></html>"""
-
-
-@app.route("/takip")
-def tracker_page():
-    return render_template_string(TRACKER_PAGE)
-
-
-@app.route("/api/tracker/<int:fixture_id>")
-def tracker_detail(fixture_id: int):
-    # Tek fixture çağrısı: API-Football bu yanıtta olay, kadro, istatistik ve
-    # oyuncu istatistiklerini desteklenen liglerde birlikte döndürebilir.
-    data, error = api_get("/fixtures", {"id": fixture_id})
-    if data is None:
-        return jsonify({"error": error or "Maç verisi alınamadı"}), 502
-    rows = data.get("response") or []
-    if not rows:
-        return jsonify({"error": "Maç bulunamadı"}), 404
-
-    row = rows[0]
-    fixture = row.get("fixture") or {}
-    league = row.get("league") or {}
-    teams = row.get("teams") or {}
-    goals = row.get("goals") or {}
-    match = {
-        "fixture_id": fixture.get("id"),
-        "league": league.get("name") or "",
-        "country": league.get("country") or "",
-        "minute": ((fixture.get("status") or {}).get("elapsed")) or 0,
-        "status": ((fixture.get("status") or {}).get("short")) or "",
-        "home_team": ((teams.get("home") or {}).get("name")) or "Ev Sahibi",
-        "away_team": ((teams.get("away") or {}).get("name")) or "Deplasman",
-        "home_logo": (teams.get("home") or {}).get("logo"),
-        "away_logo": (teams.get("away") or {}).get("logo"),
-        "home_goals": goals.get("home") or 0,
-        "away_goals": goals.get("away") or 0,
-    }
-
-    # Bazı fixture-id cevaplarında bu bloklar boş olabildiği için mevcut
-    # statistics cache'ini güvenli fallback olarak kullan.
-    statistics = row.get("statistics") or []
-    if not statistics:
-        statistics, _ = get_stats(fixture_id)
-        statistics = statistics or []
-
-    return jsonify({
-        "match": match,
-        "events": row.get("events") or [],
-        "lineups": row.get("lineups") or [],
-        "statistics": statistics,
-        "players": row.get("players") or [],
-        "tracking": {
-            "real_xy_available": False,
-            "mode": "lineup_grid_plus_live_events",
-            "note": "API-Football canlı oyuncu X/Y tracking koordinatı sağlamıyor."
-        }
-    })
 
 
 # Gunicorn import ettiğinde scanner başlasın.
