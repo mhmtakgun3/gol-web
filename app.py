@@ -4657,6 +4657,51 @@ def prematch_page():
     )
 
 
+# ============================================================
+# MAÇ TAKİP - DENEYSEL 2.5D MODÜL
+# Ayrı route/API: mevcut LIVE tarayıcı mantığına dokunmaz.
+# ============================================================
+@app.route('/api/tracker/live')
+def tracker_live_matches():
+    data, error = api_get('/fixtures', {'live':'all'})
+    if data is None: return jsonify({'ok':False,'error':error or 'Canlı maçlar alınamadı.'}),502
+    rows=[]
+    for m in data.get('response') or []:
+        f,t,g,lg=m.get('fixture') or {},m.get('teams') or {},m.get('goals') or {},m.get('league') or {}; st=f.get('status') or {}
+        rows.append({'id':f.get('id'),'minute':st.get('elapsed'),'status':st.get('short'),'home':(t.get('home') or {}).get('name'),'away':(t.get('away') or {}).get('name'),'home_goals':g.get('home'),'away_goals':g.get('away'),'league':lg.get('name')})
+    return jsonify({'ok':True,'matches':rows})
+
+def _tracker_stats(block):
+    return {str(x.get('type') or ''):x.get('value') for x in ((block or {}).get('statistics') or [])}
+
+@app.route('/api/tracker/match')
+def tracker_match_detail():
+    fid=request.args.get('id',type=int)
+    if not fid:return jsonify({'ok':False,'error':'fixture id gerekli'}),400
+    fd,fe=api_get('/fixtures',{'id':fid}); sd,se=api_get('/fixtures/statistics',{'fixture':fid}); ed,ee=api_get('/fixtures/events',{'fixture':fid})
+    if fd is None or not (fd.get('response') or []):return jsonify({'ok':False,'error':fe or 'Maç bulunamadı.'}),404
+    m=fd['response'][0]; f=m.get('fixture') or {}; teams=m.get('teams') or {}; home=teams.get('home') or {}; away=teams.get('away') or {}
+    byid={str((b.get('team') or {}).get('id')):_tracker_stats(b) for b in ((sd or {}).get('response') or [])}; hs=byid.get(str(home.get('id')),{}); aw=byid.get(str(away.get('id')),{})
+    def n(v):
+        try:return float(str(v or 0).replace('%',''))
+        except:return 0
+    def side(x):return {'shots':n(x.get('Total Shots')),'target':n(x.get('Shots on Goal')),'inside':n(x.get('Shots insidebox')),'corners':n(x.get('Corner Kicks')),'possession':n(x.get('Ball Possession'))}
+    stats={'home':side(hs),'away':side(aw)}; events=[]
+    for e in ((ed or {}).get('response') or []):events.append({'minute':(e.get('time') or {}).get('elapsed'),'team_id':(e.get('team') or {}).get('id'),'team':(e.get('team') or {}).get('name'),'player':(e.get('player') or {}).get('name'),'type':e.get('type'),'detail':e.get('detail')})
+    minute=int((f.get('status') or {}).get('elapsed') or 0); shots=stats['home']['shots']+stats['away']['shots']; target=stats['home']['target']+stats['away']['target']; inside=stats['home']['inside']+stats['away']['inside']; corners=stats['home']['corners']+stats['away']['corners']; pace=shots/max(1,minute)*90 if minute else 0; score=min(99,round(25+shots*2.2+target*3.2+inside+corners*.7))
+    return jsonify({'ok':True,'match':{'id':fid,'minute':minute,'home':home,'away':away,'goals':m.get('goals') or {}},'stats':stats,'events':events[-18:],'shot_analysis':{'score':score,'pace90':round(pace,1)}})
+
+TRACKER_PAGE='''<!doctype html><html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Maç Takip 2.5D</title><style>
+*{box-sizing:border-box}body{margin:0;background:#071018;color:#edf7f2;font-family:Arial,sans-serif}.wrap{max-width:1500px;margin:auto;padding:18px}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}.top h1{margin:0}.top a{color:#dff7eb;background:#132331;border:1px solid #294657;padding:9px 12px;border-radius:10px;text-decoration:none}.layout{display:grid;grid-template-columns:280px minmax(560px,1fr) 340px;gap:14px}.panel{background:#0d1822;border:1px solid #1e3442;border-radius:16px;overflow:hidden}.panel h3{margin:0;padding:13px;border-bottom:1px solid #1e3442}.matches{max-height:760px;overflow:auto}.match{padding:11px 13px;border-bottom:1px solid #172a36;cursor:pointer}.match:hover,.match.on{background:#14302d}.muted{color:#87a4b1;font-size:12px}.pitchwrap{padding:14px}.scoreboard{text-align:center;font-size:20px;font-weight:800;margin-bottom:10px}.pitch{position:relative;aspect-ratio:1.58;background:linear-gradient(90deg,#176d43,#1b7a4a 50%,#176d43);border:3px solid #b7e4c7;border-radius:8px;overflow:hidden;box-shadow:inset 0 0 60px #062b1c}.pitch:before{content:"";position:absolute;left:50%;top:0;bottom:0;border-left:2px solid #b7e4c7}.pitch:after{content:"";position:absolute;left:41%;top:36%;width:18%;aspect-ratio:1;border:2px solid #b7e4c7;border-radius:50%}.box{position:absolute;top:25%;height:50%;width:15%;border:2px solid #b7e4c7}.l{left:-2px}.r{right:-2px}.player{position:absolute;width:25px;height:25px;border-radius:50%;display:grid;place-items:center;font-size:10px;font-weight:900;box-shadow:0 4px 9px #0008;transition:left 1.3s ease,top 1.3s ease;z-index:3}.hp{background:#e7f3ff;color:#09243b;border:2px solid #58a6ff}.ap{background:#ffe9e9;color:#3b0909;border:2px solid #ff6b6b}.ball{position:absolute;width:12px;height:12px;border-radius:50%;background:#fff;border:2px solid #222;z-index:5;transition:left .8s ease,top .8s ease}.note{padding:10px 14px;background:#0a131b;color:#8ba4af;font-size:12px}.signal{margin:12px;padding:14px;border-radius:13px;background:#11271d;border:1px solid #235f40}.signal strong{font-size:28px;color:#58e698}.stats{padding:12px}.stat{margin:11px 0}.stathead{display:flex;justify-content:space-between;font-size:13px}.bar{height:8px;background:#172a36;border-radius:99px;overflow:hidden;margin-top:5px}.bar i{display:block;height:100%;background:#31d07d}.events{padding:0 12px 12px;max-height:280px;overflow:auto}.ev{padding:7px;border-bottom:1px solid #1b2b35;font-size:12px}.empty{padding:20px;color:#89a1ad}@media(max-width:1100px){.layout{grid-template-columns:1fr}}
+</style></head><body><div class="wrap"><div class="top"><div><h1>🎮 Maç Takip • 2.5D Deneme</h1><div class="muted">Canlı şut/istatistik + olay tabanlı saha animasyonu</div></div><a href="/">← Gol Sinyal Merkezi</a></div><div class="layout"><section class="panel"><h3>🟢 Canlı maçlar</h3><div id="matches" class="matches"><div class="empty">Yükleniyor…</div></div></section><section class="panel"><div class="pitchwrap"><div id="score" class="scoreboard">Bir maç seç</div><div id="pitch" class="pitch"><div class="box l"></div><div class="box r"></div><div id="ball" class="ball" style="left:49%;top:49%"></div></div></div><div class="note">⚠️ API gerçek oyuncu koordinatı vermiyorsa hareketler olay ve maç temposunu temsil eden 2.5D animasyondur; gerçek GPS konumu değildir.</div></section><aside class="panel"><h3>🎯 Şut Ekranı</h3><div id="right"><div class="empty">Bir canlı maç seç.</div></div></aside></div></div><script>
+const $=s=>document.querySelector(s);let selected=null,players=[],timer=null;function esc(v){return String(v??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')}async function get(u){let r=await fetch(u),d=await r.json();if(!r.ok||d.ok===false)throw Error(d.error||'API hatası');return d}function mk(){let p=$('#pitch');p.querySelectorAll('.player').forEach(x=>x.remove());players=[];let H=[[7,48],[22,15],[22,38],[22,62],[22,84],[39,25],[39,50],[39,75],[55,18],[55,50],[55,82]],A=[[92,48],[77,15],[77,38],[77,62],[77,84],[60,25],[60,50],[60,75],[44,18],[44,50],[44,82]];[H,A].forEach((a,s)=>a.forEach((q,i)=>{let e=document.createElement('div');e.className='player '+(s?'ap':'hp');e.textContent=i+1;e.style.left=q[0]+'%';e.style.top=q[1]+'%';p.appendChild(e);players.push({e,s,b:q})}))}function move(side=0,power=.4){players.forEach(o=>{let x=o.b[0],y=o.b[1];x+=(Math.random()*8-4)+(o.s===side?(o.s?-10:10)*power:0);y+=Math.random()*10-5;o.e.style.left=Math.max(3,Math.min(94,x))+'%';o.e.style.top=Math.max(4,Math.min(90,y))+'%'});$('#ball').style.left=(side?30+Math.random()*25:45+Math.random()*25)+'%';$('#ball').style.top=(18+Math.random()*64)+'%'}function row(n,h,a){let t=Math.max(1,h+a),w=Math.round(h/t*100);return `<div class="stat"><div class="stathead"><b>${h}</b><span>${n}</span><b>${a}</b></div><div class="bar"><i style="width:${w}%"></i></div></div>`}async function lives(){try{let d=await get('/api/tracker/live');$('#matches').innerHTML=d.matches.map(m=>`<div class="match ${selected===m.id?'on':''}" onclick="pick(${m.id})"><div class="muted">${esc(m.league)} • ${m.minute??'-'}'</div>${esc(m.home)} <b>${m.home_goals??0}-${m.away_goals??0}</b> ${esc(m.away)}</div>`).join('')||'<div class="empty">Canlı maç yok.</div>'}catch(e){$('#matches').innerHTML='<div class="empty">'+esc(e.message)+'</div>'}}async function pick(id){selected=id;mk();await detail();if(timer)clearInterval(timer);timer=setInterval(detail,15000);lives()}async function detail(){if(!selected)return;try{let d=await get('/api/tracker/match?id='+selected),m=d.match,s=d.stats,a=d.shot_analysis;$('#score').innerHTML=`${esc(m.home.name)} <b>${m.goals.home??0} - ${m.goals.away??0}</b> ${esc(m.away.name)} <span class="muted">${m.minute}'</span>`;$('#right').innerHTML=`<div class="signal">ŞUT BASKI SKORU<br><strong>${a.score}/99</strong><div class="muted">90 dk şut temposu: ${a.pace90}</div></div><div class="stats">${row('Toplam Şut',s.home.shots,s.away.shots)}${row('İsabetli Şut',s.home.target,s.away.target)}${row('Ceza Sahası İçi',s.home.inside,s.away.inside)}${row('Korner',s.home.corners,s.away.corners)}${row('Topa Sahip Olma',s.home.possession,s.away.possession)}</div><h3>Son Olaylar</h3><div class="events">${d.events.slice().reverse().map(e=>`<div class="ev"><b>${e.minute??'-'}'</b> ${esc(e.team)} • ${esc(e.type)} ${esc(e.detail)} ${e.player?'• '+esc(e.player):''}</div>`).join('')||'Olay verisi yok'}</div>`;let e=d.events[d.events.length-1],side=e&&String(e.team_id)===String(m.away.id)?1:0;move(side,Math.min(1,a.score/80))}catch(e){$('#right').innerHTML='<div class="empty">'+esc(e.message)+'</div>'}}mk();lives();setInterval(lives,30000);setInterval(()=>{if(selected)move(Math.random()>.5?1:0,.2)},3500);
+</script></body></html>'''
+
+@app.route('/takip')
+def tracker_page():
+    return render_template_string(TRACKER_PAGE)
+
+
 # Gunicorn import ettiğinde scanner başlasın.
 ensure_scanner_started()
 
