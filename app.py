@@ -3190,7 +3190,9 @@ def api_prematch_analyze():
     lineups, lineup_error = prematch_lineups(fixture_id, home_id, away_id)
     # v5: Bağımsız maç senaryosu motoru. Eski prematch_suggestions ve
     # keyfi 0.56/0.70 filtreleri bu karar yolunda kullanılmaz.
-    analysis = prematch_scenario_engine(home or {}, away or {}, h2h or {})
+    from prematch_intelligence import analyze_match, choose_markets, research_match
+    analysis = analyze_match(home or {}, away or {}, h2h or {})
+    web_research = research_match(home_team.get("name") or "", away_team.get("name") or "", fixture.get("date"))
     odds_entries, odds_error = prematch_fixture_odds(fixture_id)
     candidates = []
     for item in analysis["markets"]:
@@ -3218,64 +3220,8 @@ def api_prematch_analyze():
                     lineup_fit=None)
         candidates.append(item)
 
-    # v5.2: Analiz, fiyat ve oynanabilirlik AYRI kararlardır.
-    # Düşük fiyatlı yüksek olasılık ana kart olamaz. Oransız BetBuilder
-    # hesaplanır ama gerçek fiyatmış gibi gösterilmez.
-    def category(item):
-        prob = item["model_probability"]
-        quality = analysis["data_quality"]
-        if quality == "good" and prob >= .72:
-            return "green"
-        if quality != "poor" and prob >= .60:
-            return "yellow"
-        return "red"
-
-    def set_role(item, primary=False):
-        item["risk_level"] = category(item)
-        item["decision_role"] = ("ANA ANALİZ (" + {"green":"GÜÇLÜ", "yellow":"DENGELİ", "red":"RİSKLİ"}[item["risk_level"]] + ")" if primary else
-            {"green":"GÜÇLÜ ALTERNATİF", "yellow":"DENGELİ ALTERNATİF",
-             "red":"RİSKLİ ALTERNATİF"}[item["risk_level"]])
-        item["is_main"] = primary
-        item["manual_review"] = not item["coupon_eligible"]
-
-    def cluster(item):
-        code = item["market"]
-        if code.startswith("BB_HOME_") or code == "HOME": return "home_result"
-        if code.startswith("BB_AWAY_") or code == "AWAY": return "away_result"
-        if code == "BB_BTTS_OVER25": return "btts_goals"
-        if code in ("BTTS_YES", "BTTS_NO"): return "btts"
-        if code.startswith("OVER_") or code.startswith("UNDER_"): return "total_goals"
-        return item["family"]
-
-    # Tekli oynanabilir seçenekler: sadece >=1.30 ve doğrulanmış fiyat.
-    priced_options = [c for c in candidates if c["coupon_eligible"]
-                      and c["quote"] and c["quote"]["odd"] >= 1.30]
-    priced_options.sort(key=lambda c:(c["model_probability"],c["expected_value"]),reverse=True)
-    # Birleşik marketleri ayrıca değerlendir; oran olmasa bile görünür.
-    builders = [c for c in candidates if c["market"].startswith("BB_")]
-    builders.sort(key=lambda c:c["model_probability"],reverse=True)
-    chosen, used = [], set()
-    # Fiyatlı ve güvenilir bir tekli varsa öne al. Yoksa en iyi birleşik senaryo.
-    main = next((c for c in priced_options if c["model_probability"] >= .60), None)
-    if main is None:
-        main = builders[0] if builders else (priced_options[0] if priced_options else None)
-    if main:
-        chosen.append(main)
-        used.add(cluster(main))
-    # Alternatifler gerçekten farklı maç sonuçlarına dayanmalı.
-    alternatives = builders + priced_options
-    for candidate in alternatives:
-        if len(chosen) >= 3: break
-        if candidate in chosen or cluster(candidate) in used: continue
-        # Yüksek olasılıklı, 1.30 altı tekli marketleri gösterme.
-        if not candidate["market"].startswith("BB_") and (
-            not candidate["quote"] or candidate["quote"]["odd"] < 1.30):
-            continue
-        chosen.append(candidate)
-        used.add(cluster(candidate))
-    for i,item in enumerate(chosen):
-        set_role(item,primary=i==0)
-    # Ana analiz risk etiketi, olasılık sınıfını değiştirmez.
+    chosen = choose_markets(candidates, analysis["data_quality"])
+    # Research findings are not interpreted as confirmed lineup/injury facts.
     note = ("Model analizi her maç için gösterilir. Doğrulanmış 1.30+ fiyatı olmayan "
             "seçimler manuel inceleme içindir, kupona alınmaz. "
             "BetBuilder fiyatları API tarafından doğrulanmadı; oran tahmin edilmedi.")
@@ -3290,7 +3236,7 @@ def api_prematch_analyze():
         "lineup_error":lineup_error,"decision":("ANALİZ HAZIR" if chosen else "VERİ EKSİK"),
         "candidate_count":len(candidates),"odds_note":note,
         "note":analysis["model_note"],"scenario":analysis["scenario"],
-        "data_quality":analysis["data_quality"]})
+        "data_quality":analysis["data_quality"], "web_research":web_research})
 
 
 @app.route("/api/prematch/result")
@@ -3856,7 +3802,7 @@ select{
       <span><span class="dot" style="background:#ff3f4f"></span>0–44 Zayıf</span>
       <span>🧠 BOT PICK</span>
     </div>
-    <div>Gol Sinyal Merkezi v5.2 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
+    <div>Gol Sinyal Merkezi v6.0 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
   </div>
 </div>
 
@@ -4360,7 +4306,7 @@ button{border:1px solid #2cab79;background:#0e6f50;color:white;cursor:pointer;fo
 .coupon-total{font-size:12px;color:#80e8b6;margin-top:7px;font-weight:800}.won{color:#72e7a9}.lost{color:#ff9198}.open{color:#ffd379}.void{color:#9aa7b8}.remove-coupon{margin-top:9px;font-size:11px;padding:6px 9px;background:#3a2028;border:1px solid #75404c;color:#ffb7bf;border-radius:7px;cursor:pointer}.close-analysis{font-size:11px;padding:6px 9px;background:#263247;border:1px solid #536783;color:#dce7f5;border-radius:7px;cursor:pointer}
 @media(max-width:680px){.grid,.form,.lineup-teams,.coupons{grid-template-columns:1fr}.bankroll{grid-template-columns:repeat(2,minmax(0,1fr))}.teams{font-size:16px}}
 </style></head><body><div class="wrap">
-<header><div><h1>📅 Maç Önü Tahminleri <span class="version">v5.2</span></h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
+<header><div><h1>📅 Maç Önü Tahminleri <span class="version">v6.0</span></h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
 <a href="/">← Canlı Gol Merkezi</a></header>
 <div class="toolbar">
   <label for="day">Maç günü</label>
@@ -4409,7 +4355,7 @@ async function getJson(url){
 const couponStoreKey="golPrematchCouponsV2";
 const pickHistoryKey="golPrematchPickHistoryV4";
 const couponStake=1000;
-const couponStrategyVersion="v5.2";
+const couponStrategyVersion="v6.0";
 function couponStore(){try{return JSON.parse(localStorage.getItem(couponStoreKey)||"{}")||{}}catch{return {}}}
 function saveCouponStore(store){localStorage.setItem(couponStoreKey,JSON.stringify(store))}
 function pickHistory(){try{return JSON.parse(localStorage.getItem(pickHistoryKey)||"[]")||[]}catch{return []}}
@@ -4545,7 +4491,7 @@ function buildCoupons(){
   if(!chosen.length){
     saveCouponStore(store);renderCoupons(existing);
     const s=pool.stats||{};
-    document.getElementById("couponState").textContent=`v5.2 bu turda kaliteli kupon üretmedi: ${s.suggestions||0} tercih incelendi; ${s.lowProbability||0} düşük olasılık, ${s.lowValue||0} düşük değer, ${s.weakHistory||0} zayıf geçmiş, ${s.lowOdd||0} düşük oran nedeniyle elendi. Zorla kupon oynamak yerine NO BET.`;
+    document.getElementById("couponState").textContent=`v6.0 bu turda kaliteli kupon üretmedi: ${s.suggestions||0} tercih incelendi; ${s.lowProbability||0} düşük olasılık, ${s.lowValue||0} düşük değer, ${s.weakHistory||0} zayıf geçmiş, ${s.lowOdd||0} düşük oran nedeniyle elendi. Zorla kupon oynamak yerine NO BET.`;
     return;
   }
   store[loadedDate]=[...existing,...chosen];saveCouponStore(store);renderCoupons(store[loadedDate]);
@@ -4697,7 +4643,7 @@ function renderFixtures(){
             : `<div class="pas">Analiz için yeterli veri bulunamadı</div>`;
           box.innerHTML=`<div style="display:flex;justify-content:flex-end;margin-bottom:8px"><button type="button" class="close-analysis">✕ Analizi kapat</button></div><div class="form"><div><b>${esc(a.home)}</b><br>${esc(formText(a.home_form,"home"))}</div>
             <div><b>${esc(a.away)}</b><br>${esc(formText(a.away_form,"away"))}</div></div>
-            ${h2hHtml(a)}${lineupHtml(a)}${picks}${(a.joint_notes||[]).map(n=>`<div class="joint-note"><b>Birlikte gerçekleşme ihtimali</b><br>${esc(n)}</div>`).join("")}<div class="odds-note">${esc(a.odds_note)}</div><div class="hint">${esc(a.note)}</div>`;
+            ${h2hHtml(a)}${lineupHtml(a)}<div class="lineup-box"><b>🌐 İnternet araştırması</b><div>${esc(a.web_research?.note||"Kaynak bilgisi yok")}</div>${(a.web_research?.sources||[]).map(x=>`<div><a href="${esc(x.url)}" target="_blank" rel="noopener noreferrer">${esc(x.title)}</a> <small>${esc(x.published||"")}</small></div>`).join("")}</div>${picks}${(a.joint_notes||[]).map(n=>`<div class="joint-note"><b>Birlikte gerçekleşme ihtimali</b><br>${esc(n)}</div>`).join("")}<div class="odds-note">${esc(a.odds_note)}</div><div class="hint">${esc(a.note)}</div>`;
           box.querySelector(".close-analysis").onclick=()=>{
             analyzedMatches.delete(Number(m.id));
             box.hidden=true;
