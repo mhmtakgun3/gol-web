@@ -2695,7 +2695,7 @@ def prematch_suggestions(home: Dict[str, Any], away: Dict[str, Any],
             picks.append({"market": "HT_UNDER_1_5", "label": "İY 1,5 ALT",
                           "reason": f"İlk yarıda 2+ gol oranı iki takımın son maçlarında ortalama yalnızca {ht_over15:.0%}.", "rank": 3})
 
-    # v4.17: Oran veya katı eşik yüzünden marketi analizden gizleme.
+    # v4.18: Oran veya katı eşik yüzünden marketi analizden gizleme.
     # Eksik veri yüzdesi güvenilir olmadığı için ayrıca işaretlenir.
     catalog = {
         "HOME": "MS 1", "AWAY": "MS 2", "BTTS_YES": "KG VAR",
@@ -3197,38 +3197,28 @@ def api_prematch_analyze():
                 "implied_probability":None,"value_edge":None,"value_edge_pct":None,
                 "value_score":None,"probability_basis":"Bağımsız Poisson skor yaklaşımı; kalibre edilmemiş tahmin.",
                 "coupon_eligible":False,"screening_only":False})
-    # Analiz tüm marketleri hesaplar; kullanıcıya yalnızca en güçlü ve
-    # birbirini tekrar etmeyen karar adayları gösterilir.
+    # Karar motoru: önce doğrulanmış 1.30+ oran ve model değeri,
+    # sonra yalnızca oransız araştırma adayları. 1.08 ana tercih OLAMAZ.
     all_priced = list(priced)
-    valid = [p for p in priced if p.get("model_probability") is not None
-             and p["model_probability"] >= .56]
-    def decision_score(p):
-        probability = p["model_probability"]
-        quote = p.get("quote") or {}
-        odd = float(quote.get("odd") or 0)
-        # Gerçek oran doğrulanmışsa değer dikkate alınır; yoksa
-        # sadece model olasılığına göre sıralanır, kupona uygun sayılmaz.
-        edge = probability * odd - 1 if odd >= 1.30 else -0.10
-        return probability + max(-.10, min(.12, edge * .20))
-    valid.sort(key=decision_score, reverse=True)
-    priced = []
-    for item in valid:
-        if len(priced) >= 2:
-            break
-        # Aynı maçta hem MS1 hem MS2 yönlü seçim gösterme.
-        direction = ("HOME" if item["market"] in ("HOME",) or item["market"].startswith("BB_HOME")
-                     else "AWAY" if item["market"] in ("AWAY",) or item["market"].startswith("BB_AWAY")
-                     else None)
-        chosen_dirs = [("HOME" if p["market"] == "HOME" or p["market"].startswith("BB_HOME")
-                        else "AWAY" if p["market"] == "AWAY" or p["market"].startswith("BB_AWAY")
-                        else None) for p in priced]
-        if direction and any(d and d != direction for d in chosen_dirs):
-            continue
-        if any(p["market"] == item["market"] for p in priced):
-            continue
-        priced.append(item)
-    if not priced and valid:
-        priced = valid[:1]
+    for item in all_priced:
+        q = item.get("quote") or {}
+        odd = float(q.get("odd") or 0)
+        p = item.get("model_probability")
+        item["eligible_for_main"] = bool(p is not None and p >= .56 and odd >= 1.30)
+        item["expected_value"] = round(p * odd - 1, 4) if p is not None and odd >= 1.30 else None
+        item["risk_level"] = ("green" if p is not None and p >= .72
+                              else "yellow" if p is not None and p >= .60 else "red")
+    eligible = [p for p in all_priced if p["eligible_for_main"]
+                and p["expected_value"] is not None and p["expected_value"] >= .04]
+    eligible.sort(key=lambda p:(p["expected_value"],p["model_probability"]),reverse=True)
+    priced = eligible[:1]
+    # Oran yoksa düşük oranlı tercihi öne çıkarmak yerine açıkça pas geç.
+    if not priced:
+        odds_note_override = "1.30+ doğrulanmış ve yeterli değerli tercih bulunamadı; NO BET. Oransız analiz detaylarda saklıdır."
+    else:
+        odds_note_override = None
+    if priced:
+        priced[0]["decision_role"] = "ANA TERCİH"
     labels = {item["label"] for item in priced}
     joint_notes = []
     if {"KG VAR", "2,5 ÜST"} <= labels:
@@ -3237,7 +3227,9 @@ def api_prematch_analyze():
         for goal in ("3,5 ALT", "3,5 ÜST"):
             if {side, goal} <= labels:
                 joint_notes.append(f"{side} ve {goal} birlikte de gerçekleşebilir: yenilmeme ve gol çizgisi eğilimleri ayrı ayrı koşulları sağlıyor. Gösterilen oranlar tekli piyasalara aittir.")
-    if odds_error:
+    if odds_note_override:
+        odds_note = odds_note_override
+    elif odds_error:
         odds_note = f"Oran sağlayıcısı yanıt vermedi: {odds_error}"
     elif suggestions and not priced:
         odds_note = "Oran bulunamadı; analiz sonuçları yine gösteriliyor."
@@ -3256,7 +3248,7 @@ def api_prematch_analyze():
                         if lineups.get("confirmed")
                         else "Kadrolar henüz açıklanmadı; analiz form verileriyle hazırlandı."),
         "lineup_error": lineup_error,
-        "decision": "PAS" if not priced else "EĞİLİM",
+        "decision": "NO BET" if not priced else "ANA TERCİH",
         "candidate_count": len(suggestions), "odds_note": odds_note,
         "note": ("Son maç formu, iç/dış saha verisi, onaylı ilk 11 ve diziliş birlikte değerlendirildi."
                  if lineups.get("confirmed") else
@@ -3827,7 +3819,7 @@ select{
       <span><span class="dot" style="background:#ff3f4f"></span>0–44 Zayıf</span>
       <span>🧠 BOT PICK</span>
     </div>
-    <div>Gol Sinyal Merkezi v4.17 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
+    <div>Gol Sinyal Merkezi v4.18 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
   </div>
 </div>
 
@@ -4331,7 +4323,7 @@ button{border:1px solid #2cab79;background:#0e6f50;color:white;cursor:pointer;fo
 .coupon-total{font-size:12px;color:#80e8b6;margin-top:7px;font-weight:800}.won{color:#72e7a9}.lost{color:#ff9198}.open{color:#ffd379}.void{color:#9aa7b8}.remove-coupon{margin-top:9px;font-size:11px;padding:6px 9px;background:#3a2028;border:1px solid #75404c;color:#ffb7bf;border-radius:7px;cursor:pointer}.close-analysis{font-size:11px;padding:6px 9px;background:#263247;border:1px solid #536783;color:#dce7f5;border-radius:7px;cursor:pointer}
 @media(max-width:680px){.grid,.form,.lineup-teams,.coupons{grid-template-columns:1fr}.bankroll{grid-template-columns:repeat(2,minmax(0,1fr))}.teams{font-size:16px}}
 </style></head><body><div class="wrap">
-<header><div><h1>📅 Maç Önü Tahminleri <span class="version">v4.17</span></h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
+<header><div><h1>📅 Maç Önü Tahminleri <span class="version">v4.18</span></h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
 <a href="/">← Canlı Gol Merkezi</a></header>
 <div class="toolbar">
   <label for="day">Maç günü</label>
@@ -4380,7 +4372,7 @@ async function getJson(url){
 const couponStoreKey="golPrematchCouponsV2";
 const pickHistoryKey="golPrematchPickHistoryV4";
 const couponStake=1000;
-const couponStrategyVersion="v4.17";
+const couponStrategyVersion="v4.18";
 function couponStore(){try{return JSON.parse(localStorage.getItem(couponStoreKey)||"{}")||{}}catch{return {}}}
 function saveCouponStore(store){localStorage.setItem(couponStoreKey,JSON.stringify(store))}
 function pickHistory(){try{return JSON.parse(localStorage.getItem(pickHistoryKey)||"[]")||[]}catch{return []}}
@@ -4516,12 +4508,12 @@ function buildCoupons(){
   if(!chosen.length){
     saveCouponStore(store);renderCoupons(existing);
     const s=pool.stats||{};
-    document.getElementById("couponState").textContent=`v4.17 bu turda kaliteli kupon üretmedi: ${s.suggestions||0} tercih incelendi; ${s.lowProbability||0} düşük olasılık, ${s.lowValue||0} düşük değer, ${s.weakHistory||0} zayıf geçmiş, ${s.lowOdd||0} düşük oran nedeniyle elendi. Zorla kupon oynamak yerine NO BET.`;
+    document.getElementById("couponState").textContent=`v4.18 bu turda kaliteli kupon üretmedi: ${s.suggestions||0} tercih incelendi; ${s.lowProbability||0} düşük olasılık, ${s.lowValue||0} düşük değer, ${s.weakHistory||0} zayıf geçmiş, ${s.lowOdd||0} düşük oran nedeniyle elendi. Zorla kupon oynamak yerine NO BET.`;
     return;
   }
   store[loadedDate]=[...existing,...chosen];saveCouponStore(store);renderCoupons(store[loadedDate]);
   const safe=chosen.filter(c=>c.riskKey==="safe").length,balanced=chosen.filter(c=>c.riskKey==="balanced").length,value=chosen.filter(c=>c.riskKey==="value").length;
-  document.getElementById("couponState").textContent=`v4.17: ${chosen.length} kaliteli kupon oluşturuldu • 🟢 ${safe} güvenli • 🟡 ${balanced} dengeli • 🔴 ${value} değer • toplam ${chosen.length*couponStake.toLocaleString("tr-TR")} TL sanal bahis • kupon boyutu 3 maç.`;
+  document.getElementById("couponState").textContent=`v4.18: ${chosen.length} kaliteli kupon oluşturuldu • 🟢 ${safe} güvenli • 🟡 ${balanced} dengeli • 🔴 ${value} değer • toplam ${chosen.length*couponStake.toLocaleString("tr-TR")} TL sanal bahis • kupon boyutu 3 maç.`;
 }
 
 function legResult(market,h,a,hh=null,ha=null){
@@ -4589,7 +4581,7 @@ function renderLearningStats(){
   const active=markets.map(([m,l])=>{const x=marketHistoryStats(m);return {...x,label:l}}).filter(x=>x.n>0).sort((a,b)=>b.n-a.n).slice(0,8);
   document.getElementById("learningStats").innerHTML=active.length
     ? `<span><b>🧠 Öğrenme:</b></span>`+active.map(x=>`<span>${x.label}: <b class="${x.rate>=.65?"good":x.rate<.55?"bad":""}">%${(x.rate*100).toFixed(0)}</b> (${x.n})</span>`).join("")
-    : `<span><b>🧠 Öğrenme:</b> Henüz yeterli geçmiş sonuç yok; v4.17 önce veri topluyor.</span>`;
+    : `<span><b>🧠 Öğrenme:</b> Henüz yeterli geçmiş sonuç yok; v4.18 önce veri topluyor.</span>`;
 }
 
 function renderBankroll(store){
@@ -4614,8 +4606,8 @@ function renderCoupons(coupons){
   }
   const settled=won+lost,settledLegs=legWon+legLost;
   document.getElementById("couponState").textContent=coupons.length
-    ? `Bugün ${coupons.length} aktif kupon • v4.17 kupon başarısı: ${settled?Math.round(won/settled*100):0}% (${won}/${settled}) • Seçim başarısı: ${settledLegs?Math.round(legWon/settledLegs*100):0}% (${legWon}/${settledLegs})`
-    : "Bu tarih için v4.17 aktif kupon yok. Eski kuponlar performans hesabından ayrı tutuluyor.";
+    ? `Bugün ${coupons.length} aktif kupon • v4.18 kupon başarısı: ${settled?Math.round(won/settled*100):0}% (${won}/${settled}) • Seçim başarısı: ${settledLegs?Math.round(legWon/settledLegs*100):0}% (${legWon}/${settledLegs})`
+    : "Bu tarih için v4.18 aktif kupon yok. Eski kuponlar performans hesabından ayrı tutuluyor.";
   coupons.forEach((c,i)=>{
     const el=document.createElement("div");el.className="coupon";
     const status=c.status||"OPEN",statusText=status==="WON"?"TUTTU":status==="LOST"?"YATMADI":status==="VOID"?"İPTAL":"BEKLİYOR";
@@ -4664,7 +4656,7 @@ function renderFixtures(){
           analyzedMatches.set(Number(m.id),{match:m,analysis:a});
           registerPickHistory(m,a);
           const picks=a.suggestions.length
-            ? a.suggestions.map(p=>`<div class="pick"><b>${esc(p.label)}</b><div class="quote">Oran ${p.quote?`${Number(p.quote.odd).toFixed(2)} · ${esc(p.quote.bookmaker)}`:"Bulunamadı · Manuel değerlendir"}</div><div class="reason">${esc(p.quote?.market_name||"BetBuilder / oran yok")}: ${esc(p.quote?.selection||"Tahmini tercih")}${quoteTime(p.quote?.updated)?` · Güncelleme: ${esc(quoteTime(p.quote.updated))}`:""}</div><div class="pick-why"><b>Neden bu tercih?</b><br>${esc(p.explanation || p.reason)}</div><div class="reason">Tahmini olasılık ${p.model_probability!=null?`${(Number(p.model_probability)*100).toFixed(1).replace(".",",")}%`:"-"} · Oranın ima ettiği ${p.implied_probability!=null?`${(Number(p.implied_probability)*100).toFixed(1).replace(".",",")}%`:"-"} · Değer farkı ${p.value_edge_pct!=null?`${Number(p.value_edge_pct)>=0?"+":""}${Number(p.value_edge_pct).toFixed(1).replace(".",",")}%`:"-"}</div><div class="reason">${esc(p.probability_basis||"Market özelinde form verileri kullanıldı.")}</div></div>`).join("")
+            ? a.suggestions.map(p=>`<div class="pick" style="border:2px solid ${p.risk_level==="green"?"#19ba72":p.risk_level==="yellow"?"#e8b93e":"#e35353"};background:${p.risk_level==="green"?"#0e352a":p.risk_level==="yellow"?"#40341a":"#3d1d26"}"><b>${esc(p.label)}</b><div class="quote">Oran ${p.quote?`${Number(p.quote.odd).toFixed(2)} · ${esc(p.quote.bookmaker)}`:"Bulunamadı · Manuel değerlendir"}</div><div class="reason">${esc(p.quote?.market_name||"BetBuilder / oran yok")}: ${esc(p.quote?.selection||"Tahmini tercih")}${quoteTime(p.quote?.updated)?` · Güncelleme: ${esc(quoteTime(p.quote.updated))}`:""}</div><div class="pick-why"><b>Neden bu tercih?</b><br>${esc(p.explanation || p.reason)}</div><div class="reason">Tahmini olasılık ${p.model_probability!=null?`${(Number(p.model_probability)*100).toFixed(1).replace(".",",")}%`:"-"} · Oranın ima ettiği ${p.implied_probability!=null?`${(Number(p.implied_probability)*100).toFixed(1).replace(".",",")}%`:"-"} · Değer farkı ${p.value_edge_pct!=null?`${Number(p.value_edge_pct)>=0?"+":""}${Number(p.value_edge_pct).toFixed(1).replace(".",",")}%`:"-"}</div><div class="reason">${esc(p.probability_basis||"Market özelinde form verileri kullanıldı.")}</div></div>`).join("")
             : `<div class="pas">PAS • ${a.candidate_count ? "Modelde eğilim var, ancak fiyat koşulu sağlanmadı." : "Yeterli ortak veri işareti yok."}</div>`;
           box.innerHTML=`<div style="display:flex;justify-content:flex-end;margin-bottom:8px"><button type="button" class="close-analysis">✕ Analizi kapat</button></div><div class="form"><div><b>${esc(a.home)}</b><br>${esc(formText(a.home_form,"home"))}</div>
             <div><b>${esc(a.away)}</b><br>${esc(formText(a.away_form,"away"))}</div></div>
