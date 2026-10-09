@@ -3,8 +3,11 @@ Internet headlines are leads for manual verification, NEVER treated as confirmed
 """
 from __future__ import annotations
 import math, os, time, threading, re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from email.utils import parsedate_to_datetime
+from difflib import SequenceMatcher
 from urllib.parse import urlencode
+from html import unescape
 from xml.etree import ElementTree as ET
 import requests
 
@@ -22,31 +25,119 @@ def _count(d):
     try: return max(0, int((d or {}).get('count') or 0))
     except (ValueError, TypeError): return 0
 
-def research_match(home, away, kickoff=None):
-    """Optional bounded web search via public Google News RSS; never infer facts from headlines."""
-    if os.getenv('PREMATCH_WEB_RESEARCH', '1').lower() in ('0', 'false', 'off'):
-        return {'status':'disabled', 'sources':[], 'note':'İnternet araştırması kapalı.'}
-    query = f'"{home}" "{away}" football team news injuries lineups'
-    key = (home, away)
-    with _LOCK:
-        cached = _NEWS_CACHE.get(key)
-        if cached and time.time() - cached[0] < 3600: return cached[1]
+def _team_tokens(name):
+    """Avoid generic tokens like FC, 1., United, and league names."""
+    noise={'fc','1','sc','sv','vfl','vfb','fk','cf','club','football','soccer',
+           'united','city','sporting','real','de','the','afc','ac','fsv'}
+    words=re.findall(r"[a-z0-9]+", name.casefold())
+    return [w for w in words if len(w)>=4 and w not in noise]
+
+
+def _fixture_date(kickoff):
+    if not kickoff: return None
     try:
-        url = 'https://news.google.com/rss/search?' + urlencode({'q':query,'hl':'en','gl':'GB','ceid':'GB:en'})
-        response = requests.get(url, timeout=(2, 4), headers={'User-Agent':'GolMerkeziPrematchResearch/1.0'})
+        dt=datetime.fromisoformat(str(kickoff).replace('Z','+00:00'))
+        return dt.replace(tzinfo=dt.tzinfo or timezone.utc).astimezone(timezone.utc)
+    except (ValueError, TypeError): return None
+
+
+def _article_relevance(title, home, away):
+    low=title.casefold()
+    ht=_team_tokens(home); at=_team_tokens(away)
+    # Need one DISTINCTIVE team token. For the Heidenheim fixture,
+    # unrelated Bayern/DFB cup headlines are excluded.
+    home_match=any(re.search(r'(?<!\w)'+re.escape(w)+r'(?!\w)',low) for w in ht)
+    away_match=any(re.search(r'(?<!\w)'+re.escape(w)+r'(?!\w)',low) for w in at)
+    if not (home_match or away_match): return 0
+    score=3 if home_match and away_match else 1
+    if re.search(r'injur|injured|suspend|lineup|starting xi|team news|preview|'
+                 r'verletzt|aufstellung|sperre|vorschau|kader|personnel|'
+                 r'press conference|match report',low): score+=2
+    if re.search(r'live stream|watch online|free tips|betting tips|prediction|'
+                 r'fixtures list|schedule|transfer rumours',low): score-=5
+    return score
+
+
+# Translation is presentation-only; original source titles are retained.
+_TRANSLATION_CACHE = {}
+def _translate_title_tr(title):
+    title = str(title or '').strip()
+    if not title: return title, False
+    if title in _TRANSLATION_CACHE: return _TRANSLATION_CACHE[title]
+    # Public translation endpoint: best effort, never fabricate a translation.
+    # Fail closed to the original title if unavailable or malformed.
+    try:
+        response = requests.get('https://translate.googleapis.com/translate_a/single',
+            params={'client':'gtx','sl':'auto','tl':'tr','dt':'t','q':title},
+            timeout=(2,3), headers={'User-Agent':'Mozilla/5.0'})
         response.raise_for_status()
-        root = ET.fromstring(response.content[:250000])
-        items=[]
-        for node in root.findall('./channel/item')[:8]:
-            title=(node.findtext('title') or '').strip()
-            link=(node.findtext('link') or '').strip()
-            published=(node.findtext('pubDate') or '').strip()
-            if not title or not link.startswith('https://'): continue
-            items.append({'title':title[:220],'url':link,'published':published,'verified':False})
-        result={'status':'ok' if items else 'no_results', 'sources':items[:5],
-                'note':'Haber başlıkları doğrulanmamış araştırma ipuçlarıdır; kadro/sakatlık verisi olarak otomatik kullanılmaz.'}
-    except (requests.RequestException, ET.ParseError, ValueError) as exc:
-        result={'status':'unavailable','sources':[], 'note':f'İnternet haber taraması erişilemedi ({type(exc).__name__}); maç analizi istatistikle devam ediyor.'}
+        payload=response.json()
+        translated=''.join(part[0] for part in payload[0] if part and isinstance(part[0],str)).strip()
+        if not translated or len(translated)>500:
+            raise ValueError('empty or malformed translation')
+        value=(unescape(translated), True)
+    except (requests.RequestException,ValueError,TypeError,IndexError,KeyError,AttributeError):
+        value=(title, False)
+    if len(_TRANSLATION_CACHE)>500: _TRANSLATION_CACHE.clear()
+    _TRANSLATION_CACHE[title]=value
+    return value
+
+def research_match(home, away, kickoff=None):
+    """Filter dated RSS leads by exact team relevance; never claim verified injuries."""
+    if os.getenv('PREMATCH_WEB_RESEARCH','1').lower() in ('0','false','off'):
+        return {'status':'disabled','sources':[],'note':'İnternet araştırması kapalı.'}
+    home=str(home or '').strip(); away=str(away or '').strip()
+    if not _team_tokens(home) or not _team_tokens(away):
+        return {'status':'no_results','sources':[],'note':'Takım adları araştırma için yetersiz.'}
+    match_dt=_fixture_date(kickoff)
+    reference=match_dt or datetime.now(timezone.utc)
+    key=(home,away,reference.date().isoformat())
+    with _LOCK:
+        cached=_NEWS_CACHE.get(key)
+        if cached and time.time()-cached[0]<3600: return cached[1]
+    # Target team names instead of broad football news, with two independent searches.
+    queries=[f'"{home}" "{away}"',f'"{home}" (injury OR lineup OR verletzt OR kader)',
+             f'"{away}" (injury OR lineup OR verletzt OR kader)']
+    found={}; failures=0
+    for query in queries:
+        try:
+            url='https://news.google.com/rss/search?'+urlencode({'q':query,'hl':'en','gl':'GB','ceid':'GB:en'})
+            response=requests.get(url,timeout=(2,4),headers={'User-Agent':'GolMerkeziPrematchResearch/2.0'})
+            response.raise_for_status()
+            root=ET.fromstring(response.content[:250000])
+            for node in root.findall('./channel/item')[:20]:
+                title=(node.findtext('title') or '').strip()
+                link=(node.findtext('link') or '').strip()
+                published=(node.findtext('pubDate') or '').strip()
+                if not title or not link.startswith('https://'): continue
+                score=_article_relevance(title,home,away)
+                if score<=0: continue
+                try:
+                    pub=parsedate_to_datetime(published).astimezone(timezone.utc)
+                except (TypeError,ValueError,IndexError,OverflowError): continue
+                # Max 14 days before kickoff, and no post-match news.
+                if not reference-timedelta(days=14)<=pub<=reference+timedelta(hours=2): continue
+                unique=re.sub(r'\W+','',title.casefold())[:110]
+                if unique not in found or found[unique][0]<score:
+                    found[unique]=(score,{'title':title[:220],'url':link,
+                        'published':published,'verified':False})
+        except (requests.RequestException,ET.ParseError,ValueError):
+            failures+=1
+    items=[v[1] for v in sorted(found.values(),key=lambda x:x[0],reverse=True)[:5]]
+    for item in items:
+        original=item['title']
+        translated, success=_translate_title_tr(original)
+        item['original_title']=original
+        item['title']=translated
+        item['translated_tr']=success
+        item['language_note']=('Türkçe çeviri' if success else
+                               'Çeviri servisine ulaşılamadı; özgün başlık gösteriliyor')
+    status='ok' if items else ('unavailable' if failures==len(queries) else 'no_results')
+    note=('Yalnızca takımlarla ilgili ve maç tarihine yakın haber başlıkları listelenir. '
+          'Türkçe başlıklar otomatik çeviridir; özgün haber bağlantısı korunur. '
+          'Başlıklar doğrulanmış sakatlık/kadro bilgisi değildir; tahmine otomatik katılmaz.'
+          if items else 'Maçla doğrudan ilgili güncel ve doğrulanabilir haber bulunamadı; eski veya alakasız sonuçlar gösterilmedi.')
+    result={'status':status,'sources':items,'note':note}
     with _LOCK: _NEWS_CACHE[key]=(time.time(),result)
     return result
 
