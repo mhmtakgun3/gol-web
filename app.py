@@ -3218,35 +3218,65 @@ def api_prematch_analyze():
                     lineup_fit=None)
         candidates.append(item)
 
-    # Fiyat varsa değer sıralaması, yoksa senaryo olasılığı. Bir market ailesinden
-    # birden fazla seçim seçmeyerek aynı sonuca bağlı üç kupon göstermeyiz.
-    priced_options = [c for c in candidates if c["coupon_eligible"]]
-    priced_options.sort(key=lambda x:(x["expected_value"],x["model_probability"]),reverse=True)
-    scenario_options = sorted(candidates,key=lambda x:x["model_probability"],reverse=True)
-    chosen = []
-    used = set()
-    for candidate in priced_options + scenario_options:
-        if candidate["market"] in {x["market"] for x in chosen}:
-            continue
-        family = candidate["family"]
-        if family in used:
+    # v5.1: Analiz, fiyat ve oynanabilirlik AYRI kararlardır.
+    # Düşük fiyatlı yüksek olasılık ana kart olamaz. Oransız BetBuilder
+    # hesaplanır ama gerçek fiyatmış gibi gösterilmez.
+    def category(item):
+        prob = item["model_probability"]
+        quality = analysis["data_quality"]
+        if quality == "good" and prob >= .72:
+            return "green"
+        if quality != "poor" and prob >= .60:
+            return "yellow"
+        return "red"
+
+    def set_role(item, primary=False):
+        item["risk_level"] = category(item)
+        item["decision_role"] = ("ANA ANALİZ" if primary else
+            {"green":"GÜÇLÜ ALTERNATİF", "yellow":"DENGELİ ALTERNATİF",
+             "red":"RİSKLİ ALTERNATİF"}[item["risk_level"]])
+        item["is_main"] = primary
+        item["manual_review"] = not item["coupon_eligible"]
+
+    def cluster(item):
+        code = item["market"]
+        if code.startswith("BB_HOME_") or code == "HOME": return "home_result"
+        if code.startswith("BB_AWAY_") or code == "AWAY": return "away_result"
+        if code == "BB_BTTS_OVER25": return "btts_goals"
+        if code in ("BTTS_YES", "BTTS_NO"): return "btts"
+        if code.startswith("OVER_") or code.startswith("UNDER_"): return "total_goals"
+        return item["family"]
+
+    # Tekli oynanabilir seçenekler: sadece >=1.30 ve doğrulanmış fiyat.
+    priced_options = [c for c in candidates if c["coupon_eligible"]
+                      and c["quote"] and c["quote"]["odd"] >= 1.30]
+    priced_options.sort(key=lambda c:(c["model_probability"],c["expected_value"]),reverse=True)
+    # Birleşik marketleri ayrıca değerlendir; oran olmasa bile görünür.
+    builders = [c for c in candidates if c["market"].startswith("BB_")
+                and c["model_probability"] >= .45]
+    builders.sort(key=lambda c:c["model_probability"],reverse=True)
+    chosen, used = [], set()
+    # Fiyatlı ve güvenilir bir tekli varsa öne al. Yoksa en iyi birleşik senaryo.
+    main = next((c for c in priced_options if c["model_probability"] >= .60), None)
+    if main is None:
+        main = builders[0] if builders else (priced_options[0] if priced_options else None)
+    if main:
+        chosen.append(main)
+        used.add(cluster(main))
+    # Alternatifler gerçekten farklı maç sonuçlarına dayanmalı.
+    alternatives = builders + priced_options
+    for candidate in alternatives:
+        if len(chosen) >= 3: break
+        if candidate in chosen or cluster(candidate) in used: continue
+        # Yüksek olasılıklı, 1.30 altı tekli marketleri gösterme.
+        if not candidate["market"].startswith("BB_") and (
+            not candidate["quote"] or candidate["quote"]["odd"] < 1.30):
             continue
         chosen.append(candidate)
-        used.add(family)
-        if len(chosen) == 3:
-            break
-    for item in chosen:
-        # Risk derecesi sıra numarasına göre değil, olasılık + veri yeterliliğine göre.
-        prob = item["model_probability"]
-        if analysis["data_quality"] == "good" and prob >= .72:
-            risk = "green"
-        elif analysis["data_quality"] != "poor" and prob >= .60:
-            risk = "yellow"
-        else:
-            risk = "red"
-        item["risk_level"] = risk
-        item["decision_role"] = {"green":"ANA TERCİH", "yellow":"DENGELİ TERCİH",
-                                 "red":"RİSKLİ TERCİH"}[risk]
+        used.add(cluster(candidate))
+    for i,item in enumerate(chosen):
+        set_role(item,primary=i==0)
+    # Ana analiz risk etiketi, olasılık sınıfını değiştirmez.
     note = ("Model analizi her maç için gösterilir. Doğrulanmış 1.30+ fiyatı olmayan "
             "seçimler manuel inceleme içindir, kupona alınmaz. "
             "BetBuilder fiyatları API tarafından doğrulanmadı; oran tahmin edilmedi.")
@@ -3827,7 +3857,7 @@ select{
       <span><span class="dot" style="background:#ff3f4f"></span>0–44 Zayıf</span>
       <span>🧠 BOT PICK</span>
     </div>
-    <div>Gol Sinyal Merkezi v5.0 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
+    <div>Gol Sinyal Merkezi v5.1 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
   </div>
 </div>
 
@@ -4331,7 +4361,7 @@ button{border:1px solid #2cab79;background:#0e6f50;color:white;cursor:pointer;fo
 .coupon-total{font-size:12px;color:#80e8b6;margin-top:7px;font-weight:800}.won{color:#72e7a9}.lost{color:#ff9198}.open{color:#ffd379}.void{color:#9aa7b8}.remove-coupon{margin-top:9px;font-size:11px;padding:6px 9px;background:#3a2028;border:1px solid #75404c;color:#ffb7bf;border-radius:7px;cursor:pointer}.close-analysis{font-size:11px;padding:6px 9px;background:#263247;border:1px solid #536783;color:#dce7f5;border-radius:7px;cursor:pointer}
 @media(max-width:680px){.grid,.form,.lineup-teams,.coupons{grid-template-columns:1fr}.bankroll{grid-template-columns:repeat(2,minmax(0,1fr))}.teams{font-size:16px}}
 </style></head><body><div class="wrap">
-<header><div><h1>📅 Maç Önü Tahminleri <span class="version">v5.0</span></h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
+<header><div><h1>📅 Maç Önü Tahminleri <span class="version">v5.1</span></h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
 <a href="/">← Canlı Gol Merkezi</a></header>
 <div class="toolbar">
   <label for="day">Maç günü</label>
@@ -4380,7 +4410,7 @@ async function getJson(url){
 const couponStoreKey="golPrematchCouponsV2";
 const pickHistoryKey="golPrematchPickHistoryV4";
 const couponStake=1000;
-const couponStrategyVersion="v5.0";
+const couponStrategyVersion="v5.1";
 function couponStore(){try{return JSON.parse(localStorage.getItem(couponStoreKey)||"{}")||{}}catch{return {}}}
 function saveCouponStore(store){localStorage.setItem(couponStoreKey,JSON.stringify(store))}
 function pickHistory(){try{return JSON.parse(localStorage.getItem(pickHistoryKey)||"[]")||[]}catch{return []}}
@@ -4664,7 +4694,7 @@ function renderFixtures(){
           analyzedMatches.set(Number(m.id),{match:m,analysis:a});
           registerPickHistory(m,a);
           const picks=a.suggestions.length
-            ? a.suggestions.map(p=>`<div class="pick" style="border:2px solid ${p.risk_level==="green"?"#19ba72":p.risk_level==="yellow"?"#e8b93e":"#e35353"};background:${p.risk_level==="green"?"#0e352a":p.risk_level==="yellow"?"#40341a":"#3d1d26"}"><b>${esc(p.label)}</b><div class="quote">${esc(p.decision_role||"ANA TERCİH")} · Oran ${p.quote?`${Number(p.quote.odd).toFixed(2)} · ${esc(p.quote.bookmaker)}`:"Doğrulanmadı · Manuel değerlendir"}</div><div class="reason">${esc(p.quote?.market_name||"BetBuilder / oran yok")}: ${esc(p.quote?.selection||"Tahmini tercih")}${quoteTime(p.quote?.updated)?` · Güncelleme: ${esc(quoteTime(p.quote.updated))}`:""}</div><div class="pick-why"><b>Neden bu tercih?</b><br>${esc(p.explanation || p.reason)}</div><div class="reason">Tahmini olasılık ${p.model_probability!=null?`${(Number(p.model_probability)*100).toFixed(1).replace(".",",")}%`:"-"} · Oranın ima ettiği ${p.implied_probability!=null?`${(Number(p.implied_probability)*100).toFixed(1).replace(".",",")}%`:"-"} · Değer farkı ${p.value_edge_pct!=null?`${Number(p.value_edge_pct)>=0?"+":""}${Number(p.value_edge_pct).toFixed(1).replace(".",",")}%`:"-"}</div><div class="reason">${esc(p.probability_basis||"Market özelinde form verileri kullanıldı.")}</div></div>`).join("")
+            ? a.suggestions.map(p=>`<div class="pick" style="border:2px solid ${p.risk_level==="green"?"#19ba72":p.risk_level==="yellow"?"#e8b93e":"#e35353"};background:${p.risk_level==="green"?"#0e352a":p.risk_level==="yellow"?"#40341a":"#3d1d26"}"><b>${esc(p.label)}</b><div class="quote">${esc(p.decision_role||"ANALİZ")} · Oran ${p.quote&&Number(p.quote.odd)>=1.30?`${Number(p.quote.odd).toFixed(2)} · ${esc(p.quote.bookmaker)}`:"Doğrulanmadı · Manuel değerlendir"}</div><div class="reason">${esc(p.quote?.market_name||"Model senaryosu / oran yok")}: ${esc(p.quote?.selection||"Tahmini tercih")}${quoteTime(p.quote?.updated)?` · Güncelleme: ${esc(quoteTime(p.quote.updated))}`:""}</div><div class="pick-why"><b>Neden bu tercih?</b><br>${esc(p.explanation || p.reason)}</div><div class="reason">Tahmini olasılık ${p.model_probability!=null?`${(Number(p.model_probability)*100).toFixed(1).replace(".",",")}%`:"-"} · Oranın ima ettiği ${p.implied_probability!=null?`${(Number(p.implied_probability)*100).toFixed(1).replace(".",",")}%`:"-"} · Değer farkı ${p.value_edge_pct!=null?`${Number(p.value_edge_pct)>=0?"+":""}${Number(p.value_edge_pct).toFixed(1).replace(".",",")}%`:"-"}</div><div class="reason">${esc(p.probability_basis||"Market özelinde form verileri kullanıldı.")}</div></div>`).join("")
             : `<div class="pas">PAS • ${a.candidate_count ? "Modelde eğilim var, ancak fiyat koşulu sağlanmadı." : "Yeterli ortak veri işareti yok."}</div>`;
           box.innerHTML=`<div style="display:flex;justify-content:flex-end;margin-bottom:8px"><button type="button" class="close-analysis">✕ Analizi kapat</button></div><div class="form"><div><b>${esc(a.home)}</b><br>${esc(formText(a.home_form,"home"))}</div>
             <div><b>${esc(a.away)}</b><br>${esc(formText(a.away_form,"away"))}</div></div>
