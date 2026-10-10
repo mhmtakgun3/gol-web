@@ -3802,7 +3802,7 @@ select{
       <span><span class="dot" style="background:#ff3f4f"></span>0–44 Zayıf</span>
       <span>🧠 BOT PICK</span>
     </div>
-    <div>Gol Sinyal Merkezi v6.0 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
+    <div>Gol Sinyal Merkezi v6.3 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
   </div>
 </div>
 
@@ -4306,7 +4306,7 @@ button{border:1px solid #2cab79;background:#0e6f50;color:white;cursor:pointer;fo
 .coupon-total{font-size:12px;color:#80e8b6;margin-top:7px;font-weight:800}.won{color:#72e7a9}.lost{color:#ff9198}.open{color:#ffd379}.void{color:#9aa7b8}.remove-coupon{margin-top:9px;font-size:11px;padding:6px 9px;background:#3a2028;border:1px solid #75404c;color:#ffb7bf;border-radius:7px;cursor:pointer}.close-analysis{font-size:11px;padding:6px 9px;background:#263247;border:1px solid #536783;color:#dce7f5;border-radius:7px;cursor:pointer}
 @media(max-width:680px){.grid,.form,.lineup-teams,.coupons{grid-template-columns:1fr}.bankroll{grid-template-columns:repeat(2,minmax(0,1fr))}.teams{font-size:16px}}
 </style></head><body><div class="wrap">
-<header><div><h1>📅 Maç Önü Tahminleri <span class="version">v6.0</span></h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
+<header><div><h1>📅 Maç Önü Tahminleri <span class="version">v6.3</span></h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
 <a href="/">← Canlı Gol Merkezi</a></header>
 <div class="toolbar">
   <label for="day">Maç günü</label>
@@ -4317,7 +4317,7 @@ button{border:1px solid #2cab79;background:#0e6f50;color:white;cursor:pointer;fo
 </div>
 <div class="hint">Bir ülke seçildiğinde o ülkenin uygun tüm alt ligleri birlikte gösterilir • Saatler Türkiye saatidir • Analiz, açtığın maç için yapılır.</div>
 <section class="coupon-panel">
-  <div class="coupon-head"><div><h2>🎟️ Botun Sanal Bahis Defteri</h2><div class="coupon-help">Bot yalnızca 3 farklı maçtan, kalite ve risk eşiğini geçen kupon oluşturur. Her kupon 1.000 TL'dir; kupon sayısı sabit değildir. Aynı maç aktif kuponlarda en fazla 2 kez kullanılabilir.</div></div>
+  <div class="coupon-head"><div><h2>🎟️ Botun Sanal Bahis Defteri</h2><div class="coupon-help">Bot yalnızca doğrulanmış fiyatı olan en az 3 farklı maçtan kupon oluşturur. Her kupon 1.000 TL'dir; kupon sayısı sabit değildir. Aynı maç aktif kuponlarda en fazla 2 kez kullanılabilir.</div></div>
   <button id="makeCoupons" type="button">Botun oynayacağı kuponları oluştur</button></div>
   <div id="bankroll" class="bankroll"></div><div id="learningStats" class="learning-stats"></div><div id="couponState" class="coupon-help">Henüz kupon oluşturulmadı.</div><div id="coupons" class="coupons"></div>
 </section>
@@ -4355,7 +4355,7 @@ async function getJson(url){
 const couponStoreKey="golPrematchCouponsV2";
 const pickHistoryKey="golPrematchPickHistoryV4";
 const couponStake=1000;
-const couponStrategyVersion="v6.0";
+const couponStrategyVersion="v6.3";
 function couponStore(){try{return JSON.parse(localStorage.getItem(couponStoreKey)||"{}")||{}}catch{return {}}}
 function saveCouponStore(store){localStorage.setItem(couponStoreKey,JSON.stringify(store))}
 function pickHistory(){try{return JSON.parse(localStorage.getItem(pickHistoryKey)||"[]")||[]}catch{return []}}
@@ -4403,25 +4403,38 @@ function historyQuality(pick){
   return {n:h.n,won:h.won,rate:h.rate,adjusted};
 }
 function candidatePool(){
-  const pool=[],stats={suggestions:0,lowProbability:0,lowOdd:0,lowValue:0,weakHistory:0};
+  const pool=[],stats={matches:analyzedMatches.size,suggestions:0,priced:0,lowProbability:0,lowOdd:0,lowValue:0,weakHistory:0,eligible:0};
   for(const [fixture,item] of analyzedMatches){
-    for(const pick of item.analysis.suggestions||[]){
+    // Ekranda görünen 2 seçime değil, analiz edilen TÜM marketlere bak.
+    const picks=item.analysis.all_suggestions||item.analysis.suggestions||[];
+    let best=null;
+    for(const pick of picks){
       stats.suggestions++;
       const odd=Number(pick.quote?.odd||0),baseP=Number(pick.model_probability||0);
-      const hist=historyQuality(pick),p=hist.adjusted,implied=Number(pick.implied_probability||0),edge=(p-implied)*100;
-      if(p<0.70){stats.lowProbability++;continue;}
-      if(odd<1.30){stats.lowOdd++;continue;}
-      if(edge<4.0){stats.lowValue++;continue;}
-      if(hist.n>=12&&hist.rate<0.60){stats.weakHistory++;continue;}
-      pool.push({fixture:Number(fixture),home:item.match.home,away:item.match.away,kickoff:item.match.kickoff,
-        country:item.match.country,league:item.match.league,market:pick.market,label:pick.label,
-        confidence:Number(pick.confidence||0),modelProbability:p,baseModelProbability:baseP,
-        impliedProbability:implied,valueEdge:edge,historicalRate:hist.rate,historicalN:hist.n,
-        odd,bookmaker:pick.quote?.bookmaker||"",status:"OPEN"});
+      if(!Number.isFinite(baseP)||baseP<=0||baseP>=1)continue;
+      if(!Number.isFinite(odd)||odd<1.30){stats.lowOdd++;continue;}
+      stats.priced++;
+      const hist=historyQuality(pick);
+      // Geçmişte 12+ sonuç yokken yapay güven artışı uygulanmaz.
+      const p=hist.n>=12?Math.min(baseP,Number(hist.adjusted)):baseP;
+      if(p<0.52){stats.lowProbability++;continue;}
+      const ev=p*odd-1,edge=(p-1/odd)*100;
+      if(ev<0.02){stats.lowValue++;continue;}
+      if(hist.n>=20&&hist.rate<0.48){stats.weakHistory++;continue;}
+      const candidate={fixture:Number(fixture),home:item.match.home,away:item.match.away,
+        kickoff:item.match.kickoff,country:item.match.country,league:item.match.league,
+        market:pick.market,label:pick.label,confidence:pick.confidence||"",
+        modelProbability:p,baseModelProbability:baseP,impliedProbability:1/odd,
+        valueEdge:edge,historicalRate:hist.rate,historicalN:hist.n,
+        odd,bookmaker:pick.quote.bookmaker||"",status:"OPEN"};
+      // Bir maçtan yalnızca tek seçim: kuponlarda aynı maçın riskini çoğaltma.
+      if(!best||candidate.modelProbability*candidate.odd-1 >
+          best.modelProbability*best.odd-1)best=candidate;
     }
+    if(best)pool.push(best);
   }
-  pool.sort((a,b)=>b.valueEdge-a.valueEdge||b.modelProbability-a.modelProbability||b.confidence-a.confidence);
-  pool.stats=stats;return pool;
+  pool.sort((a,b)=>(b.modelProbability*b.odd-1)-(a.modelProbability*a.odd-1));
+  stats.eligible=pool.length;pool.stats=stats;return pool;
 }
 function marketFamily(m){
   if(["HOME","AWAY","DC_1X","DC_X2"].includes(m))return "RESULT";
@@ -4432,7 +4445,7 @@ function marketFamily(m){
 function marketCompatible(a,b){ return true; }
 function couponRisk(probability){
   const p=Number(probability||0);
-  if(p>=0.50)return {key:"safe",label:"🟢 GÜVENLİ",risk:"DÜŞÜK"};
+  if(p>=0.50)return {key:"safe",label:"🟢 GÖRECELİ DÜŞÜK RİSK",risk:"DÜŞÜK"};
   if(p>=0.35)return {key:"balanced",label:"🟡 DENGELİ",risk:"ORTA"};
   if(p>=0.25)return {key:"value",label:"🔴 DEĞER",risk:"YÜKSEK"};
   return {key:"none",label:"❌ NO BET",risk:"ÇOK YÜKSEK"};
@@ -4449,21 +4462,21 @@ function buildCoupons(){
     if(new Set(legs.map(x=>x.fixture)).size!==legs.length){rejected.sameMatch++;return;}
     if(legs.some(x=>(usedToday.get(Number(x.fixture))||0)>=2)){rejected.repeatLimit++;return;}
     for(let i=0;i<legs.length;i++)for(let j=i+1;j<legs.length;j++)if(!marketCompatible(legs[i],legs[j])){rejected.correlation++;return;}
-    if(new Set(legs.map(x=>marketFamily(x.market))).size<2){rejected.correlation++;return;}
+    // Farklı maçlarda aynı market ailesi otomatik ret nedeni değildir.
     const signature=legs.map(x=>`${x.fixture}:${x.market}`).sort().join("|");
     if(existingSignatures.has(signature)){rejected.duplicate++;return;}
     const total=legs.reduce((s,x)=>s*x.odd,1);
     const rawProbability=legs.reduce((p,x)=>p*x.modelProbability,1);
-    const probability=rawProbability*0.94;
+    const probability=rawProbability*0.90; // Temkinli iskonto; kalibrasyon yerine geçmez.
     const expectedReturn=couponStake*total*probability;
     const expectedProfit=expectedReturn-couponStake;
     const expectedRoi=expectedProfit/couponStake;
     const minProbability=legs.length===2?.40:legs.length===3?.32:.27;
     const minEdge=Math.min(...legs.map(x=>x.valueEdge));
     const avgP=legs.reduce((s,x)=>s+x.modelProbability,0)/legs.length;
-    if(total<1.70||total>5.00){rejected.totalOdd++;return;}
-    if(probability<.35||avgP<.73||minEdge<4.0){rejected.probability++;return;}
-    if(expectedRoi<.03){rejected.roi++;return;}
+    if(total<1.70||total>12.00){rejected.totalOdd++;return;}
+    if(probability<.16||avgP<.52||minEdge<2.0){rejected.probability++;return;}
+    if(expectedRoi<.02){rejected.roi++;return;}
     const risk=couponRisk(probability);
     if(risk.key==="none")return;
     const historicalBonus=legs.reduce((s,x)=>s+Math.min(5,Math.max(0,(x.historicalRate-.60)*20)),0);
@@ -4491,12 +4504,12 @@ function buildCoupons(){
   if(!chosen.length){
     saveCouponStore(store);renderCoupons(existing);
     const s=pool.stats||{};
-    document.getElementById("couponState").textContent=`v6.0 bu turda kaliteli kupon üretmedi: ${s.suggestions||0} tercih incelendi; ${s.lowProbability||0} düşük olasılık, ${s.lowValue||0} düşük değer, ${s.weakHistory||0} zayıf geçmiş, ${s.lowOdd||0} düşük oran nedeniyle elendi. Zorla kupon oynamak yerine NO BET.`;
+    document.getElementById("couponState").textContent=`v6.3: ${s.matches||0} maçta ${s.suggestions||0} market incelendi. ${s.priced||0} markette 1.30+ doğrulanmış oran var; ${s.eligible||0} farklı maç kupona aday. 3 uygun farklı maç ve kabul edilebilir fiyat/değer birleşimi oluşmadı. Oransız BetBuilder otomatik kupona eklenmez.`;
     return;
   }
   store[loadedDate]=[...existing,...chosen];saveCouponStore(store);renderCoupons(store[loadedDate]);
   const safe=chosen.filter(c=>c.riskKey==="safe").length,balanced=chosen.filter(c=>c.riskKey==="balanced").length,value=chosen.filter(c=>c.riskKey==="value").length;
-  document.getElementById("couponState").textContent=`v5.0: ${chosen.length} kaliteli kupon oluşturuldu • 🟢 ${safe} güvenli • 🟡 ${balanced} dengeli • 🔴 ${value} değer • toplam ${chosen.length*couponStake.toLocaleString("tr-TR")} TL sanal bahis • kupon boyutu 3 maç.`;
+  document.getElementById("couponState").textContent=`v6.3: ${chosen.length} sanal kupon oluşturuldu • 🟢 ${safe} güvenli • 🟡 ${balanced} dengeli • 🔴 ${value} değer • toplam ${chosen.length*couponStake.toLocaleString("tr-TR")} TL sanal bahis • kupon boyutu 3 maç.`;
 }
 
 function legResult(market,h,a,hh=null,ha=null){
