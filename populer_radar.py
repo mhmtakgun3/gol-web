@@ -384,11 +384,15 @@ button:hover{background:#0d967b}input{flex:1;min-width:190px}
 <div class="row" style="margin:14px 0"><input id="search" placeholder="Takım veya market ara…"></div>
 <div id="results" class="grid"></div><p id="updated" class="small"></p></section>
 </div><div id="botArea" style="display:none"><section class="panel"><div class="row"><h2 style="margin:0;flex:1">🤖 Bağımsız Bot Analizleri</h2><button id="analyzeBtn" onclick="runAnalysis()">Maçları Analiz Et</button></div><p>Son 8 maç, iç/deplasman formu ve mevcut kadro verileriyle analiz. Popülerlik tek başına seçim nedeni değildir.</p><div id="botResults" class="grid"><div class="empty">Analizi başlatmak için butona bas.</div></div></section><section class="panel"><h2>🎟️ Bot Kuponu</h2><p>En az 3 farklı maç, doğrulanmış 1.30+ oran, bağımsız model filtresi. Yeterli seçim yoksa kupon oluşturulmaz.</p><div id="couponResult" class="empty">Henüz analiz yapılmadı.</div></section></div><section class="panel"><h2>Bot nasıl yorumluyor?</h2>
-<p>Bu ilk aşamada yalnızca doğrulanabilen popülerlik verisi gösterilir. Model olasılığı veya bağımsız maç tahmini üretilmiş gibi gösterilmez. Sonraki aşamada her maç API-Football fikstürüyle eşleştirilip kadro, form ve haber analizine bağlanacaktır.</p>
+<p>Bot, API-Football son maç sonuçlarıyla iç/dış saha formunu hesaplar ve kalibre edilmemiş Poisson modelini kullanır. Bu hafif sürümde kadro, sakatlık ve haber doğrulaması yapılmaz; model yüzdeleri garanti değildir.</p>
 <p class="warning">1.30 altındaki oranlar tekli bahis önerisi değildir. Popüler seçimler otomatik kupona eklenmez.</p></section>
 </main><script>
 function showTab(which){document.getElementById('popularArea').style.display=which==='popular'?'':'none';document.getElementById('botArea').style.display=which==='bot'?'':'none';}
-async function runAnalysis(){const btn=document.getElementById('analyzeBtn');btn.disabled=true;document.getElementById('botResults').innerHTML='<div class="empty">Gerçek takım istatistikleri inceleniyor… Biraz sürebilir.</div>';try{const res=await fetch('/api/radar/analiz?limit=6');const d=await res.json();if(!res.ok)throw Error(d.error||'Analiz servisi hatası');document.getElementById('botResults').innerHTML=(d.analyses||[]).length?d.analyses.map(a=>`<article class="bet"><strong>${esc(a.title)}</strong><p class="small">Veri kalitesi: ${esc(a.data_quality||'bilinmiyor')} · ${esc(a.lineup_note||'')}</p>${a.error?`<p class="warning">${esc(a.error)}</p>`:(a.picks||[]).map(p=>`<div style="border-top:1px solid #294763;padding:9px 0"><b>${esc(p.market)}</b> · <span class="${p.eligible?'count':'warning'}">${esc(p.decision)}</span><p class="small">Model: ${p.model_probability!=null?'%'+(100*p.model_probability).toFixed(1):'hesaplanamadı'} · Doğrulanmış oran: ${p.odd?Number(p.odd).toFixed(2):'yok'} ${esc(p.bookmaker||'')}</p><p>${esc(p.reason||'')}</p></div>`).join('')}</article>`).join(''):'<div class="empty">Kesin eşleşen maç bulunamadı. Tahmin üretilmedi.</div>';document.getElementById('couponResult').innerHTML=d.coupon?`<b>${d.coupon.legs.map(x=>esc(x.title)+' — '+esc(x.market)+' ('+Number(x.odd).toFixed(2)+')').join('<hr>')}</b><p>Toplam oran: ${d.coupon.combined_odd} · Sanal tutar: 1.000 TL · Olası dönüş: ${d.coupon.potential_return.toLocaleString('tr-TR')} TL</p><p class="warning">Taslak kupon, gerçek bahis değildir. Olası dönüş garanti değildir.</p>`:'Kupon oluşturulmadı: En az 3 farklı maçta doğrulanmış oran ve yeterli model desteği bulunamadı.';if(d.errors?.length)document.getElementById('botResults').innerHTML+=`<p class="warning">Veri kaynağı: ${esc(d.errors[0])}</p>`;}catch(e){document.getElementById('botResults').textContent='Analiz hatası: '+e.message;}finally{btn.disabled=false;}}
+async function radarJSON(url){const r=await fetch(url);const ct=r.headers.get('content-type')||'';if(!ct.includes('application/json'))throw Error('Sunucu JSON yerine '+r.status+' döndürdü. Render loglarını kontrol edin.');const d=await r.json();if(!r.ok)throw Error(d.error||('HTTP '+r.status));return d;}
+function renderCoupon(analyses){const eligible=[];for(const a of analyses){const options=(a.picks||[]).filter(p=>p.eligible);options.sort((x,y)=>(y.value_edge_pct??-999)-(x.value_edge_pct??-999));if(options.length)eligible.push({...options[0],title:a.title,fixture_id:a.fixture_id});}const el=document.getElementById('couponResult');if(eligible.length<3){el.textContent='Kupon oluşturulmadı: En az 3 farklı maçta doğrulanmış 1.30+ oran ve yeterli model desteği bulunamadı. ('+eligible.length+'/3)';return;}const legs=eligible.slice(0,3);const total=legs.reduce((x,p)=>x*p.odd,1);el.innerHTML=legs.map(x=>'<p>'+esc(x.title)+' — '+esc(x.market)+' ('+Number(x.odd).toFixed(2)+')</p>').join('')+'<p>Toplam oran: '+total.toFixed(2)+' · Sanal tutar: 1.000 TL · Olası dönüş: '+(total*1000).toLocaleString('tr-TR')+' TL</p><p class="warning">Taslak kupon. Oranlar değişebilir, kazanç garanti değildir.</p>';}
+function renderAnalysis(a){return `<article class="bet"><strong>${esc(a.title)}</strong><p class="small">Veri kalitesi: ${esc(a.data_quality||'bilinmiyor')} · ${esc(a.lineup_note||'')}</p>${a.error?`<p class="warning">${esc(a.error)}</p>`:(a.picks||[]).map(p=>`<div style="border-top:1px solid #294763;padding:9px 0"><b>${esc(p.market)}</b> · <span class="${p.eligible?'count':'warning'}">${esc(p.decision)}</span><p class="small">Model: ${p.model_probability!=null?'%'+(100*p.model_probability).toFixed(1):'hesaplanamadı'} · Radar oranı: ${p.odd?Number(p.odd).toFixed(2):'yok'} ${esc(p.bookmaker||'')}</p><p>${esc(p.reason||'')}</p></div>`).join('')}</article>`;}
+async function runAnalysis(){const btn=document.getElementById('analyzeBtn'),out=document.getElementById('botResults');btn.disabled=true;out.innerHTML='<div class="empty">Maçlar hazırlanıyor…</div>';const analyses=[];let matched=0;try{for(let day=0;day<3;day++){out.insertAdjacentHTML('beforeend','<p class="small">'+(day+1)+'. gün fikstürü taranıyor…</p>');let d;try{d=await radarJSON('/api/radar/analiz?phase=prepare&day='+day);}catch(e){out.insertAdjacentHTML('beforeend','<p class="warning">'+esc(e.message)+'</p>');continue;}if(d.warning)out.insertAdjacentHTML('beforeend','<p class="warning">'+esc(d.warning)+'</p>');for(const m of d.matches||[]){if(matched>=6)break;matched++;out.insertAdjacentHTML('beforeend','<p class="small">Analiz ediliyor: '+esc(m.title)+'</p>');try{const r=await radarJSON('/api/radar/analiz?phase=match&day='+encodeURIComponent(m.day)+'&fixture='+encodeURIComponent(m.fixture_id));analyses.push(r.analysis);}catch(e){analyses.push({fixture_id:m.fixture_id,title:m.title,picks:[],error:e.message});}out.innerHTML=analyses.map(renderAnalysis).join('');renderCoupon(analyses);}if(matched>=6)break;}if(!analyses.length)out.insertAdjacentHTML('beforeend','<div class="empty">Kesin eşleşen maç bulunamadı veya API-Football erişimi başarısız. Tahmin üretilmedi.</div>');renderCoupon(analyses);}catch(e){out.insertAdjacentHTML('beforeend','<p class="warning">Analiz hatası: '+esc(e.message)+'</p>');}finally{btn.disabled=false;}}
+
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 let entries=[],comparisons=[];
 function drawComparisons(){
@@ -491,78 +495,133 @@ def _analysis_for_fixture(fixture, day):
             oldest=min(_analysis_cache,key=lambda k:_analysis_cache[k][0]);_analysis_cache.pop(oldest,None)
     return data
 
+# Free-tier: each request does one bounded unit of work, never six full analyses.
+from datetime import timedelta
+from zoneinfo import ZoneInfo
+from flask import current_app
+
+def _module():
+    import sys
+    return sys.modules.get("app") or sys.modules.get("__main__")
+
+def _api_form(mod, team_id, kickoff):
+    """Fetch last 30 games with a short per-call deadline; compute true 8-game form."""
+    if not mod.API_KEY:
+        raise ValueError("API_KEY tanımlı değil")
+    try:
+        response = requests.get(mod.API_BASE + "/fixtures", params={"team":team_id,"last":30,"timezone":"Europe/Istanbul"},
+            headers={"x-apisports-key":mod.API_KEY}, timeout=(2,5))
+        response.raise_for_status()
+        payload=response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise ValueError("Takım formu alınamadı: " + str(exc)[:110])
+    if payload.get("errors"):
+        raise ValueError("API-Football: " + str(payload["errors"])[:100])
+    finished=[]
+    for item in payload.get("response") or []:
+        fix=item.get("fixture") or {}; sides=item.get("teams") or {}; goals=item.get("goals") or {}
+        if (fix.get("status") or {}).get("short") not in ("FT","AET","PEN") or (fix.get("date") or "") >= kickoff:
+            continue
+        home=(sides.get("home") or {}).get("id")==team_id
+        away=(sides.get("away") or {}).get("id")==team_id
+        if not (home or away) or goals.get("home") is None or goals.get("away") is None: continue
+        a=int(goals["home" if home else "away"]); b=int(goals["away" if home else "home"])
+        finished.append({"date":fix.get("date") or "","venue":"home" if home else "away","scored":a,"conceded":b,
+            "win":a>b,"draw":a==b,"btts":a>0 and b>0,"over15":a+b>=2,"over25":a+b>=3,
+            "under25":a+b<=2,"over35":a+b>=4,"under35":a+b<=3,"scored2":a>=2,
+            "ht_scored":None,"ht_conceded":None})
+    finished.sort(key=lambda r:r["date"],reverse=True)
+    recent=finished[:8]
+    if len(recent)<5: return {"count":len(recent),"insufficient":True}
+    return {"count":len(recent),"all":mod._prematch_metrics(recent),
+        "home":mod._prematch_metrics([r for r in finished if r["venue"]=="home"][:8]),
+        "away":mod._prematch_metrics([r for r in finished if r["venue"]=="away"][:8])}
+
+def _cached_form(mod, team_id, kickoff):
+    key="form:"+str(team_id)
+    with _analysis_lock:
+        cached=_analysis_cache.get(key)
+        if cached and time.time()-cached[0]<1800:return cached[1]
+    data=_api_form(mod,team_id,kickoff)
+    with _analysis_lock:
+        _analysis_cache[key]=(time.time(),data)
+        if len(_analysis_cache)>60:
+            oldest=min(_analysis_cache,key=lambda k:_analysis_cache[k][0]);_analysis_cache.pop(oldest,None)
+    return data
+
+def _radar_rows():
+    # Popular tab loads these feeds first; cached data avoids 4 network calls per analysis.
+    if _cache.get("data") is None:
+        return None
+    return _cache["data"].get("entries") or []
+
 @radar_bp.get("/api/radar/analiz")
 def radar_analysis():
     try:
-        limit = max(1,min(8,int(request.args.get("limit", "4"))))
-    except ValueError: limit = 4
-    from datetime import timedelta
-    import sys
-    mod = sys.modules.get("app") or sys.modules.get("__main__")
-    if mod is None or not hasattr(mod,"prematch_fixtures"):
-        return jsonify({"error":"Maç önü servisleri yüklenmedi"}),503
-    radar = get_radar()
-    entries = radar.get("entries") or []
-    unique = {}
-    for r in entries:
-        if _market_code(r.get("market")):
-            unique.setdefault(_normalized_team(r.get("title")), []).append(r)
-    dates = [_date_for_radar()+timedelta(days=i) for i in range(3)]
-    fixtures=[]; errors=[]
-    for day in dates:
-        found,err=mod.prematch_fixtures(day)
-        if err: errors.append(str(err))
-        else: fixtures.extend([(day,f) for f in found or []])
-    analyses=[]; unmatched=0; seen=set()
-    for group in unique.values():
-        if len(analyses)>=limit: break
-        candidates=[(day,f) for day,f in fixtures if _match_fixture(group[0],[f])]
-        if len(candidates)!=1:
-            unmatched+=1;continue
-        day,fixture=candidates[0]
-        fid=(fixture.get("fixture") or {}).get("id")
-        if fid in seen:continue
-        seen.add(fid)
-        try:
-            data=_analysis_for_fixture(fixture,day)
-            by_code={x.get("market"):x for x in data.get("all_suggestions",[])}
-            picks=[]
-            for row in group:
-                code=_market_code(row.get("market"))
-                item=by_code.get(code)
-                if not item:continue
-                quote=item.get("quote") or {}
-                odds=quote.get("odd")
-                qualified=bool(item.get("coupon_eligible") and odds and float(odds)>=1.30)
-                picks.append({"market":row.get("market"),"source":row.get("source"),
-                   "model_probability":item.get("model_probability"),
-                   "reason":item.get("explanation") or item.get("reason"),
-                   "odd":odds,"bookmaker":quote.get("bookmaker"),
-                   "value_edge_pct":item.get("value_edge_pct"),
-                   "eligible":qualified,"decision":"Uygun" if qualified else "Kupona uygun değil"})
-            analyses.append({"fixture_id":fid,"title":group[0].get("title"),
-                "day":day.isoformat(),"data_quality":data.get("data_quality"),
-                "lineup_note":data.get("lineup_note"),"picks":picks,
-                "note":data.get("note"),"error":None})
-        except Exception as exc:
-            analyses.append({"fixture_id":fid,"title":group[0].get("title"),
-               "picks":[],"error":str(exc)[:180]})
-    # No invented legs: 3 distinct fixtures and verified odds only.
-    eligible=[]
-    for a in analyses:
-        options=[x for x in a.get("picks",[]) if x.get("eligible")]
-        if options:
-            options.sort(key=lambda x:(x.get("value_edge_pct") or -999),reverse=True)
-            eligible.append(dict(options[0],title=a["title"],fixture_id=a["fixture_id"]))
-    coupon=None
-    if len(eligible)>=3:
-        legs=eligible[:3]
-        product=1.0
-        for leg in legs:product*=float(leg["odd"])
-        coupon={"legs":legs,"combined_odd":round(product,2),"stake":1000,
-           "potential_return":round(1000*product,2),"status":"Taslak (oynanmadı)"}
-    return jsonify({"analyses":analyses,"coupon":coupon,"unmatched":unmatched,
-      "errors":errors,"note":"Yalnızca önümüzdeki 3 günün API-Football ile kesin eşleşen maçları analiz edilir. Kupon yalnızca veri kalitesi iyi ve doğrulanmış oranı olan tercihlerle oluşturulur."})
+        phase=request.args.get("phase", "prepare")
+        mod=_module()
+        if not mod or not hasattr(mod,"prematch_fixtures"):
+            return jsonify({"error":"Maç önü servisleri yüklenmedi"}),503
+        rows=_radar_rows()
+        if rows is None:
+            return jsonify({"error":"Önce Popüler Bahisler sekmesinde verilerin yüklenmesini bekleyin."}),409
+        if phase=="prepare":
+            offset=max(0,min(2,int(request.args.get("day","0"))))
+            day=datetime.now(ZoneInfo("Europe/Istanbul")).date()+timedelta(days=offset)
+            # One day only; next day is a separate HTTP request.
+            fixtures,error=mod.prematch_fixtures(day)
+            if error:return jsonify({"day":day.isoformat(),"matches":[],"warning":str(error)[:150]})
+            groups={}
+            for row in rows:
+                if _market_code(row.get("market")):
+                    groups.setdefault(_normalized_team(row.get("title")),[]).append(row)
+            matches=[];seen=set()
+            for group in groups.values():
+                fixture=_match_fixture(group[0],fixtures or [])
+                if fixture is None:continue
+                fid=(fixture.get("fixture") or {}).get("id")
+                if fid in seen:continue
+                seen.add(fid)
+                matches.append({"fixture_id":fid,"day":day.isoformat(),"title":group[0]["title"]})
+            return jsonify({"day":day.isoformat(),"matches":matches})
+        if phase!="match":return jsonify({"error":"Geçersiz analiz aşaması"}),400
+        fid=int(request.args.get("fixture","0"))
+        day=mod.prematch_day(request.args.get("day",""))
+        if not day or fid<=0:return jsonify({"error":"Geçersiz maç veya tarih"}),400
+        fixtures,error=mod.prematch_fixtures(day)
+        if error:return jsonify({"error":str(error)[:150]}),503
+        fixture=next((f for f in fixtures or [] if (f.get("fixture") or {}).get("id")==fid),None)
+        if not fixture:return jsonify({"error":"Maç artık fikstürde bulunmuyor"}),404
+        teams=fixture.get("teams") or {}; h=teams.get("home") or {}; a=teams.get("away") or {}
+        kickoff=(fixture.get("fixture") or {}).get("date") or ""
+        home=_cached_form(mod,int(h["id"]),kickoff)
+        away=_cached_form(mod,int(a["id"]),kickoff)
+        from prematch_intelligence import analyze_match
+        model=analyze_match(home,away,{})
+        markets={m["market"]:m for m in model["markets"]}
+        title=h.get("name","")+" - "+a.get("name","")
+        matching=[r for r in rows if _match_fixture(r,[fixture]) and _market_code(r.get("market")) in markets]
+        picks=[]
+        for code in sorted({_market_code(r.get("market")) for r in matching}):
+            rlist=[r for r in matching if _market_code(r.get("market"))==code]
+            # Prefer iddaa webOdd/Bilyoner/Misli; Nesine odds are unverified.
+            priced=[r for r in rlist if r.get("source")!="Nesine" and isinstance(r.get("odd"),(int,float)) and 1.30<=r["odd"]<=100]
+            best=max(priced,key=lambda r:r["odd"]) if priced else None
+            item=markets[code];prob=item["model_probability"]
+            edge=prob*best["odd"]-1 if best else None
+            qualified=bool(best and model["data_quality"]=="good" and prob>=.60 and edge>=.04)
+            picks.append({"market":rlist[0]["market"],"source":best["source"] if best else None,
+                "model_probability":prob,"reason":item["reason"],"odd":best["odd"] if best else None,
+                "bookmaker":best["source"] if best else None,"value_edge_pct":round(100*(prob-1/best["odd"]),1) if best else None,
+                "eligible":qualified,"decision":"Uygun" if qualified else "Kupona uygun değil"})
+        return jsonify({"analysis":{"fixture_id":fid,"title":title,"day":day.isoformat(),
+            "data_quality":model["data_quality"],"lineup_note":"Kadro/haber kontrolü bu hafif sürümde yapılmadı.",
+            "picks":picks,"error":None},"note":"Oranlar radar anlık görüntüsündendir; oynama öncesi yeniden doğrulanmalıdır."})
+    except (ValueError,KeyError,TypeError,requests.RequestException) as exc:
+        return jsonify({"error":str(exc)[:200]}),503
+    except Exception:
+        current_app.logger.exception("Radar analiz hatası")
+        return jsonify({"error":"Sunucu analiz sırasında beklenmeyen hata verdi. Render logunu kontrol edin."}),500
 
 @radar_bp.get("/radar")
 def radar_page():
