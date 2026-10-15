@@ -196,36 +196,78 @@ def analyze_match(home, away, h2h=None):
         'model_note':'Form örneklemine göre daraltılmış ortak Poisson modeli; rakip gücü, kadro ve lig bazlı kalibrasyon henüz yok. Haber başlıkları doğrulanmadan modele katılmaz.'}
 
 def risk_level(prob, quality):
-    # Display-only heuristic, not a validated confidence interval.
-    if quality == 'good' and prob >= .72: return 'green'
+    """Risk is an uncertainty label, never a validated win probability."""
+    if quality == 'good' and prob >= .75: return 'green'
     if quality != 'poor' and prob >= .60: return 'yellow'
     return 'red'
 
+
+def _scenario_family(market):
+    if market in ('HOME', 'BB_HOME_UNDER55', 'BB_HOME_OVER35', 'BB_HOME_TEAM15'):
+        return 'home_result'
+    if market in ('AWAY', 'BB_AWAY_UNDER55', 'BB_AWAY_OVER35', 'BB_AWAY_TEAM15'):
+        return 'away_result'
+    if market in ('BTTS_YES', 'BB_BTTS_OVER25'):
+        return 'btts_yes'
+    if market == 'BTTS_NO': return 'btts_no'
+    if market in ('OVER_1_5', 'OVER_2_5', 'OVER_3_5'): return 'goals_over'
+    if market in ('UNDER_2_5', 'UNDER_3_5'): return 'goals_under'
+    return market
+
+
 def choose_markets(candidates, quality):
-    """Separate analytical scenarios from actual price eligibility."""
+    """Always report a football scenario; distinguish it from an executable bet.
+
+    No price is invented for a builder. 1.30 floor applies to executable bets,
+    not to model calculations. No arbitrary promotion of weak candidates.
+    """
     for c in candidates:
-        c['risk_level']=risk_level(c['model_probability'],quality)
-        c['decision_role']={'green':'GÜÇLÜ ANALİZ','yellow':'DENGELİ ANALİZ','red':'RİSKLİ ANALİZ'}[c['risk_level']]
-    priced=[c for c in candidates if c.get('coupon_eligible') and c.get('quote')
-            and float(c['quote'].get('odd') or 0)>=1.30 and c['model_probability']>=.60]
-    priced.sort(key=lambda c:(c['model_probability'],c.get('expected_value') or 0),reverse=True)
-    builders=sorted((c for c in candidates if c['market'].startswith('BB_')),
-                    key=lambda c:c['model_probability'],reverse=True)
-    # No fake priced builder: show best model scenario even if all probabilities are low.
-    pool=priced+builders
+        p=c.get('model_probability') or 0
+        c['risk_level']=risk_level(p,quality)
+        c['decision_role']={'green':'GÜÇLÜ SENARYO','yellow':'DENGELİ SENARYO',
+                            'red':'RİSKLİ SENARYO'}[c['risk_level']]
+        q=c.get('quote') or {}
+        try: odd=float(q.get('odd') or 0)
+        except (ValueError,TypeError): odd=0
+        c['price_verified']=bool(odd>=1.30 and not c['market'].startswith('BB_'))
+        c['coupon_eligible']=bool(c['price_verified'] and c.get('coupon_eligible')
+                                  and p>=.60 and quality=='good')
+        c['manual_review']=not c['coupon_eligible']
+    # Compare priced candidates first, but don't make a 35% longshot the headline.
+    priced=[c for c in candidates if c['price_verified'] and c['model_probability']>=.60]
+    priced.sort(key=lambda c:(c['model_probability'],c.get('expected_value') or -1),reverse=True)
+    # Model-only research: consider single markets AND correlated builders.
+    # 1.5 over at 1.08 is still a useful observation, never an executable pick.
+    unpriced=[c for c in candidates if not c['price_verified']]
+    unpriced.sort(key=lambda c:c['model_probability'],reverse=True)
+    builders=[c for c in unpriced if c['market'].startswith('BB_')]
+    builders.sort(key=lambda c:c['model_probability'],reverse=True)
     selected=[]
-    def family(c):
-        code=c['market']
-        if code.startswith('BB_HOME_') or code=='HOME': return 'home_win'
-        if code.startswith('BB_AWAY_') or code=='AWAY': return 'away_win'
-        if code=='BB_BTTS_OVER25': return 'btts_goals'
-        return c['family']
-    for c in pool:
-        if any(family(x)==family(c) for x in selected): continue
-        selected.append(c)
+    def add(item):
+        family=_scenario_family(item['market'])
+        if family in {_scenario_family(x['market']) for x in selected}: return False
+        selected.append(item)
+        return True
+    # If available, first an attractive priced market, otherwise a strong builder
+    # model scenario, and finally a representative single-market football forecast.
+    for c in priced:
+        if add(c): break
+    if not selected:
+        for c in builders:
+            if c['model_probability']>=.50 and add(c): break
+    if not selected:
+        for c in unpriced:
+            if c['model_probability']>=.50 and add(c): break
+    for group in (builders,priced,unpriced):
+        for c in group:
+            if len(selected)>=2: break
+            if c['model_probability']<.50: continue
+            add(c)
         if len(selected)>=2: break
     for i,c in enumerate(selected):
         c['is_main']=i==0
-        c['decision_role']=('ANA ANALİZ · ' if i==0 else 'ALTERNATİF · ')+c['decision_role']
-        c['manual_review']=not bool(c.get('coupon_eligible'))
+        c['decision_role']=('ANA MAÇ SENARYOSU · ' if i==0 else 'ALTERNATİF · ')+c['decision_role']
+        c['explanation']=(c.get('explanation') or c.get('reason') or '') + (
+            ' Gerçek oran doğrulanmadığı için otomatik kupona alınmaz.'
+            if not c['price_verified'] else ' Fiyat 1.30 eşiğini karşılıyor; model riski ayrıca değerlendirilmelidir.')
     return selected
