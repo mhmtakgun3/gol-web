@@ -4725,6 +4725,9 @@ def prematch_page():
     )
 
 
+from populer_radar import radar_bp
+app.register_blueprint(radar_bp)
+
 # Gunicorn import ettiğinde scanner başlasın.
 ensure_scanner_started()
 
