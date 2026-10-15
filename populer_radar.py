@@ -2,11 +2,12 @@
 Bir platform veri sunmuyorsa durum açıkça belirtilir; popülerlik başarı demek değildir.
 """
 from __future__ import annotations
-from flask import Blueprint, jsonify, render_template_string
+from flask import Blueprint, jsonify, render_template_string, request
 from html.parser import HTMLParser
 from datetime import datetime, timezone
 import re
 import requests
+import math
 import time
 import threading
 
@@ -17,6 +18,7 @@ URLS = {
  "Nesine": "https://www.nesine.com/",
  "iddaa.com": "https://www.iddaa.com/",
 }
+BILYONER_API = "https://www.bilyoner.com/api/v3/mobile/aggregator/gamelist/events/selections/popular?bulletinType=2&mainPage=false&tabType=1"
 _cache = {"at": 0, "data": None}
 _lock = threading.Lock()
 
@@ -65,33 +67,78 @@ def parse_bilyoner(html):
         if k not in uniq or h["count"]>uniq[k]["count"]:uniq[k]=h
     return sorted(uniq.values(),key=lambda h:h["count"],reverse=True)[:60]
 
+def parse_bilyoner_json(payload):
+    """Only accept explicit market/count/odd fields, no inferred betting data."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+        raise ValueError("Beklenmeyen Bilyoner JSON biçimi")
+    results = []
+    for obj in payload["data"]:
+        if not isinstance(obj, dict):
+            continue
+        market = obj.get("market")
+        if not isinstance(market, dict):
+            continue
+        title = str(obj.get("en") or "").strip()
+        selection = str(market.get("n") or "").strip()
+        count = market.get("count", obj.get("count"))
+        odd = market.get("val")
+        try:
+            count = int(count)
+            odd = float(odd) if odd is not None else None
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not title or not selection or count <= 0 or (odd is not None and (not math.isfinite(odd) or odd < 1.01 or odd > 1000)):
+            continue
+        fixture_id = obj.get("id")
+        results.append({
+            "source": "Bilyoner", "title": title, "count": count,
+            "market": selection, "market_name": str(market.get("mrn") or ""),
+            "odd": odd, "fixture_id": fixture_id,
+            "league": str(obj.get("lgn") or ""),
+            "kickoff": str(obj.get("esd") or ""),
+            "url": URLS["Bilyoner"]
+        })
+    # Distinct market selections for same match must remain separate.
+    unique = {}
+    for row in results:
+        key = (str(row["fixture_id"]), row["market_name"], row["market"])
+        if key not in unique or row["count"] > unique[key]["count"]:
+            unique[key] = row
+    return sorted(unique.values(), key=lambda x: x["count"], reverse=True)
+
+
+def fetch_bilyoner():
+    response = requests.get(BILYONER_API, timeout=12, headers={
+        "User-Agent": "Mozilla/5.0 (compatible; GolMerkeziRadar/1.1)",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://www.bilyoner.com/iddaa/populer-bahisler",
+    })
+    response.raise_for_status()
+    return parse_bilyoner_json(response.json())
+
+
 def get_radar(force=False):
     with _lock:
-        if not force and _cache["data"] is not None and time.time()-_cache["at"]<600:
+        if not force and _cache["data"] is not None and time.time() - _cache["at"] < 600:
             return _cache["data"]
-        result={"updated":datetime.now(timezone.utc).isoformat(),"entries":[],
-                "sources":[]}
-        for name,url in URLS.items():
-            if name!="Bilyoner":
-                result["sources"].append({"name":name,"status":"Henüz otomatik veri bağlantısı doğrulanmadı",
-                                          "url":url})
+        result = {"updated": datetime.now(timezone.utc).isoformat(), "entries": [], "sources": []}
+        for name, url in URLS.items():
+            if name != "Bilyoner":
+                result["sources"].append({"name": name, "status": "Henüz otomatik veri bağlantısı doğrulanmadı", "url": url})
                 continue
             try:
-                r=requests.get(url,timeout=12,headers={"User-Agent":"Mozilla/5.0 (compatible; GolMerkeziRadar/1.0)"})
-                r.raise_for_status()
-                entries=parse_bilyoner(r.text)
-                result["entries"]=entries
-                result["sources"].append({"name":name,
-                   "status":f"{len(entries)} kayıt okundu" if entries else "Veri okunamadı; site yapısı değişmiş olabilir",
-                   "url":url})
-            except requests.RequestException as exc:
-                result["sources"].append({"name":name,"status":"Erişim hatası: "+str(exc)[:120],"url":url})
-        _cache.update(at=time.time(),data=result)
+                entries = fetch_bilyoner()
+                result["entries"] = entries
+                status = f"{len(entries)} popüler bahis tercihi alındı" if entries else "API yanıtında kullanılabilir kayıt yok"
+            except (requests.RequestException, ValueError, TypeError) as exc:
+                status = "API erişimi veya veri biçimi hatası: " + str(exc)[:120]
+            result["sources"].append({"name": name, "status": status, "url": url})
+        _cache.update(at=time.time(), data=result)
         return result
 
 @radar_bp.get("/api/radar/populer")
 def radar_api():
-    return jsonify(get_radar())
+    return jsonify(get_radar(force=request.args.get("refresh") == "1"))
 
 RADAR_HTML = """<!doctype html><html lang="tr"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -136,15 +183,15 @@ ${e.market?`<span class="tag">${esc(e.market)}</span>`:""}${e.odd?`<span class="
 </div><p class="small">Kaynak: ${esc(e.source)} · <a href="${esc(e.url)}" target="_blank" rel="noopener">Kaynağa git ↗</a></p></article>`).join("")
 :'<div class="empty">Eşleşen doğrulanmış popüler bahis verisi bulunamadı. Tahmini rakam gösterilmiyor.</div>';
 }
-async function load(){
+async function load(force=false){
 document.getElementById("results").innerHTML='<div class="empty">Veriler yükleniyor…</div>';
-try{const r=await fetch("/api/radar/populer");if(!r.ok)throw Error("Sunucu "+r.status);
+try{const r=await fetch("/api/radar/populer"+(force?"?refresh=1":""));if(!r.ok)throw Error("Sunucu "+r.status);
 const d=await r.json();entries=d.entries||[];
 document.getElementById("sources").innerHTML=(d.sources||[]).map(s=>`<div class="source"><strong>${esc(s.name)}</strong><p class="small">${esc(s.status)}</p><a href="${esc(s.url)}" target="_blank" rel="noopener">Siteyi aç ↗</a></div>`).join("");
-document.getElementById("updated").textContent="Son sorgu: "+new Date(d.updated).toLocaleString("tr-TR");
+document.getElementById("updated").textContent="Son veri kontrolü: "+new Date(d.updated).toLocaleString("tr-TR");
 draw()}catch(e){document.getElementById("results").textContent="Veri hatası: "+e.message}}
 document.getElementById("search").oninput=draw;
-document.getElementById("refresh").onclick=load;load();
+document.getElementById("refresh").onclick=()=>load(true);load();
 </script></body></html>"""
 
 @radar_bp.get("/radar")
