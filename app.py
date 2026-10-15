@@ -3767,7 +3767,7 @@ select{
     </div>
 
     <div class="header-right">
-      <a class="info-pill" href="/radar" style="text-decoration:none;color:inherit">📊 Popüler Radar</a>
+      <a class="info-pill" href="/tahmin" style="text-decoration:none;color:inherit">📅 Maç Önü Tahminleri</a>
       <div class="status-pill" id="systemState">● Sistem Aktif</div>
       <div class="info-pill" id="lastScan">Son güncelleme: -</div>
       <div class="info-pill" id="scanEvery">↻ 30 sn'de bir</div>
