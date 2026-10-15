@@ -3210,7 +3210,7 @@ def api_prematch_analyze():
                     value_edge=round(prob-1/odd,4) if odd else None,
                     value_edge_pct=round(100*(prob-1/odd),1) if odd else None,
                     expected_value=round(ev,4) if ev is not None else None,
-                    coupon_eligible=bool(ev is not None and ev >= .04 and
+                    coupon_eligible=bool(ev is not None and ev >= .04 and prob >= .60 and
                                          analysis["data_quality"] == "good"),
                     manual_review=not bool(odd and odd >= 1.30),
                     screening_only=False,
@@ -3233,7 +3233,7 @@ def api_prematch_analyze():
         "suggestions":chosen,"all_suggestions":candidates,"joint_notes":[],
         "lineups":lineups,"lineup_note":("Onaylı kadro mevcut." if lineups.get("confirmed")
             else "Kadrolar henüz kesinleşmedi; model kadro etkisini hesaplamadı."),
-        "lineup_error":lineup_error,"decision":("ANALİZ HAZIR" if chosen else "VERİ EKSİK"),
+        "lineup_error":lineup_error,"decision":("ANALİZ HAZIR" if chosen else "VERİ YETERSİZ"),
         "candidate_count":len(candidates),"odds_note":note,
         "note":analysis["model_note"],"scenario":analysis["scenario"],
         "data_quality":analysis["data_quality"], "web_research":web_research})
@@ -4305,8 +4305,25 @@ button{border:1px solid #2cab79;background:#0e6f50;color:white;cursor:pointer;fo
 .coupon-title{font-weight:800;color:#cdb8ff;margin-bottom:7px}.coupon-leg{font-size:12px;border-top:1px solid #2f3c55;padding:7px 0;line-height:1.45}
 .coupon-total{font-size:12px;color:#80e8b6;margin-top:7px;font-weight:800}.won{color:#72e7a9}.lost{color:#ff9198}.open{color:#ffd379}.void{color:#9aa7b8}.remove-coupon{margin-top:9px;font-size:11px;padding:6px 9px;background:#3a2028;border:1px solid #75404c;color:#ffb7bf;border-radius:7px;cursor:pointer}.close-analysis{font-size:11px;padding:6px 9px;background:#263247;border:1px solid #536783;color:#dce7f5;border-radius:7px;cursor:pointer}
 @media(max-width:680px){.grid,.form,.lineup-teams,.coupons{grid-template-columns:1fr}.bankroll{grid-template-columns:repeat(2,minmax(0,1fr))}.teams{font-size:16px}}
+/* v7 prematch-only design system; does not modify live dashboard */
+:root{--pm-bg:#071320;--pm-card:#102237;--pm-border:#29455d;--pm-accent:#36d9b0}
+html,body{background:radial-gradient(ellipse at 12% -12%,#1b3954 0%,transparent 44%),linear-gradient(145deg,#071321,#0b192a 62%,#081725);color:#ecf4fb}
+.wrap{width:min(1180px,calc(100% - 32px));margin:auto;padding:22px 0 65px}
+header{background:linear-gradient(120deg,#10283e,#0c2035);border:1px solid #2b5066;border-radius:18px;padding:20px 24px;box-shadow:0 14px 45px #0003}
+header h1{letter-spacing:-.5px;font-size:clamp(22px,3vw,30px)}
+.toolbar{border-radius:16px;background:#102438;border:1px solid #34526a;padding:17px;gap:12px;box-shadow:0 8px 25px #0002}
+button,#load{border-radius:10px;min-height:39px;transition:transform .16s,filter .16s}
+button:hover,#load:hover{filter:brightness(1.12);transform:translateY(-1px)}
+input,select{border-radius:10px;min-height:40px}
+.coupon-panel{border:1px solid #455b80;border-radius:16px;background:linear-gradient(135deg,#172438,#172136);box-shadow:0 10px 30px #0002}
+.match-card,.match,.fixture,.analysis,.pick{box-shadow:0 8px 25px #0002}
+.pick{border-radius:13px!important;padding:16px!important;line-height:1.55}
+.pick-why{line-height:1.7}
+.form div,.lineup-box{border-radius:11px}
+.hint,.odds-note{line-height:1.6}
+@media(max-width:700px){.wrap{width:calc(100% - 20px);padding-top:10px}header{padding:16px}.toolbar{padding:12px;flex-wrap:wrap}.toolbar input,.toolbar select{max-width:100%}}
 </style></head><body><div class="wrap">
-<header><div><h1>📅 Maç Önü Tahminleri <span class="version">v6.3</span></h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
+<header><div><h1>📅 Maç Önü Analiz Merkezi <span class="version">v7.0</span></h1><p>Maçı araştır, senaryoları karşılaştır, gerçek oranı ayrı değerlendir.</p></div>
 <a href="/">← Canlı Gol Merkezi</a></header>
 <div class="toolbar">
   <label for="day">Maç günü</label>
@@ -4355,7 +4372,7 @@ async function getJson(url){
 const couponStoreKey="golPrematchCouponsV2";
 const pickHistoryKey="golPrematchPickHistoryV4";
 const couponStake=1000;
-const couponStrategyVersion="v6.3";
+const couponStrategyVersion="v7.0";
 function couponStore(){try{return JSON.parse(localStorage.getItem(couponStoreKey)||"{}")||{}}catch{return {}}}
 function saveCouponStore(store){localStorage.setItem(couponStoreKey,JSON.stringify(store))}
 function pickHistory(){try{return JSON.parse(localStorage.getItem(pickHistoryKey)||"[]")||[]}catch{return []}}
@@ -4504,12 +4521,12 @@ function buildCoupons(){
   if(!chosen.length){
     saveCouponStore(store);renderCoupons(existing);
     const s=pool.stats||{};
-    document.getElementById("couponState").textContent=`v6.3: ${s.matches||0} maçta ${s.suggestions||0} market incelendi. ${s.priced||0} markette 1.30+ doğrulanmış oran var; ${s.eligible||0} farklı maç kupona aday. 3 uygun farklı maç ve kabul edilebilir fiyat/değer birleşimi oluşmadı. Oransız BetBuilder otomatik kupona eklenmez.`;
+    document.getElementById("couponState").textContent=`v7.0: ${s.matches||0} maçta ${s.suggestions||0} market incelendi. ${s.priced||0} markette 1.30+ doğrulanmış oran var; ${s.eligible||0} farklı maç kupona aday. 3 uygun farklı maç ve kabul edilebilir fiyat/değer birleşimi oluşmadı. Oransız BetBuilder otomatik kupona eklenmez.`;
     return;
   }
   store[loadedDate]=[...existing,...chosen];saveCouponStore(store);renderCoupons(store[loadedDate]);
   const safe=chosen.filter(c=>c.riskKey==="safe").length,balanced=chosen.filter(c=>c.riskKey==="balanced").length,value=chosen.filter(c=>c.riskKey==="value").length;
-  document.getElementById("couponState").textContent=`v6.3: ${chosen.length} sanal kupon oluşturuldu • 🟢 ${safe} güvenli • 🟡 ${balanced} dengeli • 🔴 ${value} değer • toplam ${chosen.length*couponStake.toLocaleString("tr-TR")} TL sanal bahis • kupon boyutu 3 maç.`;
+  document.getElementById("couponState").textContent=`v7.0: ${chosen.length} sanal kupon oluşturuldu • 🟢 ${safe} güvenli • 🟡 ${balanced} dengeli • 🔴 ${value} değer • toplam ${chosen.length*couponStake.toLocaleString("tr-TR")} TL sanal bahis • kupon boyutu 3 maç.`;
 }
 
 function legResult(market,h,a,hh=null,ha=null){
