@@ -18,6 +18,7 @@ URLS = {
  "Nesine": "https://www.nesine.com/",
  "iddaa.com": "https://www.iddaa.com/",
 }
+IDDAA_API = "https://sportsbookv2.iddaa.com/SportsBook/get-populer-bets?limit=100"
 BILYONER_API = "https://www.bilyoner.com/api/v3/mobile/aggregator/gamelist/events/selections/popular?bulletinType=2&mainPage=false&tabType=1"
 _cache = {"at": 0, "data": None}
 _lock = threading.Lock()
@@ -117,22 +118,110 @@ def fetch_bilyoner():
     return parse_bilyoner_json(response.json())
 
 
+
+def parse_iddaa_json(payload):
+    """iddaa futbol popüler bahisleri. Yalnızca açıkça dönen kayıtları kullan."""
+    if not isinstance(payload,dict) or payload.get("isSuccess") is not True:
+        raise ValueError("iddaa API başarısız yanıt")
+    data=payload.get("data")
+    if not isinstance(data,dict) or not isinstance(data.get("1"),list):
+        raise ValueError("iddaa futbol veri biçimi beklenenden farklı")
+    result=[]
+    for item in data["1"]:
+        if not isinstance(item,dict) or item.get("isDeleted") is True:
+            continue
+        title=str(item.get("eventName") or "").strip()
+        market_name=str(item.get("marketName") or "").strip()
+        outcome=str(item.get("outcomeName") or "").strip()
+        try:
+            count=int(item.get("totalPlayed"))
+            # webOdd sitede gösterilen orandır; odd alanıyla karıştırmayız.
+            raw_odd=item.get("webOdd")
+            odd=float(raw_odd) if raw_odd is not None else None
+        except (TypeError,ValueError,OverflowError):
+            continue
+        if not title or not market_name or not outcome or count<=0:
+            continue
+        if odd is not None and (not math.isfinite(odd) or not 1.01<=odd<=1000):
+            continue
+        label=outcome
+        if str(item.get("marketType"))=="1" and market_name.lower().startswith("maç sonucu"):
+            label={"1":"MS 1","2":"MS 2","0":"MS 0","X":"MS X"}.get(outcome,outcome)
+        elif "Alt" in market_name or "Üst" in market_name:
+            line=str(item.get("specialOddsValue") or "").strip()
+            if line and outcome in ("Alt","Üst"):
+                label=line.replace(".",",")+" "+outcome
+        elif "Karşılıklı" in market_name:
+            label="KG "+outcome
+        result.append({
+            "source":"iddaa.com","title":title,"count":count,
+            "market":label,"market_name":market_name,
+            "odd":odd,"fixture_id":item.get("eventId"),
+            "league":str(item.get("competitionName") or ""),
+            "kickoff":str(item.get("eventDate") or ""),
+            "url":"https://www.iddaa.com/",
+            "played_ratio":item.get("playedRatio"),
+            "market_key":str(item.get("marketUniqueKey") or "")
+        })
+    unique={}
+    for row in result:
+        key=(str(row["fixture_id"]),row["market_name"],row["market"])
+        if key not in unique or row["count"]>unique[key]["count"]:
+            unique[key]=row
+    return sorted(unique.values(),key=lambda r:r["count"],reverse=True)
+
+def fetch_iddaa():
+    response=requests.get(IDDAA_API,timeout=12,headers={
+        "User-Agent":"Mozilla/5.0 (compatible; GolMerkeziRadar/1.2)",
+        "Accept":"application/json, text/plain, */*",
+        "Referer":"https://www.iddaa.com/"
+    })
+    response.raise_for_status()
+    return parse_iddaa_json(response.json())
+
+def compare_sources(entries):
+    """Aynı maç + aynı market + aynı tercihi bir araya getir; sayıları toplama."""
+    groups={}
+    for row in entries:
+        fid=row.get("fixture_id")
+        if fid is None:
+            continue
+        key=str(fid)
+        g=groups.setdefault(key,{"fixture_id":fid,"title":row["title"],
+            "kickoff":row.get("kickoff"),"league":row.get("league"),"selections":[]})
+        sel_key=(str(row.get("market") or "").casefold(),)
+        match=next((x for x in g["selections"] if x["_key"]==sel_key),None)
+        if match is None:
+            match={"_key":sel_key,"market":row.get("market"),"market_name":row.get("market_name"),
+                   "sources":[]}
+            g["selections"].append(match)
+        match["sources"].append({"name":row["source"],"count":row["count"],"odd":row["odd"]})
+    for group in groups.values():
+        for selection in group["selections"]:
+            selection.pop("_key")
+            selection["platform_count"]=len({r["name"] for r in selection["sources"]})
+        group["selections"].sort(key=lambda r:(-r["platform_count"],-max(s["count"] for s in r["sources"])))
+        group["platform_count"]=len({r["name"] for sel in group["selections"] for r in sel["sources"]})
+        group["max_popularity"]=max(s["count"] for sel in group["selections"] for s in sel["sources"])
+    return sorted(groups.values(),key=lambda g:(-g["platform_count"],-g["max_popularity"]))
+
 def get_radar(force=False):
     with _lock:
         if not force and _cache["data"] is not None and time.time() - _cache["at"] < 600:
             return _cache["data"]
         result = {"updated": datetime.now(timezone.utc).isoformat(), "entries": [], "sources": []}
-        for name, url in URLS.items():
-            if name != "Bilyoner":
-                result["sources"].append({"name": name, "status": "Henüz otomatik veri bağlantısı doğrulanmadı", "url": url})
+        for name,url in URLS.items():
+            if name not in ("Bilyoner","iddaa.com"):
+                result["sources"].append({"name":name,"status":"Henüz otomatik veri bağlantısı doğrulanmadı","url":url})
                 continue
             try:
-                entries = fetch_bilyoner()
-                result["entries"] = entries
-                status = f"{len(entries)} popüler bahis tercihi alındı" if entries else "API yanıtında kullanılabilir kayıt yok"
-            except (requests.RequestException, ValueError, TypeError) as exc:
-                status = "API erişimi veya veri biçimi hatası: " + str(exc)[:120]
-            result["sources"].append({"name": name, "status": status, "url": url})
+                rows=fetch_bilyoner() if name=="Bilyoner" else fetch_iddaa()
+                result["entries"].extend(rows)
+                status=f"{len(rows)} popüler futbol tercihi alındı" if rows else "API kullanılabilir kayıt döndürmedi"
+            except (requests.RequestException,ValueError,TypeError) as exc:
+                status="API erişimi veya veri biçimi hatası: "+str(exc)[:120]
+            result["sources"].append({"name":name,"status":status,"url":url})
+        result["comparisons"]=compare_sources(result["entries"])
         _cache.update(at=time.time(), data=result)
         return result
 
@@ -164,6 +253,9 @@ button:hover{background:#0d967b}input{flex:1;min-width:190px}
 </style></head><body><main>
 <header><div><h1>📊 Popüler Bahis Radarı</h1><p>Halkın tercihleri • Kaynaklı veriler • Bağımsız değerlendirme</p></div><a href="/">← Canlı Gol Merkezi</a></header>
 <section class="panel"><h2>Veri kaynakları</h2><div id="sources" class="grid">Kaynaklar kontrol ediliyor…</div></section>
+<section class="panel"><h2>Platform karşılaştırması · Aynı maçın tercihleri</h2>
+<p>İki platform aynı tercihi listeliyorsa ayrı ayrı görünür. Oynanma sayıları birleştirilmez.</p>
+<div id="comparisons" class="grid"></div></section>
 <section class="panel"><div class="row"><h2 style="margin:0;flex:1">En çok oynanan tercihler</h2><button id="refresh">Yenile</button></div>
 <p>Oynanma sayısı yalnızca ilgili platforma aittir; farklı sitelerin rakamları toplanmaz. Popülerlik kazanma olasılığı değildir.</p>
 <div class="row" style="margin:14px 0"><input id="search" placeholder="Takım veya market ara…"></div>
@@ -173,8 +265,19 @@ button:hover{background:#0d967b}input{flex:1;min-width:190px}
 <p class="warning">1.30 altındaki oranlar tekli bahis önerisi değildir. Popüler seçimler otomatik kupona eklenmez.</p></section>
 </main><script>
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-let entries=[];
-function draw(){
+let entries=[],comparisons=[];
+function drawComparisons(){
+const q=document.getElementById("search").value.toLocaleLowerCase("tr");
+const filtered=comparisons.filter(g=>(g.title+" "+g.selections.map(s=>s.market).join(" ")).toLocaleLowerCase("tr").includes(q));
+document.getElementById("comparisons").innerHTML=filtered.length?filtered.map(g=>`<article class="bet">
+<strong>${esc(g.title)}</strong><p class="small">${esc(g.league||"")} · ${g.platform_count} platformda listeleniyor</p>
+${g.selections.map(sel=>`<div style="padding:9px 0;border-top:1px solid #294763">
+<b>${esc(sel.market)}</b> <span class="small">(${sel.platform_count} platform)</span>
+${sel.sources.map(a=>`<div class="small">${esc(a.name)}: <span class="count">${Number(a.count).toLocaleString("tr-TR")}</span> oynanma · oran ${a.odd?Number(a.odd).toFixed(2):"yok"}</div>`).join("")}
+</div>`).join("")}</article>`).join("")
+:'<div class="empty">Karşılaştırılabilir maç bulunamadı.</div>';
+}
+function draw(){drawComparisons();
 const q=document.getElementById("search").value.toLocaleLowerCase("tr");
 const filtered=entries.filter(e=>(e.title+" "+(e.market||"")).toLocaleLowerCase("tr").includes(q));
 document.getElementById("results").innerHTML=filtered.length?filtered.map(e=>`<article class="bet"><strong>${esc(e.title)}</strong>
@@ -186,7 +289,7 @@ ${e.market?`<span class="tag">${esc(e.market)}</span>`:""}${e.odd?`<span class="
 async function load(force=false){
 document.getElementById("results").innerHTML='<div class="empty">Veriler yükleniyor…</div>';
 try{const r=await fetch("/api/radar/populer"+(force?"?refresh=1":""));if(!r.ok)throw Error("Sunucu "+r.status);
-const d=await r.json();entries=d.entries||[];
+const d=await r.json();entries=d.entries||[];comparisons=d.comparisons||[];
 document.getElementById("sources").innerHTML=(d.sources||[]).map(s=>`<div class="source"><strong>${esc(s.name)}</strong><p class="small">${esc(s.status)}</p><a href="${esc(s.url)}" target="_blank" rel="noopener">Siteyi aç ↗</a></div>`).join("");
 document.getElementById("updated").textContent="Son veri kontrolü: "+new Date(d.updated).toLocaleString("tr-TR");
 draw()}catch(e){document.getElementById("results").textContent="Veri hatası: "+e.message}}
