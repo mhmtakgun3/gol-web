@@ -374,7 +374,8 @@ button:hover{background:#0d967b}input{flex:1;min-width:190px}
 .warning{color:#ffce8a}.empty{padding:20px;border:1px dashed #52677a;border-radius:12px;color:#a9c0d1}
 </style></head><body><main>
 <header><div><h1>📊 Popüler Bahis Radarı</h1><p>Halkın tercihleri • Kaynaklı veriler • Bağımsız değerlendirme</p></div><a href="/">← Canlı Gol Merkezi</a></header>
-<section class="panel"><h2>Veri kaynakları</h2><div id="sources" class="grid">Kaynaklar kontrol ediliyor…</div></section>
+<section class="panel"><div class="row" style="margin-bottom:12px"><button id="tabPopular" onclick="showTab('popular')">📊 Popüler Bahisler</button><button id="tabBot" onclick="showTab('bot')">🤖 Bot Analizleri ve Kuponlar</button></div><p>Bot analizleri yalnızca API-Football ile eşleşen maçlarda, istek üzerine çalışır.</p></section>
+<div id="popularArea"><section class="panel"><h2>Veri kaynakları</h2><div id="sources" class="grid">Kaynaklar kontrol ediliyor…</div></section>
 <section class="panel"><h2>Platform karşılaştırması · Aynı maçın tercihleri</h2>
 <p>Platformlar aynı tercihi listeliyorsa ayrı ayrı görünür. Misli yüzdeleri ile diğer platformların oynanma sayıları birleştirilmez. Nesine oranları doğrulanana kadar gösterilmez.</p>
 <div id="comparisons" class="grid"></div></section>
@@ -382,10 +383,12 @@ button:hover{background:#0d967b}input{flex:1;min-width:190px}
 <p>Oynanma sayıları Bilyoner/iddaa.com/Nesine kaynaklarına, yüzdeler Misli kaynağına aittir. Popülerlik kazanma olasılığı değildir.</p>
 <div class="row" style="margin:14px 0"><input id="search" placeholder="Takım veya market ara…"></div>
 <div id="results" class="grid"></div><p id="updated" class="small"></p></section>
-<section class="panel"><h2>Bot nasıl yorumluyor?</h2>
+</div><div id="botArea" style="display:none"><section class="panel"><div class="row"><h2 style="margin:0;flex:1">🤖 Bağımsız Bot Analizleri</h2><button id="analyzeBtn" onclick="runAnalysis()">Maçları Analiz Et</button></div><p>Son 8 maç, iç/deplasman formu ve mevcut kadro verileriyle analiz. Popülerlik tek başına seçim nedeni değildir.</p><div id="botResults" class="grid"><div class="empty">Analizi başlatmak için butona bas.</div></div></section><section class="panel"><h2>🎟️ Bot Kuponu</h2><p>En az 3 farklı maç, doğrulanmış 1.30+ oran, bağımsız model filtresi. Yeterli seçim yoksa kupon oluşturulmaz.</p><div id="couponResult" class="empty">Henüz analiz yapılmadı.</div></section></div><section class="panel"><h2>Bot nasıl yorumluyor?</h2>
 <p>Bu ilk aşamada yalnızca doğrulanabilen popülerlik verisi gösterilir. Model olasılığı veya bağımsız maç tahmini üretilmiş gibi gösterilmez. Sonraki aşamada her maç API-Football fikstürüyle eşleştirilip kadro, form ve haber analizine bağlanacaktır.</p>
 <p class="warning">1.30 altındaki oranlar tekli bahis önerisi değildir. Popüler seçimler otomatik kupona eklenmez.</p></section>
 </main><script>
+function showTab(which){document.getElementById('popularArea').style.display=which==='popular'?'':'none';document.getElementById('botArea').style.display=which==='bot'?'':'none';}
+async function runAnalysis(){const btn=document.getElementById('analyzeBtn');btn.disabled=true;document.getElementById('botResults').innerHTML='<div class="empty">Gerçek takım istatistikleri inceleniyor… Biraz sürebilir.</div>';try{const res=await fetch('/api/radar/analiz?limit=6');const d=await res.json();if(!res.ok)throw Error(d.error||'Analiz servisi hatası');document.getElementById('botResults').innerHTML=(d.analyses||[]).length?d.analyses.map(a=>`<article class="bet"><strong>${esc(a.title)}</strong><p class="small">Veri kalitesi: ${esc(a.data_quality||'bilinmiyor')} · ${esc(a.lineup_note||'')}</p>${a.error?`<p class="warning">${esc(a.error)}</p>`:(a.picks||[]).map(p=>`<div style="border-top:1px solid #294763;padding:9px 0"><b>${esc(p.market)}</b> · <span class="${p.eligible?'count':'warning'}">${esc(p.decision)}</span><p class="small">Model: ${p.model_probability!=null?'%'+(100*p.model_probability).toFixed(1):'hesaplanamadı'} · Doğrulanmış oran: ${p.odd?Number(p.odd).toFixed(2):'yok'} ${esc(p.bookmaker||'')}</p><p>${esc(p.reason||'')}</p></div>`).join('')}</article>`).join(''):'<div class="empty">Kesin eşleşen maç bulunamadı. Tahmin üretilmedi.</div>';document.getElementById('couponResult').innerHTML=d.coupon?`<b>${d.coupon.legs.map(x=>esc(x.title)+' — '+esc(x.market)+' ('+Number(x.odd).toFixed(2)+')').join('<hr>')}</b><p>Toplam oran: ${d.coupon.combined_odd} · Sanal tutar: 1.000 TL · Olası dönüş: ${d.coupon.potential_return.toLocaleString('tr-TR')} TL</p><p class="warning">Taslak kupon, gerçek bahis değildir. Olası dönüş garanti değildir.</p>`:'Kupon oluşturulmadı: En az 3 farklı maçta doğrulanmış oran ve yeterli model desteği bulunamadı.';if(d.errors?.length)document.getElementById('botResults').innerHTML+=`<p class="warning">Veri kaynağı: ${esc(d.errors[0])}</p>`;}catch(e){document.getElementById('botResults').textContent='Analiz hatası: '+e.message;}finally{btn.disabled=false;}}
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 let entries=[],comparisons=[];
 function drawComparisons(){
@@ -418,6 +421,148 @@ draw()}catch(e){document.getElementById("results").textContent="Veri hatası: "+
 document.getElementById("search").oninput=draw;
 document.getElementById("refresh").onclick=()=>load(true);load();
 </script></body></html>"""
+
+
+
+# --- Radar v2: independent prematch analysis bridge (on demand, cached) ---
+import unicodedata
+from flask import current_app
+_analysis_cache = {}
+_analysis_lock = threading.Lock()
+
+def _normalized_team(text):
+    text = unicodedata.normalize("NFKD", str(text or "").casefold())
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    return re.sub(r"[^a-z0-9]+", "", text.replace("ı", "i"))
+
+def _team_similarity(a, b):
+    x, y = _normalized_team(a), _normalized_team(b)
+    if not x or not y: return False
+    return x == y or (min(len(x),len(y)) >= 5 and (x in y or y in x))
+
+def _radar_teams(title):
+    bits = re.split(r"\s+[-–]\s+", str(title), maxsplit=1)
+    return bits if len(bits) == 2 else (None, None)
+
+def _match_fixture(row, fixtures):
+    home, away = _radar_teams(row.get("title"))
+    if not home: return None
+    matches = [f for f in fixtures if
+       _team_similarity(home, ((f.get("teams") or {}).get("home") or {}).get("name")) and
+       _team_similarity(away, ((f.get("teams") or {}).get("away") or {}).get("name"))]
+    return matches[0] if len(matches) == 1 else None
+
+def _market_code(label):
+    x = str(label or "").casefold().replace(".", ",").replace(" ", "")
+    mapping = {"ms1":"HOME", "1":"HOME", "ms2":"AWAY", "2":"AWAY",
+       "2,5üst":"OVER_2_5", "2,5alt":"UNDER_2_5",
+       "3,5üst":"OVER_3_5", "3,5alt":"UNDER_3_5",
+       "1,5üst":"OVER_1_5", "kgvar":"BTTS_YES", "kgyok":"BTTS_NO",
+       "ev1,5üst":"HOME_OVER_1_5", "dep1,5üst":"AWAY_OVER_1_5"}
+    return mapping.get(x)
+
+def _date_for_radar():
+    from datetime import timedelta
+    try:
+        from zoneinfo import ZoneInfo
+        today = datetime.now(ZoneInfo("Europe/Istanbul")).date()
+    except Exception:
+        today = datetime.now(timezone.utc).date()
+    return today
+
+def _analysis_for_fixture(fixture, day):
+    fid = (fixture.get("fixture") or {}).get("id")
+    key = str(fid)
+    with _analysis_lock:
+        cached = _analysis_cache.get(key)
+        if cached and time.time()-cached[0] < 900: return cached[1]
+    # Use existing /api/prematch/analyze engine; never alter the live scanner.
+    fn = current_app.view_functions.get("api_prematch_analyze")
+    if fn is None: raise ValueError("Mevcut maç önü analiz servisi bulunamadı")
+    with current_app.test_request_context("/api/prematch/analyze", query_string={"date":day.isoformat(),"fixture":fid}):
+        response = fn()
+    status = response[1] if isinstance(response, tuple) else 200
+    response = response[0] if isinstance(response, tuple) else response
+    data = response.get_json()
+    if status != 200: raise ValueError(data.get("error") or "Analiz başarısız")
+    with _analysis_lock:
+        _analysis_cache[key] = (time.time(), data)
+        if len(_analysis_cache)>80:
+            oldest=min(_analysis_cache,key=lambda k:_analysis_cache[k][0]);_analysis_cache.pop(oldest,None)
+    return data
+
+@radar_bp.get("/api/radar/analiz")
+def radar_analysis():
+    try:
+        limit = max(1,min(8,int(request.args.get("limit", "4"))))
+    except ValueError: limit = 4
+    from datetime import timedelta
+    import sys
+    mod = sys.modules.get("app") or sys.modules.get("__main__")
+    if mod is None or not hasattr(mod,"prematch_fixtures"):
+        return jsonify({"error":"Maç önü servisleri yüklenmedi"}),503
+    radar = get_radar()
+    entries = radar.get("entries") or []
+    unique = {}
+    for r in entries:
+        if _market_code(r.get("market")):
+            unique.setdefault(_normalized_team(r.get("title")), []).append(r)
+    dates = [_date_for_radar()+timedelta(days=i) for i in range(3)]
+    fixtures=[]; errors=[]
+    for day in dates:
+        found,err=mod.prematch_fixtures(day)
+        if err: errors.append(str(err))
+        else: fixtures.extend([(day,f) for f in found or []])
+    analyses=[]; unmatched=0; seen=set()
+    for group in unique.values():
+        if len(analyses)>=limit: break
+        candidates=[(day,f) for day,f in fixtures if _match_fixture(group[0],[f])]
+        if len(candidates)!=1:
+            unmatched+=1;continue
+        day,fixture=candidates[0]
+        fid=(fixture.get("fixture") or {}).get("id")
+        if fid in seen:continue
+        seen.add(fid)
+        try:
+            data=_analysis_for_fixture(fixture,day)
+            by_code={x.get("market"):x for x in data.get("all_suggestions",[])}
+            picks=[]
+            for row in group:
+                code=_market_code(row.get("market"))
+                item=by_code.get(code)
+                if not item:continue
+                quote=item.get("quote") or {}
+                odds=quote.get("odd")
+                qualified=bool(item.get("coupon_eligible") and odds and float(odds)>=1.30)
+                picks.append({"market":row.get("market"),"source":row.get("source"),
+                   "model_probability":item.get("model_probability"),
+                   "reason":item.get("explanation") or item.get("reason"),
+                   "odd":odds,"bookmaker":quote.get("bookmaker"),
+                   "value_edge_pct":item.get("value_edge_pct"),
+                   "eligible":qualified,"decision":"Uygun" if qualified else "Kupona uygun değil"})
+            analyses.append({"fixture_id":fid,"title":group[0].get("title"),
+                "day":day.isoformat(),"data_quality":data.get("data_quality"),
+                "lineup_note":data.get("lineup_note"),"picks":picks,
+                "note":data.get("note"),"error":None})
+        except Exception as exc:
+            analyses.append({"fixture_id":fid,"title":group[0].get("title"),
+               "picks":[],"error":str(exc)[:180]})
+    # No invented legs: 3 distinct fixtures and verified odds only.
+    eligible=[]
+    for a in analyses:
+        options=[x for x in a.get("picks",[]) if x.get("eligible")]
+        if options:
+            options.sort(key=lambda x:(x.get("value_edge_pct") or -999),reverse=True)
+            eligible.append(dict(options[0],title=a["title"],fixture_id=a["fixture_id"]))
+    coupon=None
+    if len(eligible)>=3:
+        legs=eligible[:3]
+        product=1.0
+        for leg in legs:product*=float(leg["odd"])
+        coupon={"legs":legs,"combined_odd":round(product,2),"stake":1000,
+           "potential_return":round(1000*product,2),"status":"Taslak (oynanmadı)"}
+    return jsonify({"analyses":analyses,"coupon":coupon,"unmatched":unmatched,
+      "errors":errors,"note":"Yalnızca önümüzdeki 3 günün API-Football ile kesin eşleşen maçları analiz edilir. Kupon yalnızca veri kalitesi iyi ve doğrulanmış oranı olan tercihlerle oluşturulur."})
 
 @radar_bp.get("/radar")
 def radar_page():
