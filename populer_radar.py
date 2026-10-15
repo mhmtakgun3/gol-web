@@ -18,6 +18,7 @@ URLS = {
  "Nesine": "https://www.nesine.com/",
  "iddaa.com": "https://www.iddaa.com/",
 }
+MISLI_API = "https://apivx.misli.com/api/web/v1/statistics/iddaa/most-played?type=ALL&limit=100"
 IDDAA_API = "https://sportsbookv2.iddaa.com/SportsBook/get-populer-bets?limit=100"
 BILYONER_API = "https://www.bilyoner.com/api/v3/mobile/aggregator/gamelist/events/selections/popular?bulletinType=2&mainPage=false&tabType=1"
 _cache = {"at": 0, "data": None}
@@ -179,31 +180,96 @@ def fetch_iddaa():
     response.raise_for_status()
     return parse_iddaa_json(response.json())
 
+def parse_misli_json(payload):
+    """Misli most-played API; percentage is shown as a percentage, never a count."""
+    if not isinstance(payload, dict) or payload.get("success") is not True or not isinstance(payload.get("data"), list):
+        raise ValueError("Beklenmeyen Misli JSON biçimi")
+    result = []
+    for item in payload["data"]:
+        if not isinstance(item, dict) or item.get("sportType") != "SOCCER":
+            continue
+        home, away = str(item.get("homeTeam") or "").strip(), str(item.get("awayTeam") or "").strip()
+        outcome = str(item.get("mostPlayedOutcome") or "").strip()
+        if not home or not away or not outcome:
+            continue
+        try:
+            odd = float(item["odd"])
+            percentage = float(item["percentage"])
+        except (ValueError, TypeError, KeyError, OverflowError):
+            continue
+        if not (math.isfinite(odd) and 1.01 <= odd <= 1000 and math.isfinite(percentage) and 0 <= percentage <= 100):
+            continue
+        market_type = str(item.get("marketType") or "")
+        sub_type = str(item.get("marketSubType") or "")
+        if market_type == "1" and sub_type == "1":
+            label = {"1": "MS 1", "2": "MS 2", "0": "MS 0", "X": "MS X"}.get(outcome, outcome)
+            market_name = "Maç Sonucu"
+        elif market_type == "2" and sub_type == "101":
+            line = item.get("specialOddsValue")
+            if line is None:
+                continue  # Avoid inventing the goal line.
+            label = str(line).replace(".", ",") + " " + outcome
+            market_name = "Altı/Üstü " + str(line).replace(".", ",")
+        elif market_type == "2" and sub_type == "89":
+            label = "KG " + outcome
+            market_name = "Karşılıklı Gol"
+        else:
+            label = outcome
+            market_name = "Market " + market_type + "/" + sub_type
+        result.append({
+            "source": "Misli", "title": home + " - " + away,
+            "count": None, "percentage": percentage, "market": label,
+            "market_name": market_name, "odd": odd,
+            "fixture_id": item.get("eventId"), "betradar_id": item.get("bri"),
+            "market_id": item.get("marketId"), "outcome_no": item.get("outcomeNo"),
+            "kickoff": item.get("dateTime"), "league": "", "url": URLS["Misli"]
+        })
+    unique = {}
+    for row in result:
+        key = (str(row["fixture_id"]), str(row["market_id"]), str(row["outcome_no"]))
+        if key not in unique or row["percentage"] > unique[key]["percentage"]:
+            unique[key] = row
+    return sorted(unique.values(), key=lambda r: r["percentage"], reverse=True)
+
+
+def fetch_misli():
+    response = requests.get(MISLI_API, timeout=12, headers={
+        "User-Agent": "Mozilla/5.0 (compatible; GolMerkeziRadar/1.3)",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://www.misli.com/"
+    })
+    response.raise_for_status()
+    return parse_misli_json(response.json())
+
+
 def compare_sources(entries):
-    """Aynı maç + aynı market + aynı tercihi bir araya getir; sayıları toplama."""
-    groups={}
+    """Fixture and normalized market selection; retain platform-specific metrics."""
+    groups = {}
     for row in entries:
-        fid=row.get("fixture_id")
+        fid = row.get("fixture_id")
         if fid is None:
             continue
-        key=str(fid)
-        g=groups.setdefault(key,{"fixture_id":fid,"title":row["title"],
-            "kickoff":row.get("kickoff"),"league":row.get("league"),"selections":[]})
-        sel_key=(str(row.get("market") or "").casefold(),)
-        match=next((x for x in g["selections"] if x["_key"]==sel_key),None)
+        key = str(fid)
+        group = groups.setdefault(key, {"fixture_id": fid, "title": row["title"],
+            "kickoff": row.get("kickoff"), "league": row.get("league"), "selections": []})
+        # Selection names are normalized by parsers (e.g. MS 2 / 2,5 Üst).
+        selection_key = str(row.get("market") or "").casefold().strip()
+        match = next((x for x in group["selections"] if x["_key"] == selection_key), None)
         if match is None:
-            match={"_key":sel_key,"market":row.get("market"),"market_name":row.get("market_name"),
-                   "sources":[]}
-            g["selections"].append(match)
-        match["sources"].append({"name":row["source"],"count":row["count"],"odd":row["odd"]})
+            match = {"_key": selection_key, "market": row.get("market"),
+                "market_name": row.get("market_name"), "sources": []}
+            group["selections"].append(match)
+        match["sources"].append({"name": row["source"], "count": row.get("count"),
+            "percentage": row.get("percentage"), "odd": row.get("odd")})
     for group in groups.values():
         for selection in group["selections"]:
             selection.pop("_key")
-            selection["platform_count"]=len({r["name"] for r in selection["sources"]})
-        group["selections"].sort(key=lambda r:(-r["platform_count"],-max(s["count"] for s in r["sources"])))
-        group["platform_count"]=len({r["name"] for sel in group["selections"] for r in sel["sources"]})
-        group["max_popularity"]=max(s["count"] for sel in group["selections"] for s in sel["sources"])
-    return sorted(groups.values(),key=lambda g:(-g["platform_count"],-g["max_popularity"]))
+            selection["platform_count"] = len({r["name"] for r in selection["sources"]})
+        group["selections"].sort(key=lambda r: (-r["platform_count"],
+            -max((s.get("count") or 0) for s in r["sources"])))
+        group["platform_count"] = len({r["name"] for sel in group["selections"] for r in sel["sources"]})
+        group["max_popularity"] = max((s.get("count") or 0) for sel in group["selections"] for s in sel["sources"])
+    return sorted(groups.values(), key=lambda g: (-g["platform_count"], -g["max_popularity"]))
 
 def get_radar(force=False):
     with _lock:
@@ -211,11 +277,11 @@ def get_radar(force=False):
             return _cache["data"]
         result = {"updated": datetime.now(timezone.utc).isoformat(), "entries": [], "sources": []}
         for name,url in URLS.items():
-            if name not in ("Bilyoner","iddaa.com"):
+            if name not in ("Bilyoner","iddaa.com","Misli"):
                 result["sources"].append({"name":name,"status":"Henüz otomatik veri bağlantısı doğrulanmadı","url":url})
                 continue
             try:
-                rows=fetch_bilyoner() if name=="Bilyoner" else fetch_iddaa()
+                rows={"Bilyoner":fetch_bilyoner,"iddaa.com":fetch_iddaa,"Misli":fetch_misli}[name]()
                 result["entries"].extend(rows)
                 status=f"{len(rows)} popüler futbol tercihi alındı" if rows else "API kullanılabilir kayıt döndürmedi"
             except (requests.RequestException,ValueError,TypeError) as exc:
@@ -254,10 +320,10 @@ button:hover{background:#0d967b}input{flex:1;min-width:190px}
 <header><div><h1>📊 Popüler Bahis Radarı</h1><p>Halkın tercihleri • Kaynaklı veriler • Bağımsız değerlendirme</p></div><a href="/">← Canlı Gol Merkezi</a></header>
 <section class="panel"><h2>Veri kaynakları</h2><div id="sources" class="grid">Kaynaklar kontrol ediliyor…</div></section>
 <section class="panel"><h2>Platform karşılaştırması · Aynı maçın tercihleri</h2>
-<p>İki platform aynı tercihi listeliyorsa ayrı ayrı görünür. Oynanma sayıları birleştirilmez.</p>
+<p>Platformlar aynı tercihi listeliyorsa ayrı ayrı görünür. Misli yüzdeleri ile oynanma sayıları birleştirilmez.</p>
 <div id="comparisons" class="grid"></div></section>
 <section class="panel"><div class="row"><h2 style="margin:0;flex:1">En çok oynanan tercihler</h2><button id="refresh">Yenile</button></div>
-<p>Oynanma sayısı yalnızca ilgili platforma aittir; farklı sitelerin rakamları toplanmaz. Popülerlik kazanma olasılığı değildir.</p>
+<p>Oynanma sayıları Bilyoner/iddaa.com kaynaklarına, yüzdeler Misli kaynağına aittir. Popülerlik kazanma olasılığı değildir.</p>
 <div class="row" style="margin:14px 0"><input id="search" placeholder="Takım veya market ara…"></div>
 <div id="results" class="grid"></div><p id="updated" class="small"></p></section>
 <section class="panel"><h2>Bot nasıl yorumluyor?</h2>
@@ -273,7 +339,7 @@ document.getElementById("comparisons").innerHTML=filtered.length?filtered.map(g=
 <strong>${esc(g.title)}</strong><p class="small">${esc(g.league||"")} · ${g.platform_count} platformda listeleniyor</p>
 ${g.selections.map(sel=>`<div style="padding:9px 0;border-top:1px solid #294763">
 <b>${esc(sel.market)}</b> <span class="small">(${sel.platform_count} platform)</span>
-${sel.sources.map(a=>`<div class="small">${esc(a.name)}: <span class="count">${Number(a.count).toLocaleString("tr-TR")}</span> oynanma · oran ${a.odd?Number(a.odd).toFixed(2):"yok"}</div>`).join("")}
+${sel.sources.map(a=>`<div class="small">${esc(a.name)}: <span class="count">${a.count!=null?Number(a.count).toLocaleString("tr-TR")+" oynanma":a.percentage!=null?"%"+Number(a.percentage).toLocaleString("tr-TR",{maximumFractionDigits:3})+" popülerlik":"veri yok"}</span> · oran ${a.odd?Number(a.odd).toFixed(2):"yok"}</div>`).join("")}
 </div>`).join("")}</article>`).join("")
 :'<div class="empty">Karşılaştırılabilir maç bulunamadı.</div>';
 }
@@ -281,7 +347,7 @@ function draw(){drawComparisons();
 const q=document.getElementById("search").value.toLocaleLowerCase("tr");
 const filtered=entries.filter(e=>(e.title+" "+(e.market||"")).toLocaleLowerCase("tr").includes(q));
 document.getElementById("results").innerHTML=filtered.length?filtered.map(e=>`<article class="bet"><strong>${esc(e.title)}</strong>
-<span class="count">${Number(e.count).toLocaleString("tr-TR")} kez oynandı</span><div>
+<span class="count">${e.count!=null?Number(e.count).toLocaleString("tr-TR")+" kez oynandı":e.percentage!=null?"%"+Number(e.percentage).toLocaleString("tr-TR",{maximumFractionDigits:3})+" popülerlik":"Popülerlik bilgisi yok"}</span><div>
 ${e.market?`<span class="tag">${esc(e.market)}</span>`:""}${e.odd?`<span class="tag">Gösterilen oran ${e.odd.toFixed(2)}</span>`:""}
 </div><p class="small">Kaynak: ${esc(e.source)} · <a href="${esc(e.url)}" target="_blank" rel="noopener">Kaynağa git ↗</a></p></article>`).join("")
 :'<div class="empty">Eşleşen doğrulanmış popüler bahis verisi bulunamadı. Tahmini rakam gösterilmiyor.</div>';
