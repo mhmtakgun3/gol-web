@@ -383,13 +383,13 @@ button:hover{background:#0d967b}input{flex:1;min-width:190px}
 <p>Oynanma sayıları Bilyoner/iddaa.com/Nesine kaynaklarına, yüzdeler Misli kaynağına aittir. Popülerlik kazanma olasılığı değildir.</p>
 <div class="row" style="margin:14px 0"><input id="search" placeholder="Takım veya market ara…"></div>
 <div id="results" class="grid"></div><p id="updated" class="small"></p></section>
-</div><div id="botArea" style="display:none"><section class="panel"><div class="row"><h2 style="margin:0;flex:1">🤖 Bağımsız Bot Analizleri</h2><button id="analyzeBtn" onclick="runAnalysis()">Maçları Analiz Et</button></div><p>Bot yalnızca Bilyoner, iddaa.com, Misli ve Nesine popüler listelerindeki tercihleri değerlendirir. Başka bahis üretmez. Kadro/haber doğrulaması bu sürümde yoktur.</p><div id="botResults" class="grid"><div class="empty">Analizi başlatmak için butona bas.</div></div></section><section class="panel"><h2>🎟️ Bot Kuponu</h2><p>Yalnızca radarın popüler tercihleri kullanılır. En az 3 farklı maç, her seçimde doğrulanmış 1.30+ oran. Makul riskli seçimler de değerlendirilebilir; yeterli aday yoksa kupon oluşturulmaz.</p><div id="couponResult" class="empty">Henüz analiz yapılmadı.</div></section></div><section class="panel"><h2>Bot nasıl yorumluyor?</h2>
-<p>Bot son maç formunu ve ev/deplasman performansını kalibre edilmemiş Poisson gol modeliyle yorumlar. Güçlü, değerlendirilebilir ve riskli seçenekleri ayırır. Oranın gerektirdiği başa baş olasılığı açıklar. Kadro, sakatlık ve haber kontrolü bu hafif sürümde yapılmaz; model yüzdeleri gerçek başarı garantisi değildir.</p>
+</div><div id="botArea" style="display:none"><section class="panel"><div class="row"><h2 style="margin:0;flex:1">🤖 Bağımsız Bot Analizleri</h2><button id="analyzeBtn" onclick="runAnalysis()">Maçları Analiz Et</button></div><p>Bot yalnızca Bilyoner, iddaa.com, Misli ve Nesine popüler listelerindeki tercihleri değerlendirir. Başka bahis üretmez. Kadro/haber doğrulaması bu sürümde yoktur.</p><div id="botResults" class="grid"><div class="empty">Analizi başlatmak için butona bas.</div></div></section><section class="panel"><h2>🎟️ Bot Kuponu</h2><p>Yalnızca radarın popüler tercihleri kullanılır. En az 3 farklı maç, her seçimde doğrulanmış 1.30+ oran. %60+ tercihler önceliklidir; %50–60 tercihler de kupona girebilir. Oran avantajı zorunlu değildir; yeterli aday yoksa kupon oluşturulmaz.</p><div id="couponResult" class="empty">Henüz analiz yapılmadı.</div></section></div><section class="panel"><h2>Bot nasıl yorumluyor?</h2>
+<p>Bot son maç formunu ve ev/deplasman performansını kalibre edilmemiş Poisson gol modeliyle yorumlar. %60+ öncelikli, %50–60 değerlendirilebilir ve %50 altı riskli seçenekleri ayırır. Oranın gerektirdiği başa baş olasılığı açıklar; oran avantajı tek başına kupon engeli değildir. Kadro, sakatlık ve haber kontrolü bu hafif sürümde yapılmaz; model yüzdeleri gerçek başarı garantisi değildir.</p>
 <p class="warning">1.30 altındaki oranlar tekli bahis önerisi değildir. Popüler seçimler otomatik kupona eklenmez.</p></section>
 </main><script>
 function showTab(which){document.getElementById('popularArea').style.display=which==='popular'?'':'none';document.getElementById('botArea').style.display=which==='bot'?'':'none';}
 async function radarJSON(url){const r=await fetch(url);const ct=r.headers.get('content-type')||'';if(!ct.includes('application/json'))throw Error('Sunucu JSON yerine '+r.status+' döndürdü. Render loglarını kontrol edin.');const d=await r.json();if(!r.ok)throw Error(d.error||('HTTP '+r.status));return d;}
-function renderCoupon(analyses){const eligible=[];for(const a of analyses){const options=(a.picks||[]).filter(p=>p.eligible);options.sort((x,y)=>(y.value_edge_pct??-999)-(x.value_edge_pct??-999));if(options.length)eligible.push({...options[0],title:a.title,fixture_id:a.fixture_id});}const el=document.getElementById('couponResult');if(eligible.length<3){el.textContent='Kupon oluşturulmadı: Popüler listedeki tercihlerden en az 3 farklı maçta doğrulanmış 1.30+ oran ve makul model desteği bulunamadı. ('+eligible.length+'/3)';return;}const legs=eligible.slice(0,3);const total=legs.reduce((x,p)=>x*p.odd,1);el.innerHTML=legs.map(x=>'<p>'+esc(x.title)+' — '+esc(x.market)+' ('+Number(x.odd).toFixed(2)+')</p>').join('')+'<p>Toplam oran: '+total.toFixed(2)+' · Sanal tutar: 1.000 TL · Olası dönüş: '+(total*1000).toLocaleString('tr-TR')+' TL</p><p class="warning">Taslak kupon. Oranlar değişebilir, kazanç garanti değildir.</p>';}
+function renderCoupon(analyses){const eligible=[];for(const a of analyses){const options=(a.picks||[]).filter(p=>p.eligible);options.sort((x,y)=>(y.model_probability??0)-(x.model_probability??0));if(options.length)eligible.push({...options[0],title:a.title,fixture_id:a.fixture_id});}const el=document.getElementById('couponResult');if(eligible.length<3){el.textContent='Kupon oluşturulmadı: Popüler listedeki tercihlerden en az 3 farklı maçta doğrulanmış 1.30+ oran ve %50+ model olasılığı bulunamadı. ('+eligible.length+'/3)';return;}const legs=eligible.slice(0,3);const total=legs.reduce((x,p)=>x*p.odd,1);el.innerHTML=legs.map(x=>'<p>'+esc(x.title)+' — '+esc(x.market)+' ('+Number(x.odd).toFixed(2)+')</p>').join('')+'<p>Toplam oran: '+total.toFixed(2)+' · Sanal tutar: 1.000 TL · Olası dönüş: '+(total*1000).toLocaleString('tr-TR')+' TL</p><p class="warning">Taslak kupon. Oranlar değişebilir, kazanç garanti değildir.</p>';}
 function renderAnalysis(a){return `<article class="bet"><strong>${esc(a.title)}</strong><p class="small">Veri kalitesi: ${esc(a.data_quality||'bilinmiyor')} · ${esc(a.lineup_note||'')}</p>${a.error?`<p class="warning">${esc(a.error)}</p>`:(a.picks||[]).map((p,i)=>`<div style="border-top:1px solid #294763;padding:12px 0"><div class="row" style="justify-content:space-between"><b>${i+1}. ${esc(p.market)}</b><span class="tag">${esc(p.decision)}</span></div><p class="small">Model: <b>%${(100*p.model_probability).toFixed(1)}</b> · Oran: <b>${p.odd?Number(p.odd).toFixed(2):'doğrulanmadı'}</b> ${esc(p.bookmaker||'')} ${p.break_even_pct!=null?'· Başa baş: %'+Number(p.break_even_pct).toFixed(1):''}</p><p>${esc(p.reason||'')}</p><p class="small">Radarın popüler tercihlerinden · ${p.eligible?'Kupon adayı':'Otomatik kupon dışında'}</p></div>`).join('')}</article>`;}
 async function runAnalysis(){const btn=document.getElementById('analyzeBtn'),out=document.getElementById('botResults');btn.disabled=true;out.innerHTML='<div class="empty">Maçlar hazırlanıyor…</div>';const analyses=[];let matched=0;try{for(let day=0;day<3;day++){out.insertAdjacentHTML('beforeend','<p class="small">'+(day+1)+'. gün fikstürü taranıyor…</p>');let d;try{d=await radarJSON('/api/radar/analiz?phase=prepare&day='+day);}catch(e){out.insertAdjacentHTML('beforeend','<p class="warning">'+esc(e.message)+'</p>');continue;}if(d.warning)out.insertAdjacentHTML('beforeend','<p class="warning">'+esc(d.warning)+'</p>');for(const m of d.matches||[]){if(matched>=6)break;matched++;out.insertAdjacentHTML('beforeend','<p class="small">Analiz ediliyor: '+esc(m.title)+'</p>');try{const r=await radarJSON('/api/radar/analiz?phase=match&day='+encodeURIComponent(m.day)+'&fixture='+encodeURIComponent(m.fixture_id));analyses.push(r.analysis);}catch(e){analyses.push({fixture_id:m.fixture_id,title:m.title,picks:[],error:e.message});}out.innerHTML=analyses.map(renderAnalysis).join('');renderCoupon(analyses);}if(matched>=6)break;}if(!analyses.length)out.insertAdjacentHTML('beforeend','<div class="empty">Kesin eşleşen maç bulunamadı veya API-Football erişimi başarısız. Tahmin üretilmedi.</div>');renderCoupon(analyses);}catch(e){out.insertAdjacentHTML('beforeend','<p class="warning">Analiz hatası: '+esc(e.message)+'</p>');}finally{btn.disabled=false;}}
 
@@ -631,9 +631,9 @@ def radar_analysis():
                 decision="Veri yetersiz"; level="riskli"
             elif best is None:
                 decision="1.30+ doğrulanmış oran yok"; level="bilgi"
-            elif prob>=0.57 and edge>=0.04:
-                decision="Güçlü tercih"; level="guclu"
-            elif prob>=0.45 and edge>=-0.10:
+            elif prob>=0.60:
+                decision="Öncelikli kupon adayı"; level="guclu"
+            elif prob>=0.50:
                 decision="Değerlendirilebilir (risk içerir)"; level="degerlendirilebilir"
             else:
                 decision="Riskli / kupon dışı"; level="riskli"
@@ -646,12 +646,10 @@ def radar_analysis():
             explanation+=f"Popüler listede bulunan {label} tercihinin model olasılığı %{prob*100:.1f}. "
             if best:
                 explanation+=(f"{best['source']} sitesinde görülen oran {best_odd:.2f}; bu oran için başa baş eşik yaklaşık %{100/best_odd:.1f}. ")
-                if edge>=0.04:
-                    explanation+="Model bu fiyata göre olumlu bir fark gösteriyor. "
-                elif edge>=-0.10:
-                    explanation+="Oran model açısından tam avantajlı değil; ancak esnek değerlendirmede makul riskli aday olarak tutuldu. "
+                if edge>=0:
+                    explanation+="Model olasılığı, oranın başa baş eşiğinin üzerinde; fiyat açısından olumlu görünüyor. "
                 else:
-                    explanation+="Oran, modelin hesapladığı olasılığa göre zayıf kalıyor. "
+                    explanation+="Dikkat: Oranın gerektirdiği başarı olasılığı model tahmininden yüksek; fiyat açısından avantaj görünmüyor. Bu bilgi kupona girişi tek başına engellemez. "
             else:
                 explanation+="Bu popüler tercih için doğrulanmış en az 1.30 oran bulunamadı. "
             if model["data_quality"]!="good":
@@ -668,9 +666,7 @@ def radar_analysis():
                 "eligible":qualified,"level":level,"decision":decision,
                 "popular":True,"listed_sources":sorted({r["source"] for r in rlist})})
         rank={"guclu":0,"degerlendirilebilir":1,"riskli":2,"bilgi":3}
-        picks.sort(key=lambda p:(rank.get(p["level"],4),
-            -(p["value_edge_pct"] if p["value_edge_pct"] is not None else -999),
-            -p["model_probability"]))
+        picks.sort(key=lambda p:(rank.get(p["level"],4), -p["model_probability"]))
         # Show every distinct popular market for this fixture, no invented alternatives.
         return jsonify({"analysis":{"fixture_id":fid,"title":title,"day":day.isoformat(),
             "data_quality":model["data_quality"],"lineup_note":"Kadro/haber kontrolü bu hafif sürümde yapılmadı.",
