@@ -18,6 +18,7 @@ URLS = {
  "Nesine": "https://www.nesine.com/",
  "iddaa.com": "https://www.iddaa.com/",
 }
+NESINE_API = "https://kapi.nesine.com/api/v1/KStreamsAll/PreBetAll?orderType=0&sportId=0&timeEpoch=-1"
 MISLI_API = "https://apivx.misli.com/api/web/v1/statistics/iddaa/most-played?type=ALL&limit=100"
 IDDAA_API = "https://sportsbookv2.iddaa.com/SportsBook/get-populer-bets?limit=100"
 BILYONER_API = "https://www.bilyoner.com/api/v3/mobile/aggregator/gamelist/events/selections/popular?bulletinType=2&mainPage=false&tabType=1"
@@ -242,6 +243,61 @@ def fetch_misli():
     return parse_misli_json(response.json())
 
 
+def parse_nesine_json(payload):
+    """Nesine prebet records. C is count; MIO/MAO are not confirmed current odds."""
+    if not isinstance(payload, dict) or payload.get("sc") != 200:
+        raise ValueError("Nesine API başarısız yanıt")
+    outer = payload.get("d")
+    items = outer.get("data") if isinstance(outer, dict) else None
+    if not isinstance(items, list):
+        raise ValueError("Nesine veri biçimi beklenenden farklı")
+    results = []
+    for item in items:
+        if not isinstance(item, dict) or str(item.get("SI")) != "1":
+            continue
+        title = str(item.get("EN") or "").strip()
+        market_name = str(item.get("MN") or "").strip()
+        outcome = str(item.get("ONA") or "").strip()
+        try:
+            count = int(item.get("C"))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not title or not market_name or not outcome or count <= 0:
+            continue
+        if market_name == "Maç Sonucu":
+            label = {"1": "MS 1", "2": "MS 2", "0": "MS 0", "X": "MS X"}.get(outcome, outcome)
+        elif market_name == "Toplam Gol":
+            label = outcome
+        elif market_name == "Karşılıklı Gol":
+            label = "KG " + outcome
+        else:
+            label = outcome
+        results.append({
+            "source": "Nesine", "title": title, "count": count,
+            "market": label, "market_name": market_name,
+            "odd": None, "fixture_id": item.get("EID"),
+            "betradar_id": item.get("BRID"), "market_id": item.get("MID"),
+            "outcome_no": item.get("ON"), "league": "", "kickoff": "",
+            "url": URLS["Nesine"], "odds_note": "Nesine MIO/MAO güncel oran olarak doğrulanmadı"
+        })
+    unique = {}
+    for row in results:
+        key = (str(row["fixture_id"]), str(row["market_id"]), str(row["outcome_no"]))
+        if key not in unique or row["count"] > unique[key]["count"]:
+            unique[key] = row
+    return sorted(unique.values(), key=lambda r: r["count"], reverse=True)
+
+
+def fetch_nesine():
+    response = requests.get(NESINE_API, timeout=12, headers={
+        "User-Agent": "Mozilla/5.0 (compatible; GolMerkeziRadar/1.4)",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://www.nesine.com/"
+    })
+    response.raise_for_status()
+    return parse_nesine_json(response.json())
+
+
 def compare_sources(entries):
     """Fixture and normalized market selection; retain platform-specific metrics."""
     groups = {}
@@ -277,11 +333,11 @@ def get_radar(force=False):
             return _cache["data"]
         result = {"updated": datetime.now(timezone.utc).isoformat(), "entries": [], "sources": []}
         for name,url in URLS.items():
-            if name not in ("Bilyoner","iddaa.com","Misli"):
+            if name not in ("Bilyoner","iddaa.com","Misli","Nesine"):
                 result["sources"].append({"name":name,"status":"Henüz otomatik veri bağlantısı doğrulanmadı","url":url})
                 continue
             try:
-                rows={"Bilyoner":fetch_bilyoner,"iddaa.com":fetch_iddaa,"Misli":fetch_misli}[name]()
+                rows={"Bilyoner":fetch_bilyoner,"iddaa.com":fetch_iddaa,"Misli":fetch_misli,"Nesine":fetch_nesine}[name]()
                 result["entries"].extend(rows)
                 status=f"{len(rows)} popüler futbol tercihi alındı" if rows else "API kullanılabilir kayıt döndürmedi"
             except (requests.RequestException,ValueError,TypeError) as exc:
@@ -320,10 +376,10 @@ button:hover{background:#0d967b}input{flex:1;min-width:190px}
 <header><div><h1>📊 Popüler Bahis Radarı</h1><p>Halkın tercihleri • Kaynaklı veriler • Bağımsız değerlendirme</p></div><a href="/">← Canlı Gol Merkezi</a></header>
 <section class="panel"><h2>Veri kaynakları</h2><div id="sources" class="grid">Kaynaklar kontrol ediliyor…</div></section>
 <section class="panel"><h2>Platform karşılaştırması · Aynı maçın tercihleri</h2>
-<p>Platformlar aynı tercihi listeliyorsa ayrı ayrı görünür. Misli yüzdeleri ile oynanma sayıları birleştirilmez.</p>
+<p>Platformlar aynı tercihi listeliyorsa ayrı ayrı görünür. Misli yüzdeleri ile diğer platformların oynanma sayıları birleştirilmez. Nesine oranları doğrulanana kadar gösterilmez.</p>
 <div id="comparisons" class="grid"></div></section>
 <section class="panel"><div class="row"><h2 style="margin:0;flex:1">En çok oynanan tercihler</h2><button id="refresh">Yenile</button></div>
-<p>Oynanma sayıları Bilyoner/iddaa.com kaynaklarına, yüzdeler Misli kaynağına aittir. Popülerlik kazanma olasılığı değildir.</p>
+<p>Oynanma sayıları Bilyoner/iddaa.com/Nesine kaynaklarına, yüzdeler Misli kaynağına aittir. Popülerlik kazanma olasılığı değildir.</p>
 <div class="row" style="margin:14px 0"><input id="search" placeholder="Takım veya market ara…"></div>
 <div id="results" class="grid"></div><p id="updated" class="small"></p></section>
 <section class="panel"><h2>Bot nasıl yorumluyor?</h2>
@@ -339,7 +395,7 @@ document.getElementById("comparisons").innerHTML=filtered.length?filtered.map(g=
 <strong>${esc(g.title)}</strong><p class="small">${esc(g.league||"")} · ${g.platform_count} platformda listeleniyor</p>
 ${g.selections.map(sel=>`<div style="padding:9px 0;border-top:1px solid #294763">
 <b>${esc(sel.market)}</b> <span class="small">(${sel.platform_count} platform)</span>
-${sel.sources.map(a=>`<div class="small">${esc(a.name)}: <span class="count">${a.count!=null?Number(a.count).toLocaleString("tr-TR")+" oynanma":a.percentage!=null?"%"+Number(a.percentage).toLocaleString("tr-TR",{maximumFractionDigits:3})+" popülerlik":"veri yok"}</span> · oran ${a.odd?Number(a.odd).toFixed(2):"yok"}</div>`).join("")}
+${sel.sources.map(a=>`<div class="small">${esc(a.name)}: <span class="count">${a.count!=null?Number(a.count).toLocaleString("tr-TR")+" oynanma":a.percentage!=null?"%"+Number(a.percentage).toLocaleString("tr-TR",{maximumFractionDigits:3})+" popülerlik":"veri yok"}</span> · oran ${a.odd?Number(a.odd).toFixed(2):"doğrulanmadı"}</div>`).join("")}
 </div>`).join("")}</article>`).join("")
 :'<div class="empty">Karşılaştırılabilir maç bulunamadı.</div>';
 }
@@ -348,7 +404,7 @@ const q=document.getElementById("search").value.toLocaleLowerCase("tr");
 const filtered=entries.filter(e=>(e.title+" "+(e.market||"")).toLocaleLowerCase("tr").includes(q));
 document.getElementById("results").innerHTML=filtered.length?filtered.map(e=>`<article class="bet"><strong>${esc(e.title)}</strong>
 <span class="count">${e.count!=null?Number(e.count).toLocaleString("tr-TR")+" kez oynandı":e.percentage!=null?"%"+Number(e.percentage).toLocaleString("tr-TR",{maximumFractionDigits:3})+" popülerlik":"Popülerlik bilgisi yok"}</span><div>
-${e.market?`<span class="tag">${esc(e.market)}</span>`:""}${e.odd?`<span class="tag">Gösterilen oran ${e.odd.toFixed(2)}</span>`:""}
+${e.market?`<span class="tag">${esc(e.market)}</span>`:""}${e.odd?`<span class="tag">Gösterilen oran ${Number(e.odd).toFixed(2)}</span>`:""}
 </div><p class="small">Kaynak: ${esc(e.source)} · <a href="${esc(e.url)}" target="_blank" rel="noopener">Kaynağa git ↗</a></p></article>`).join("")
 :'<div class="empty">Eşleşen doğrulanmış popüler bahis verisi bulunamadı. Tahmini rakam gösterilmiyor.</div>';
 }
