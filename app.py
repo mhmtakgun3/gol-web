@@ -30,7 +30,7 @@ SIGNAL_LIMIT = int(os.getenv("SIGNAL_LIMIT", "65"))
 FIRST_HALF_LIMIT = int(os.getenv("FIRST_HALF_05_LIMIT", "58"))
 FIRST_HALF_15_LIMIT = int(os.getenv("FIRST_HALF_15_LIMIT", "68"))
 BOT_PICK_LIMIT = 78
-BOT_PICK_MINUTE = 55
+BOT_PICK_MINUTE = 10
 BOT_PICK_CONFIRM_SCANS = 2
 BOT_PICK_LATE_MINUTE = 75
 BOT_PICK_MIN_RECENT_PRESSURE = 45
@@ -1297,6 +1297,8 @@ def calculate_bot_pick(
     home_goals: int,
     away_goals: int,
     momentum: Dict[str, Any],
+    first_half_signal: int = 0,
+    match_status: str = "",
 ) -> Tuple[int, str, List[str], int]:
     """
     BOTUN SEÇİMİ artık:
@@ -1326,6 +1328,26 @@ def calculate_bot_pick(
     recent_target = safe_int(recent.get("target"), 0)
     recent_inside = safe_int(recent.get("inside"), 0)
 
+    # 10–35: yalnızca ilk yarı 0-0 için İY 0.5 Üst.
+    # Son 5/10 dakikalık gerçek aksiyon şarttır; toplam şut birikimi yetmez.
+    if 10 <= minute <= 35:
+        if match_status != "1H" or home_goals + away_goals != 0:
+            return 0, "", ["İY 0.5 Üst için ilk yarı 0-0 koşulu yok"], 0
+        if (first_half_signal < FIRST_HALF_LIMIT or momentum_score < 35
+                or (recent_target < 1 and recent_inside < 2)):
+            return 0, "", ["İlk yarıda güncel gol baskısı henüz yeterli değil"], 0
+        early_score = min(100, round(
+            first_half_signal * 0.65 + momentum_score * 0.35
+            + (8 if recent_target >= 2 else 0)
+            + (5 if recent_inside >= 3 else 0)
+        ))
+        reasons = ["İlk yarı 0-0", "Son 5–10 dakikada gol baskısı"]
+        if recent_target:
+            reasons.append(f"Yakın dönemde {recent_target} yeni isabetli şut")
+        return early_score, "İY 0.5 Üst", reasons, 0
+
+    # 36–59: güncel baskı yeterliyse genel gol beklentisini erken değerlendir.
+    # 60–74: normal baskı eşiği; 75+ daha güçlü yakın dönem kanıtı gerekir.
     # Eski şut birikimi tek başına yeni gol seçimi üretemez.
     # Özellikle 75'ten sonra kalan süre azaldığı için hem güçlü güncel
     # baskı hem de yakın zamanda isabetli/ceza içi aksiyon gerekir.
@@ -1333,7 +1355,7 @@ def calculate_bot_pick(
         if (momentum_score < BOT_PICK_LATE_MIN_RECENT_PRESSURE
                 or recent_target < 1 or recent_inside < 1):
             return 0, "", ["Geç dakikada güncel isabetli şut ve ceza içi baskısı yetersiz"], 0
-    elif (momentum_score < BOT_PICK_MIN_RECENT_PRESSURE
+    elif (momentum_score < (35 if minute < 60 else BOT_PICK_MIN_RECENT_PRESSURE)
           or (recent_target < 1 and recent_inside < 2)):
         return 0, "", ["Son 5 dakikadaki gol aksiyonu yetersiz"], 0
 
@@ -2056,6 +2078,8 @@ def analyze_match(match: Dict[str, Any]) -> bool:
         home_goals,
         away_goals,
         momentum,
+        first_half_signal=first_half_signal,
+        match_status=snapshot.get("status", ""),
     )
 
     with memory_lock:
