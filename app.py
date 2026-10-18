@@ -3792,6 +3792,7 @@ select{
 
     <div class="header-right">
       <a class="info-pill" href="/tahmin" style="text-decoration:none;color:inherit">📅 Maç Önü Tahminleri</a>
+      <a class="info-pill" href="/radar" style="text-decoration:none;color:inherit">📊 Popüler Radar</a>
       <div class="status-pill" id="systemState">● Sistem Aktif</div>
       <div class="info-pill" id="lastScan">Son güncelleme: -</div>
       <div class="info-pill" id="scanEvery">↻ 30 sn'de bir</div>
@@ -4438,10 +4439,9 @@ async function settlePickHistory(){
   if(changed)savePickHistory(history);
 }
 function historyQuality(pick){
-  const h=marketHistoryStats(pick.market),p=Number(pick.model_probability||0);
-  const reliability=Math.min(0.55,h.n/30);
-  const adjusted=p*(1-reliability)+h.rate*reliability;
-  return {n:h.n,won:h.won,rate:h.rate,adjusted};
+  // Geçmiş market sonuçları sadece rapor içindir; yeni tahminleri değiştirmez.
+  const h=marketHistoryStats(pick.market);
+  return {n:h.n,won:h.won,rate:h.n?h.won/h.n:0,adjusted:Number(pick.model_probability||0)};
 }
 function candidatePool(){
   const pool=[],stats={matches:analyzedMatches.size,suggestions:0,priced:0,lowProbability:0,lowOdd:0,lowValue:0,weakHistory:0,eligible:0};
@@ -4457,11 +4457,11 @@ function candidatePool(){
       stats.priced++;
       const hist=historyQuality(pick);
       // Geçmişte 12+ sonuç yokken yapay güven artışı uygulanmaz.
-      const p=hist.n>=12?Math.min(baseP,Number(hist.adjusted)):baseP;
+      const p=baseP; // Geçmiş başarı yeni model olasılığını etkilemez.
       if(p<0.52){stats.lowProbability++;continue;}
       const ev=p*odd-1,edge=(p-1/odd)*100;
       if(ev<0.02){stats.lowValue++;continue;}
-      if(hist.n>=20&&hist.rate<0.48){stats.weakHistory++;continue;}
+      // Geçmiş market oranı seçimleri elemez.
       const candidate={fixture:Number(fixture),home:item.match.home,away:item.match.away,
         kickoff:item.match.kickoff,country:item.match.country,league:item.match.league,
         market:pick.market,label:pick.label,confidence:pick.confidence||"",
@@ -4469,8 +4469,8 @@ function candidatePool(){
         valueEdge:edge,historicalRate:hist.rate,historicalN:hist.n,
         odd,bookmaker:pick.quote.bookmaker||"",status:"OPEN"};
       // Bir maçtan yalnızca tek seçim: kuponlarda aynı maçın riskini çoğaltma.
-      if(!best||candidate.modelProbability*candidate.odd-1 >
-          best.modelProbability*best.odd-1)best=candidate;
+      const priority=c=>c.modelProbability*c.odd-1-(c.market==="UNDER_3_5"?0.035:0);
+      if(!best||priority(candidate)>priority(best))best=candidate;
     }
     if(best)pool.push(best);
   }
@@ -4520,9 +4520,10 @@ function buildCoupons(){
     if(expectedRoi<.02){rejected.roi++;return;}
     const risk=couponRisk(probability);
     if(risk.key==="none")return;
-    const historicalBonus=legs.reduce((s,x)=>s+Math.min(5,Math.max(0,(x.historicalRate-.60)*20)),0);
-    const sizeBonus=legs.length===2?3:legs.length===3?2:1;
-    const score=minEdge*30+probability*1000+expectedRoi*900+historicalBonus*10+sizeBonus;
+    const sizeBonus=legs.length===3?2:1;
+    const under35Count=legs.filter(x=>x.market==="UNDER_3_5").length;
+    const diversityPenalty=Math.max(0,under35Count-1)*25;
+    const score=minEdge*30+probability*1000+expectedRoi*900+sizeBonus-diversityPenalty;
     combos.push({legs,total,probability,expectedReturn,expectedProfit,expectedRoi,signature,score,riskKey:risk.key,riskLabel:risk.label,riskLevel:risk.risk});
   }
   // Yalnızca 3 maçlı kuponlar; NO BET mümkündür.
@@ -4615,10 +4616,10 @@ function renderLearningStats(){
     ["DC_1X","1X"],["DC_X2","X2"],["HOME","MS1"],["AWAY","MS2"],
     ["HT_OVER_0_5","İY 0,5 ÜST"],["HT_OVER_1_5","İY 1,5 ÜST"],["HT_UNDER_1_5","İY 1,5 ALT"]
   ];
-  const active=markets.map(([m,l])=>{const x=marketHistoryStats(m);return {...x,label:l}}).filter(x=>x.n>0).sort((a,b)=>b.n-a.n).slice(0,8);
+  const active=markets.map(([m,l])=>{const x=marketHistoryStats(m);return {...x,rate:x.n?x.won/x.n:0,label:l}}).filter(x=>x.n>0).sort((a,b)=>b.n-a.n).slice(0,8);
   document.getElementById("learningStats").innerHTML=active.length
-    ? `<span><b>🧠 Öğrenme:</b></span>`+active.map(x=>`<span>${x.label}: <b class="${x.rate>=.65?"good":x.rate<.55?"bad":""}">%${(x.rate*100).toFixed(0)}</b> (${x.n})</span>`).join("")
-    : `<span><b>🧠 Öğrenme:</b> Henüz yeterli geçmiş sonuç yok; v5.0 önce veri topluyor.</span>`;
+    ? `<span><b>📊 Geçmiş sonuçlar (seçimi etkilemez):</b></span>`+active.map(x=>`<span>${x.label}: <b class="${x.rate>=.65?"good":x.rate<.55?"bad":""}">%${(x.rate*100).toFixed(0)}</b> (${x.n})</span>`).join("")
+    : `<span><b>📊 Geçmiş sonuçlar (seçimi etkilemez):</b> Henüz sonuçlanmış geçmiş seçim bulunmuyor.</span>`;
 }
 
 function renderBankroll(store){
