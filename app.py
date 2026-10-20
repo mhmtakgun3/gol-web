@@ -4372,7 +4372,7 @@ async function getJson(url){
 const couponStoreKey="golPrematchCouponsV2";
 const pickHistoryKey="golPrematchPickHistoryV4";
 const couponStake=1000;
-const couponStrategyVersion="v8.0-independent";
+const couponStrategyVersion="v9.0-quality-diversity";
 function couponStore(){try{return JSON.parse(localStorage.getItem(couponStoreKey)||"{}")||{}}catch{return {}}}
 function saveCouponStore(store){localStorage.setItem(couponStoreKey,JSON.stringify(store))}
 function pickHistory(){try{return JSON.parse(localStorage.getItem(pickHistoryKey)||"[]")||[]}catch{return []}}
@@ -4422,110 +4422,80 @@ function historyQuality(pick){
 function candidatePool(){
   const pool=[],stats={matches:analyzedMatches.size,suggestions:0,priced:0,lowProbability:0,lowOdd:0,lowValue:0,weakHistory:0,eligible:0};
   for(const [fixture,item] of analyzedMatches){
-    // Ekranda görünen 2 seçime değil, analiz edilen TÜM marketlere bak.
     const picks=item.analysis.all_suggestions||item.analysis.suggestions||[];
+    const quality=item.analysis.data_quality||"";
     let best=null;
     for(const pick of picks){
       stats.suggestions++;
-      const odd=Number(pick.quote?.odd||0),baseP=Number(pick.model_probability||0);
-      if(!Number.isFinite(baseP)||baseP<=0||baseP>=1)continue;
+      const odd=Number(pick.quote?.odd||0),p=Number(pick.model_probability||0);
+      if(!Number.isFinite(p)||p<=0||p>=1)continue;
       if(!Number.isFinite(odd)||odd<1.30){stats.lowOdd++;continue;}
       stats.priced++;
-      // v8: Her maç yalnızca kendi güncel verileriyle değerlendirilir.
-      // Geçmiş bahis/market başarı oranı, tahmin veya filtre girdisi DEĞİLDİR.
-      const p=baseP;
-      if(p<0.52){stats.lowProbability++;continue;}
+      // Kupon seçiminde geçmiş bahis sonuçları ve geçmiş market başarı oranları kullanılmaz.
+      // Yetersiz veriyle yüksek güven iddiası oluşturma.
+      if(quality!=="good"||p<0.60){stats.lowProbability++;continue;}
       const ev=p*odd-1,edge=(p-1/odd)*100;
-      if(ev<0.02){stats.lowValue++;continue;}
+      if(ev<0){stats.lowValue++;continue;}
       const candidate={fixture:Number(fixture),home:item.match.home,away:item.match.away,
         kickoff:item.match.kickoff,country:item.match.country,league:item.match.league,
-        market:pick.market,label:pick.label,confidence:pick.confidence||"",
-        modelProbability:p,baseModelProbability:baseP,impliedProbability:1/odd,
+        market:pick.market,label:pick.label,confidence:quality,
+        modelProbability:p,baseModelProbability:p,impliedProbability:1/odd,
         valueEdge:edge,historicalRate:null,historicalN:0,
         odd,bookmaker:pick.quote.bookmaker||"",status:"OPEN"};
-      // Bir maçtan yalnızca tek seçim: kuponlarda aynı maçın riskini çoğaltma.
-      if(!best||candidate.modelProbability*candidate.odd-1 >
-          best.modelProbability*best.odd-1)best=candidate;
+      // Bir maç için en yüksek model olasılığına sahip uygun marketi seç.
+      if(!best||p>best.modelProbability||(p===best.modelProbability&&edge>best.valueEdge))best=candidate;
     }
     if(best)pool.push(best);
   }
-  pool.sort((a,b)=>(b.modelProbability*b.odd-1)-(a.modelProbability*a.odd-1));
+  pool.sort((a,b)=>b.modelProbability-a.modelProbability||b.valueEdge-a.valueEdge);
   stats.eligible=pool.length;pool.stats=stats;return pool;
 }
-function marketFamily(m){
-  if(["HOME","AWAY","DC_1X","DC_X2"].includes(m))return "RESULT";
-  if(["BTTS_YES","BTTS_NO"].includes(m))return "BTTS";
-  if(m.includes("OVER")||m.includes("UNDER"))return m.startsWith("HT_")?"HT_GOALS":"GOALS";
-  return "OTHER";
-}
-function marketCompatible(a,b){ return true; }
 function couponRisk(probability){
   const p=Number(probability||0);
   if(p>=0.50)return {key:"safe",label:"🟢 GÖRECELİ DÜŞÜK RİSK",risk:"DÜŞÜK"};
-  if(p>=0.35)return {key:"balanced",label:"🟡 DENGELİ",risk:"ORTA"};
-  if(p>=0.25)return {key:"value",label:"🔴 DEĞER",risk:"YÜKSEK"};
+  if(p>=0.35)return {key:"balanced",label:"🟡 ORTA RİSK",risk:"ORTA"};
+  if(p>=0.30)return {key:"value",label:"🔴 YÜKSEK RİSK",risk:"YÜKSEK"};
   return {key:"none",label:"❌ NO BET",risk:"ÇOK YÜKSEK"};
 }
 function buildCoupons(){
   const store=couponStore(),existing=store[loadedDate]||[],pool=candidatePool();
-  const activeExisting=existing.filter(c=>c.status!=="VOID"&&c.strategyVersion===couponStrategyVersion);
-  const existingSignatures=new Set(activeExisting.map(c=>c.signature||c.legs.map(x=>`${x.fixture}:${x.market}`).sort().join("|")));
-  const usedToday=new Map();
-  for(const c of activeExisting)for(const l of c.legs||[]){const id=Number(l.fixture);usedToday.set(id,(usedToday.get(id)||0)+1)}
-  const combos=[],rejected={sameMatch:0,repeatLimit:0,duplicate:0,totalOdd:0,probability:0,roi:0,correlation:0};
-  function consider(legs){
-    if(legs.length<3||legs.length>3)return;
-    if(new Set(legs.map(x=>x.fixture)).size!==legs.length){rejected.sameMatch++;return;}
-    if(legs.some(x=>(usedToday.get(Number(x.fixture))||0)>=2)){rejected.repeatLimit++;return;}
-    for(let i=0;i<legs.length;i++)for(let j=i+1;j<legs.length;j++)if(!marketCompatible(legs[i],legs[j])){rejected.correlation++;return;}
-    // Farklı maçlarda aynı market ailesi otomatik ret nedeni değildir.
-    const signature=legs.map(x=>`${x.fixture}:${x.market}`).sort().join("|");
-    if(existingSignatures.has(signature)){rejected.duplicate++;return;}
-    const total=legs.reduce((s,x)=>s*x.odd,1);
-    const rawProbability=legs.reduce((p,x)=>p*x.modelProbability,1);
-    const probability=rawProbability*0.90; // Temkinli iskonto; kalibrasyon yerine geçmez.
-    const expectedReturn=couponStake*total*probability;
-    const expectedProfit=expectedReturn-couponStake;
-    const expectedRoi=expectedProfit/couponStake;
-    const minProbability=legs.length===2?.40:legs.length===3?.32:.27;
-    const minEdge=Math.min(...legs.map(x=>x.valueEdge));
-    const avgP=legs.reduce((s,x)=>s+x.modelProbability,0)/legs.length;
-    if(total<1.70||total>12.00){rejected.totalOdd++;return;}
-    if(probability<.16||avgP<.52||minEdge<2.0){rejected.probability++;return;}
-    if(expectedRoi<.02){rejected.roi++;return;}
+  const activeExisting=existing.filter(c=>c.status!=="VOID");
+  // Aynı gün daha önce seçilmiş maçları yeni kuponlarda tekrar kullanma.
+  const usedToday=new Set(activeExisting.flatMap(c=>(c.legs||[]).map(l=>Number(l.fixture))));
+  const available=pool.filter(p=>!usedToday.has(Number(p.fixture)));
+  const combos=[];
+  // Kuponlar daima 3 farklı maçtan oluşur. Model tahminleri kalibre edilmemiştir.
+  for(let i=0;i<available.length;i++)for(let j=i+1;j<available.length;j++)for(let k=j+1;k<available.length;k++){
+    const legs=[available[i],available[j],available[k]];
+    if(new Set(legs.map(x=>x.fixture)).size!==3)continue;
+    const total=legs.reduce((v,x)=>v*x.odd,1);
+    const probability=legs.reduce((v,x)=>v*x.modelProbability,1)*0.90;
+    if(total>12||probability<0.30)continue;
     const risk=couponRisk(probability);
-    if(risk.key==="none")return;
-    const historicalBonus=0; // v8: geçmiş başarısı sıralamayı etkilemez
-    const sizeBonus=legs.length===2?3:legs.length===3?2:1;
-    const score=minEdge*30+probability*1000+expectedRoi*900+sizeBonus;
-    combos.push({legs,total,probability,expectedReturn,expectedProfit,expectedRoi,signature,score,riskKey:risk.key,riskLabel:risk.label,riskLevel:risk.risk});
+    if(risk.key==="none")continue;
+    const signature=legs.map(x=>`${x.fixture}:${x.market}`).sort().join("|");
+    const expectedReturn=couponStake*total*probability;
+    combos.push({legs,total,probability,expectedReturn,expectedProfit:expectedReturn-couponStake,
+      expectedRoi:(expectedReturn-couponStake)/couponStake,signature,
+      score:probability*1000,riskKey:risk.key,riskLabel:risk.label,riskLevel:risk.risk});
   }
-  // Yalnızca 3 maçlı kuponlar; NO BET mümkündür.
-  // 2 maçlı kupon üretilmez.
-  for(let i=0;i<pool.length;i++)for(let j=i+1;j<pool.length;j++)for(let k=j+1;k<pool.length;k++)consider([pool[i],pool[j],pool[k]]);
-  // 4 maçlı yüksek riskli kupon üretilmez.
-  combos.sort((a,b)=>b.score-a.score);
-  const chosen=[],newUse=new Map();
-  // Sabit kupon adedi yok. Kalite filtresini geçen ve çeşitlendirme kuralına uyan tüm kombinasyonlar değerlendirilir.
+  combos.sort((a,b)=>b.probability-a.probability||a.total-b.total);
+  const chosen=[],newUse=new Set();
+  // Kupon sayısı sabit değil; maç tekrarına izin vermeyen kaliteli kombinasyonlar alınır.
   for(const combo of combos){
-    const fixtures=combo.legs.map(x=>Number(x.fixture));
-    if(fixtures.some(id=>(newUse.get(id)||0)+(usedToday.get(id)||0)>=2))continue;
-    if(chosen.some(c=>{
-      const overlap=c.legs.filter(l=>fixtures.includes(Number(l.fixture))).length;
-      return overlap>=2;
-    }))continue;
+    if(combo.legs.some(l=>newUse.has(Number(l.fixture))))continue;
     chosen.push({...combo,stake:couponStake,status:"OPEN",strategyVersion:couponStrategyVersion,created:new Date().toISOString()});
-    fixtures.forEach(id=>newUse.set(id,(newUse.get(id)||0)+1));
+    combo.legs.forEach(l=>newUse.add(Number(l.fixture)));
   }
   if(!chosen.length){
     saveCouponStore(store);renderCoupons(existing);
     const s=pool.stats||{};
-    document.getElementById("couponState").textContent=`v7.0: ${s.matches||0} maçta ${s.suggestions||0} market incelendi. ${s.priced||0} markette 1.30+ doğrulanmış oran var; ${s.eligible||0} farklı maç kupona aday. 3 uygun farklı maç ve kabul edilebilir fiyat/değer birleşimi oluşmadı. Oransız BetBuilder otomatik kupona eklenmez.`;
+    document.getElementById("couponState").textContent=`v9.0: ${s.matches||0} maç, ${s.suggestions||0} market incelendi. ${s.eligible||0} maç veri kalitesi, %60+ model olasılığı ve doğrulanmış 1.30+ oran şartlarını geçti. Tekrarsız 3 maçlı, en az %30 temkinli model olasılığına sahip kombinasyon bulunamadı; zorla kupon üretilmedi.`;
     return;
   }
   store[loadedDate]=[...existing,...chosen];saveCouponStore(store);renderCoupons(store[loadedDate]);
   const safe=chosen.filter(c=>c.riskKey==="safe").length,balanced=chosen.filter(c=>c.riskKey==="balanced").length,value=chosen.filter(c=>c.riskKey==="value").length;
-  document.getElementById("couponState").textContent=`v7.0: ${chosen.length} sanal kupon oluşturuldu • 🟢 ${safe} güvenli • 🟡 ${balanced} dengeli • 🔴 ${value} değer • toplam ${chosen.length*couponStake.toLocaleString("tr-TR")} TL sanal bahis • kupon boyutu 3 maç.`;
+  document.getElementById("couponState").textContent=`v9.0: ${chosen.length} sanal kupon oluşturuldu • 🟢 ${safe} göreceli düşük risk • 🟡 ${balanced} orta risk • 🔴 ${value} yüksek risk • toplam ${(chosen.length*couponStake).toLocaleString("tr-TR")} TL sanal bahis • her kupon 3 farklı maç. Olasılıklar kalibre edilmemiş model tahminidir.`;
 }
 
 function legResult(market,h,a,hh=null,ha=null){
