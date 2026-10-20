@@ -218,70 +218,91 @@ def _scenario_family(market):
 
 
 def choose_markets(candidates, quality):
-    """Always report a football scenario; distinguish it from an executable bet.
+    """Choose a match-specific scenario, never a default cheap goal market.
 
-    No price is invented for a builder. 1.30 floor applies to executable bets,
-    not to model calculations. No arbitrary promotion of weak candidates.
+    Quotes must match the exact market. Unpriced choices are informational only.
+    Under markets are fallback options, not the automatic first choice.
     """
+    if not candidates:
+        return []
+    by_code = {c['market']: c for c in candidates}
     for c in candidates:
-        p=c.get('model_probability') or 0
-        c['risk_level']=risk_level(p,quality)
-        c['decision_role']={'green':'GÜÇLÜ SENARYO','yellow':'DENGELİ SENARYO',
-                            'red':'RİSKLİ SENARYO'}[c['risk_level']]
-        q=c.get('quote') or {}
-        try: odd=float(q.get('odd') or 0)
-        except (ValueError,TypeError): odd=0
-        c['price_verified']=bool(odd>=1.30 and not c['market'].startswith('BB_'))
-        c['coupon_eligible']=bool(c['price_verified'] and c.get('coupon_eligible')
-                                  and p>=.60 and quality=='good')
-        c['manual_review']=not c['coupon_eligible']
-    # Futbol senaryosu fiyattan bağımsız seçilir. Yüksek taban oranlı
-    # 3,5 ALT'ın her maçta otomatik kazanmasını önlemek için futbol
-    # yönü belirleyen sonuç, KG ve gol üstü senaryolarını önce karşılaştır.
-    # Birleşik market ancak tekil MS tahmini de yeterince destekliyorsa öne çıkar.
-    by_code={c['market']:c for c in candidates}
-    preferred=[]
-    for side,combo in (('HOME','BB_HOME_OVER15'),('AWAY','BB_AWAY_OVER15')):
-        result=by_code.get(side); builder=by_code.get(combo)
-        if result and builder and result['model_probability']>=.51 and builder['model_probability']>=.42:
-            preferred.append(builder)
-    for code in ('HOME','AWAY','BTTS_YES','OVER_2_5','OVER_1_5',
-                 'BB_BTTS_OVER25','HOME_OVER_1_5','AWAY_OVER_1_5',
-                 'BB_HOME_TEAM15','BB_AWAY_TEAM15','UNDER_2_5','BTTS_NO'):
-        c=by_code.get(code)
-        if c and c['model_probability']>=.52: preferred.append(c)
-    # ALT 3,5 ancak gerçekten düşük gol beklentisinde, alternatif yoksa.
-    scenario=next((c for c in preferred if c['market'] in ('HOME','AWAY','BTTS_YES','OVER_2_5','OVER_1_5') ),None)
-    preferred.sort(key=lambda c:(c['model_probability'] +
-        (.24 if c['market'] in ('BB_HOME_OVER15','BB_AWAY_OVER15') else 0) +
-        (.05 if c['market'] in ('HOME','AWAY','BTTS_YES','OVER_2_5') else 0)),reverse=True)
-    selected=[]
-    def add(item):
-        family=_scenario_family(item['market'])
-        if family in {_scenario_family(x['market']) for x in selected}: return False
-        selected.append(item)
-        return True
-    if preferred: add(preferred[0])
-    for c in preferred[1:]:
-        if len(selected)>=2: break
-        add(c)
-    # ALT marketleri SON ÇARE: önce sonuç, KG ve ÜST senaryoları.
-    # Bu tercih sırası gerçek olasılıkların değiştiği anlamına gelmez.
+        prob = float(c.get('model_probability') or 0)
+        c['risk_level'] = risk_level(prob, quality)
+        q = c.get('quote') or {}
+        try:
+            odd = float(q.get('odd') or 0)
+        except (TypeError, ValueError):
+            odd = 0
+        c['price_verified'] = bool(odd >= 1.30 and not c['market'].startswith('BB_'))
+        c['coupon_eligible'] = bool(c['price_verified'] and c.get('coupon_eligible')
+                                    and prob >= .60 and quality == 'good')
+        c['manual_review'] = not c['coupon_eligible']
+
+    # BetBuilder combinations may be a sound *analysis*, but never imply an
+    # executable price unless a matching real quote has been supplied.
+    combined = []
+    for side, code in (('HOME', 'BB_HOME_OVER15'), ('AWAY', 'BB_AWAY_OVER15')):
+        result, builder = by_code.get(side), by_code.get(code)
+        if result and builder and result['model_probability'] >= .54 and builder['model_probability'] >= .43:
+            combined.append(builder)
+    btts, btts_builder = by_code.get('BTTS_YES'), by_code.get('BB_BTTS_OVER25')
+    if btts and btts_builder and btts['model_probability'] >= .54 and btts_builder['model_probability'] >= .40:
+        combined.append(btts_builder)
+
+    # We do not let an easy 1.5-over or 3.5-under market dominate simply
+    # because its raw probability is higher. Prefer a distinct football thesis.
+    primary_codes = ('HOME', 'AWAY', 'BTTS_YES', 'OVER_2_5', 'OVER_3_5',
+                     'HOME_OVER_1_5', 'AWAY_OVER_1_5')
+    meaningful = [by_code[k] for k in primary_codes
+                  if k in by_code and by_code[k]['model_probability'] >= .52]
+    priced = [c for c in meaningful if c['price_verified']]
+
+    def rank(c):
+        prob = float(c['model_probability'])
+        quote = c.get('quote') or {}
+        odd = float(quote.get('odd') or 0)
+        # Market price is a validation gate, not a substitute for the thesis.
+        # This modest quality bonus never fabricates odds or probabilities.
+        return (prob + (.025 if c['market'] in ('HOME', 'AWAY', 'BTTS_YES') else 0)
+                + (.015 if odd >= 1.50 else 0))
+
+    selected = []
+    if priced:
+        selected.append(max(priced, key=rank))
+    elif combined:
+        selected.append(max(combined, key=lambda c: c['model_probability']))
+    elif meaningful:
+        selected.append(max(meaningful, key=rank))
+    else:
+        # 1.5 OVER is an informative fallback only when the match really
+        # points to goals, never the default for every fixture.
+        over15 = by_code.get('OVER_1_5')
+        if over15 and over15['model_probability'] >= .75 and over15['price_verified']:
+            selected.append(over15)
+        else:
+            # The user prefers UNDER only as the last resort.
+            under = [by_code[k] for k in ('UNDER_2_5', 'UNDER_3_5') if k in by_code
+                     and by_code[k]['price_verified'] and by_code[k]['model_probability'] >= .68]
+            if under:
+                selected.append(max(under, key=rank))
+
     if not selected:
-        non_under=[c for c in candidates if 'UNDER' not in c['market'] and
-                   c['market'] not in ('BTTS_NO',)]
-        non_under.sort(key=lambda c:c['model_probability'],reverse=True)
-        for c in non_under:
-            if c['model_probability']>=.45 and add(c): break
-    if not selected:
-        under=[c for c in candidates if 'UNDER' in c['market']]
-        under.sort(key=lambda c:c['model_probability'],reverse=True)
-        for c in under:
-            if c['model_probability']>=.60 and add(c): break
-    for i,c in enumerate(selected):
-        c['is_main']=i==0
-        c['decision_role']=('ANA MAÇ SENARYOSU · ' if i==0 else 'ALTERNATİF · ')+c['decision_role']
-        c['explanation']=(c.get('explanation') or c.get('reason') or '') + (
-            ' Gerçek oran doğrulanmadığı için otomatik kupona alınmaz.'
-            if not c['price_verified'] else ' Fiyat 1.30 eşiğini karşılıyor; model riski ayrıca değerlendirilmelidir.')
+        return []  # Explicit PASS is better than a made-up 'playable' tip.
+
+    main = selected[0]
+    family = _scenario_family(main['market'])
+    alternatives = [c for c in meaningful + combined
+                    if c['market'] != main['market'] and _scenario_family(c['market']) != family]
+    alternatives.sort(key=lambda c:(c['price_verified'], rank(c) if c['price_verified'] else c['model_probability']),reverse=True)
+    if alternatives:
+        selected.append(alternatives[0])
+
+    for i, c in enumerate(selected):
+        c['is_main'] = (i == 0)
+        c['decision_role'] = ('ANA MAÇ SENARYOSU' if i == 0 else 'ALTERNATİF')
+        c['explanation'] = (c.get('explanation') or c.get('reason') or '') + (
+            ' Doğrulanmış 1.30+ oran yok; sadece analiz, otomatik kupona alınmaz.'
+            if not c['price_verified'] else
+            ' Doğrulanmış oran mevcut; kupon uygunluğu ayrıca kontrol edilir.')
     return selected
