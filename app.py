@@ -4651,6 +4651,21 @@ function historyQuality(pick){
   const adjusted=p*(1-reliability)+h.rate*reliability;
   return {n:h.n,won:h.won,rate:h.rate,adjusted};
 }
+// Tek başına yüksek olasılık değil, doğrulanmış fiyatın beklenen değeri belirleyici.
+function marketValueScore(p){
+  const odd=Number(p?.quote?.odd||p?.odd||0);
+  const prob=Number(p?.model_probability??p?.modelProbability??0);
+  if(!(odd>=1.30&&prob>0&&prob<1))return -Infinity;
+  const ev=prob*odd-1;
+  // Veri kalitesi zayıfken pozitif değer iddiası üretme.
+  return ev + Math.min(prob,0.9)*0.035;
+}
+function bestPricedMarket(picks,quality){
+  if(quality!=="good")return null;
+  const eligible=(picks||[]).filter(p=>Number(p?.quote?.odd)>=1.30&&Number(p?.model_probability)>0&&Number(p?.model_probability)<1&&marketValueScore(p)>0.035);
+  eligible.sort((a,b)=>marketValueScore(b)-marketValueScore(a));
+  return eligible[0]||null;
+}
 function candidatePool(){
   const pool=[],stats={matches:analyzedMatches.size,suggestions:0,priced:0,lowProbability:0,lowOdd:0,lowValue:0,weakHistory:0,eligible:0};
   for(const [fixture,item] of analyzedMatches){
@@ -4677,10 +4692,10 @@ function candidatePool(){
       options.push(candidate);
     }
     // Bir maçın uygun alternatiflerini sakla; yalnızca en yüksek olasılıklı markete kilitlenme.
-    options.sort((a,b)=>b.modelProbability-a.modelProbability||b.valueEdge-a.valueEdge);
+    options.sort((a,b)=>marketValueScore(b)-marketValueScore(a));
     if(options.length)pool.push({...options[0],options:options.slice(0,8)});
   }
-  pool.sort((a,b)=>b.modelProbability-a.modelProbability||b.valueEdge-a.valueEdge);
+  pool.sort((a,b)=>marketValueScore(b)-marketValueScore(a));
   stats.eligible=pool.length;pool.stats=stats;return pool;
 }
 function couponRisk(probability){
@@ -4714,7 +4729,7 @@ function buildCoupons(){
       const probability=legs.reduce((v,x)=>v*x.modelProbability,1)*0.90;
       if(total>12||probability<0.30)continue;
       const diversityBonus=(families.size-1)*0.015;
-      const score=probability+diversityBonus;
+      const score=legs.reduce((v,x)=>v+marketValueScore(x),0)+diversityBonus;
       if(!bestCombo||score>bestCombo.score){
         const risk=couponRisk(probability);
         const signature=legs.map(x=>`${x.fixture}:${x.market}`).sort().join("|");
@@ -4726,7 +4741,7 @@ function buildCoupons(){
     }
     if(bestCombo)combos.push(bestCombo);
   }
-  combos.sort((a,b)=>b.probability-a.probability||a.total-b.total);
+  combos.sort((a,b)=>b.score-a.score||b.probability-a.probability);
   const chosen=[],newUse=new Set();
   // Kupon sayısı sabit değil; maç tekrarına izin vermeyen kaliteli kombinasyonlar alınır.
   for(const combo of combos){
@@ -4891,7 +4906,7 @@ function renderFixtures(){
       card.innerHTML=`<div class="gm-match-time"><b>${esc(shownTime(m.kickoff))}</b><small>${esc(m.league||m.country||"")}</small></div><div class="gm-teams"><span class="gm-team">${logo(m.home_logo,m.home)}<b>${esc(m.home)}</b></span><span class="gm-vs">—</span><span class="gm-team">${logo(m.away_logo,m.away)}<b>${esc(m.away)}</b></span></div><span class="gm-market" data-market>Analiz bekliyor</span><span class="gm-price" data-price>—</span><span class="gm-confidence" data-confidence>—</span><span class="gm-risk" data-risk>—</span><span class="gm-form" data-form>—</span><button type="button" class="analyze-btn">Analiz et →</button><div class="analysis" hidden></div>`;
       const button=card.querySelector(".analyze-btn"),box=card.querySelector(".analysis");
       button.onclick=async()=>{
-        button.disabled=true;box.hidden=false;box.textContent="Son maçlar inceleniyor…";
+        button.disabled=true;button.textContent="Analiz ediliyor…";box.hidden=true;box.textContent="";
         try{
           const a=await getJson("/api/prematch/analyze?date="+encodeURIComponent(selected)+"&fixture="+encodeURIComponent(m.id));
           analyzedMatches.set(Number(m.id),{match:m,analysis:a});
@@ -4899,21 +4914,22 @@ function renderFixtures(){
           registerPickHistory(m,a);
           const choices=Array.isArray(a.suggestions)?a.suggestions:[];
           const ranked=choices.filter(p=>p?.quote&&Number(p.quote.odd)>=1.30);
-          const primary=ranked[0]||choices[0];
-          card.querySelector("[data-market]").textContent=primary?.label||"Uygun seçim yok";
+          const primary=bestPricedMarket(a.all_suggestions||choices,a.data_quality);
+          card.querySelector("[data-market]").textContent=primary?.label||"Değerli seçim yok";
           card.querySelector("[data-price]").textContent=primary?.quote&&Number(primary.quote.odd)>=1.30?Number(primary.quote.odd).toFixed(2):"—";
-          const prob=Number(primary?.probability??primary?.model_probability??NaN);card.querySelector("[data-confidence]").textContent=Number.isFinite(prob)?`${(prob<=1?prob*100:prob).toFixed(0)}%`:"—";
-          const risk=Number.isFinite(prob)?(prob<=1?prob*100:prob):NaN;card.querySelector("[data-risk]").textContent=Number.isFinite(risk)?(risk>=75?"Düşük":risk>=60?"Orta":"Yüksek"):"—";
+          const prob=primary?Number(primary.model_probability):NaN;card.querySelector("[data-confidence]").textContent=Number.isFinite(prob)?`${(prob<=1?prob*100:prob).toFixed(0)}%`:"—";
+          const risk=Number.isFinite(prob)?(prob<=1?prob*100:prob):NaN;card.querySelector("[data-risk]").textContent=Number.isFinite(risk)?(risk>=75?"Düşük":risk>=60?"Orta":"Yüksek"):"Pas";
+          box.hidden=true; // Sonuç tabloda kalır, detay ekranı kendiliğinden açılmaz.
+          button.textContent="Yeniden analiz et";
           box.innerHTML=`<div class="gm-decision"><div class="gm-decision-label">BOT ANALİZİ</div><div class="gm-decision-top"><strong>${esc(primary?.label||"Uygun tercih bulunamadı")}</strong><span class="gm-odd">${primary?.quote&&Number(primary.quote.odd)>=1.30?Number(primary.quote.odd).toFixed(2)+" ORAN":"ORAN DOĞRULANMADI"}</span></div><div class="gm-decision-meta"><span>${esc(primary?.decision_role||"Model değerlendirmesi")}</span><span>${esc(primary?.quote?.bookmaker||"Fiyat kaynağı yok")}</span></div><p>Maç istatistikleri ve piyasa fiyatları arka planda değerlendirildi. Model tahminleri kesin sonuç değildir.</p><button type="button" class="close-analysis">✕ Kapat</button></div>`;
           box.querySelector(".close-analysis").onclick=()=>{
-            analyzedMatches.delete(Number(m.id));
-            document.getElementById("wsAnalyzedCount").textContent=analyzedMatches.size;
+            // Analizi gizlemek sonuçları ve kupon adaylarını silmez.
             box.hidden=true;
             box.innerHTML="";
             button.disabled=false;
             button.textContent="Bu maçı tekrar analiz et";
           };
-        }catch(e){box.innerHTML='<span class="error">'+esc(e.message)+'</span>'}
+        }catch(e){box.hidden=false;box.innerHTML='<span class="error">'+esc(e.message)+'</span>'}
         finally{button.disabled=false}
       };
       root.appendChild(card);
