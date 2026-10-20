@@ -443,7 +443,7 @@ def api_headers() -> Dict[str, str]:
     }
 
 
-def api_get(path: str, params: Optional[Dict[str, Any]] = None) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+def api_get(path: str, params: Optional[Dict[str, Any]] = None, *, timeout=None) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     if not API_KEY:
         return None, "API_KEY ortam değişkeni tanımlı değil."
 
@@ -454,7 +454,7 @@ def api_get(path: str, params: Optional[Dict[str, Any]] = None) -> Tuple[Optiona
             url,
             headers=api_headers(),
             params=params or {},
-            timeout=REQUEST_TIMEOUT,
+            timeout=REQUEST_TIMEOUT if timeout is None else timeout,
         )
 
         if response.status_code != 200:
@@ -2298,24 +2298,56 @@ def prematch_day(raw: str) -> Optional[date]:
     return requested if today <= requested <= today + timedelta(days=7) else None
 
 
+# Fikstur/form API sorunlarinda Gunicorn worker'ini bekletmeden cevap ver.
+# Hata durumlari kisa sure saklanir; onceki basarili veri varsa korunur.
+_prematch_failures = {}
+_prematch_inflight = set()
+PREMATCH_ERROR_CACHE_SECONDS = 25
+PREMATCH_API_TIMEOUT = (3, 7)  # connect / read (saniye)
+
+
 def prematch_api_cached(key: str, path: str, params: Dict[str, Any], ttl: int
                         ) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+    now = time.time()
     with cache_lock:
         cached = prematch_cache.get(key)
-        if cached and time.time() - cached["ts"] < ttl:
+        if cached and now - cached["ts"] < ttl:
             return cached["data"], None
-    data, error = api_get(path, params)
-    if error or data is None:
-        return None, error or "Veri alınamadı."
-    response = data.get("response")
-    if not isinstance(response, list):
-        return None, "Beklenmeyen fikstür yanıtı."
-    with cache_lock:
-        prematch_cache[key] = {"ts": time.time(), "data": response}
-        if len(prematch_cache) > 300:
-            oldest = min(prematch_cache, key=lambda item: prematch_cache[item]["ts"])
-            prematch_cache.pop(oldest, None)
-    return response, None
+        failed = _prematch_failures.get(key)
+        if failed and now - failed["ts"] < PREMATCH_ERROR_CACHE_SECONDS:
+            if cached:
+                return cached["data"], None
+            return None, failed["error"]
+        # Birden fazla istemci ayni fiksturu ayni anda sorgulamasin.
+        if key in _prematch_inflight:
+            if cached:
+                return cached["data"], None
+            return None, "Veri su anda yukleniyor. Biraz sonra yeniden deneyin."
+        _prematch_inflight.add(key)
+
+    try:
+        data, error = api_get(path, params, timeout=PREMATCH_API_TIMEOUT)
+        if not error and data is not None:
+            response = data.get("response")
+            if not isinstance(response, list):
+                error = "Beklenmeyen API yaniti."
+            else:
+                with cache_lock:
+                    prematch_cache[key] = {"ts": time.time(), "data": response}
+                    _prematch_failures.pop(key, None)
+                    if len(prematch_cache) > 300:
+                        oldest = min(prematch_cache, key=lambda item: prematch_cache[item]["ts"])
+                        prematch_cache.pop(oldest, None)
+                return response, None
+        error = error or "Veri alinamadi."
+        with cache_lock:
+            _prematch_failures[key] = {"ts": time.time(), "error": error}
+        if cached:
+            return cached["data"], None
+        return None, error
+    finally:
+        with cache_lock:
+            _prematch_inflight.discard(key)
 
 
 def prematch_fixtures(day: date) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
@@ -4459,25 +4491,31 @@ body{background:radial-gradient(ellipse 80% 55% at 72% -12%,rgba(0,194,190,.25),
 .pro-sidebar{box-shadow:18px 0 65px rgba(0,0,0,.42)!important}
 .wrap,main{position:relative}
 .card,.panel,.coupon-panel{box-shadow:0 20px 50px rgba(0,0,0,.27),inset 0 1px rgba(255,255,255,.035)!important}
+
+/* GOL MERKEZI PRO / Prematch Workspace 4.0 — structural redesign */
+:root{--ws-mint:#50efd4;--ws-blue:#4ca8f5;--ws-gold:#f4c66e;--ws-muted:#9bb6c9}
+body{background:radial-gradient(ellipse 60% 43% at 76% 4%,rgba(16,157,170,.22),transparent 75%),radial-gradient(ellipse 45% 55% at 25% 75%,rgba(27,73,166,.23),transparent 78%),linear-gradient(125deg,#030a15,#081a2d 51%,#030a16)!important;background-attachment:fixed!important}
+.wrap{max-width:1740px!important;width:calc(100% - 68px)!important;padding:26px 0 100px!important}
+.ws-hero{position:relative;overflow:hidden;display:grid;grid-template-columns:minmax(0,1.3fr) minmax(290px,.7fr);align-items:center;gap:25px;min-height:235px;padding:36px 40px!important;background:radial-gradient(circle at 83% 47%,rgba(39,228,202,.15),transparent 32%),linear-gradient(112deg,#112d48 0%,#0a2036 48%,#061322 100%)!important;border:1px solid rgba(92,202,221,.29)!important}
+.ws-hero:after{content:'';position:absolute;right:7%;top:-90px;width:390px;height:390px;border:1px solid rgba(73,232,216,.17);border-radius:50%;box-shadow:0 0 0 42px rgba(54,213,220,.035),0 0 0 95px rgba(54,213,220,.025);pointer-events:none}
+.ws-kicker{color:var(--ws-mint);font-size:11px;letter-spacing:.24em;font-weight:900;margin-bottom:15px}.ws-hero h1{font-size:clamp(32px,3.2vw,51px)!important;line-height:1.08;max-width:750px;margin-bottom:16px!important}.ws-hero p{font-size:15px;max-width:590px}.ws-hero .version{font-size:11px;letter-spacing:0;vertical-align:middle}
+.ws-hero-art{position:relative;z-index:1;display:flex;justify-content:center;align-items:center;min-height:175px}.ws-orb{display:grid;place-items:center;width:175px;height:175px;border-radius:50%;background:radial-gradient(circle at 30% 25%,#37dbc3,#126c86 45%,#0a2540 73%);box-shadow:0 0 70px #25d4ce44,inset -18px -18px 45px #04172a;transform:rotate(-14deg);font-size:75px;border:1px solid #66eadc77}.ws-art-caption{position:absolute;bottom:0;right:0;padding:10px 15px;background:#061b2bcf;border:1px solid #48d9c455;border-radius:11px;font-size:11px;letter-spacing:.1em;color:#b8fff0;font-weight:800}
+.ws-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin:18px 0 24px}.ws-metric{border:1px solid rgba(96,181,210,.2);border-radius:17px;padding:19px 20px;background:linear-gradient(145deg,rgba(18,46,69,.95),rgba(6,21,39,.98));box-shadow:0 12px 30px #0003}.ws-metric small{display:block;color:#9dbbcd;font-size:11px;font-weight:750;letter-spacing:.08em;text-transform:uppercase}.ws-metric strong{display:block;font-size:29px;letter-spacing:-.05em;margin:8px 0 4px}.ws-metric span{font-size:11px;color:#7e9eaf}.ws-metric:nth-child(2) strong{color:var(--ws-mint)}.ws-metric:nth-child(4) strong{color:var(--ws-gold)}
+.ws-section-head{display:flex;align-items:center;justify-content:space-between;gap:15px;flex-wrap:wrap;margin:27px 0 14px}.ws-section-head h2{margin:0;font-size:23px;letter-spacing:-.04em}.ws-section-head p{font-size:12px;margin-top:5px}.ws-section-tag{font-size:10px;letter-spacing:.12em;color:#50efd4;border:1px solid #39d2bf55;border-radius:100px;padding:8px 12px;background:#0a3a3a55;font-weight:850}
+.ws-filter-panel{border:1px solid rgba(95,167,199,.25);background:linear-gradient(145deg,rgba(13,34,55,.95),rgba(7,20,38,.97));padding:23px;border-radius:20px;box-shadow:0 15px 35px #0003}.ws-filter-panel .toolbar{margin:0!important;background:transparent!important;border:0!important;box-shadow:none!important;padding:0!important}.ws-filter-panel label{font-size:12px;font-weight:800;color:#a9c8d8}.ws-filter-panel input,.ws-filter-panel select{min-height:46px!important}.ws-filter-panel button{min-height:46px!important}.ws-search{width:min(330px,100%);flex:1;min-width:170px}.ws-filter-panel .hint{margin:13px 0 0!important}
+.ws-workspace{display:grid;grid-template-columns:minmax(0,1fr) minmax(300px,360px);gap:20px;align-items:start;margin-top:23px}.ws-fixtures-panel{min-width:0}.ws-fixtures-panel .grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:14px!important}.ws-fixtures-panel .match{position:relative;overflow:hidden;padding:22px!important;min-height:185px;border:1px solid #34536a66!important;background:linear-gradient(145deg,#122e45,#08182b)!important}.ws-fixtures-panel .match:before{content:'';position:absolute;top:0;left:0;width:4px;height:100%;background:linear-gradient(#48efd0,#3486bd)}.ws-fixtures-panel .match .meta{color:#7fb4ce!important;font-weight:700;letter-spacing:.02em;line-height:1.6}.ws-fixtures-panel .teams{font-size:20px!important;margin:14px 0 20px!important;line-height:1.3}.ws-fixtures-panel .match button{font-size:12px;padding:11px 15px}.ws-fixtures-panel .match:has(.analysis:not([hidden])){grid-column:1/-1}.ws-fixtures-panel .match .analysis{overflow-wrap:anywhere}
+.ws-lab{position:sticky;top:22px;min-width:0}.ws-lab .coupon-panel{margin:0!important;padding:24px!important;border:1px solid rgba(79,225,201,.24)!important;background:radial-gradient(circle at 95% 0%,#1c726b33,transparent 43%),linear-gradient(145deg,#112e40,#081628)!important}.ws-lab .coupon-head{display:block}.ws-lab .coupon-head h2{font-size:22px!important}.ws-lab .coupon-help{line-height:1.65;margin:11px 0}.ws-lab #makeCoupons{width:100%;margin-top:16px;min-height:49px!important}.ws-lab .bankroll{grid-template-columns:repeat(2,minmax(0,1fr))!important}.ws-lab .bankroll div{padding:13px!important}.ws-lab .bankroll b{font-size:19px!important}.ws-lab .bankroll div:last-child{grid-column:1/-1}.ws-lab .coupons{grid-template-columns:1fr!important}.ws-lab .learning-stats{max-height:160px;overflow:auto}.ws-lab .coupon{padding:14px!important}.ws-lab #couponState{font-size:11px}
+.ws-fixture-status{padding:10px 0 12px!important;font-size:13px!important;color:#accbdc!important}
+@media(max-width:1250px){.ws-workspace{grid-template-columns:1fr}.ws-lab{position:static;grid-row:1}.ws-lab .bankroll{grid-template-columns:repeat(5,minmax(0,1fr))!important}.ws-lab .bankroll div:last-child{grid-column:auto}.ws-lab .coupons{grid-template-columns:repeat(2,minmax(0,1fr))!important}}
+@media(max-width:950px){.ws-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.ws-hero{grid-template-columns:1fr}.ws-hero-art{display:none}.ws-lab .bankroll{grid-template-columns:repeat(2,minmax(0,1fr))!important}.ws-lab .bankroll div:last-child{grid-column:1/-1}}
+@media(max-width:760px){.wrap{width:calc(100% - 22px)!important}.ws-hero{padding:26px 22px!important;min-height:0}.ws-hero h1{font-size:31px!important}.ws-fixtures-panel .grid{grid-template-columns:1fr!important}.ws-lab .coupons{grid-template-columns:1fr!important}.ws-metric{padding:15px}.ws-metric strong{font-size:24px}.ws-filter-panel{padding:16px}.ws-filter-panel .toolbar{align-items:stretch!important}.ws-search{width:100%;flex:auto}.ws-section-head h2{font-size:20px}}
 </style></head><body>
 <aside class="pro-sidebar" aria-label="Ana navigasyon"><a class="pro-identity" href="/"><span class="pro-logo">⚽</span><span>GOL MERKEZİ<strong>PRO ANALYTICS</strong></span></a><div class="pro-section-label">KONTROL MERKEZİ</div><a href="/" class="NAVLIVE">◉ <span>Canlı Gol Merkezi</span></a><a href="/tahmin" class="NAVPRE active">▦ <span>Maç Analizi & Kupon</span></a><a href="/radar" class="NAVRADAR">◈ <span>Piyasa Radarı</span></a><div class="pro-sidebar-bottom"><span class="pro-pulse"></span> ANALİZ PLATFORMU <small>Gol Merkezi • Pro Workspace</small></div></aside><div class="wrap">
-<header><div><h1>📅 Maç Önü Analiz Merkezi <span class="version">v7.0</span></h1><p>Maçı araştır, senaryoları karşılaştır, gerçek oranı ayrı değerlendir.</p></div>
-<a href="/">← Canlı Gol Merkezi</a></header>
-<div class="toolbar">
-  <label for="day">Maç günü</label>
-  <input id="day" type="date" min="{{today}}" max="{{last_day}}" value="{{initial_day}}">
-  <button id="load">Fikstürü getir</button>
-  <label for="league">Ülke</label>
-  <select id="league" disabled><option value="ALL">Tüm ülkeler</option></select>
-</div>
-<div class="hint">Bir ülke seçildiğinde o ülkenin uygun tüm alt ligleri birlikte gösterilir • Saatler Türkiye saatidir • Analiz, açtığın maç için yapılır.</div>
-<section class="coupon-panel">
-  <div class="coupon-head"><div><h2>🎟️ Botun Sanal Bahis Defteri</h2><div class="coupon-help">Bot yalnızca doğrulanmış fiyatı olan en az 3 farklı maçtan kupon oluşturur. Her kupon 1.000 TL'dir; kupon sayısı sabit değildir. Aynı maç aktif kuponlarda en fazla 2 kez kullanılabilir.</div></div>
-  <button id="makeCoupons" type="button">Botun oynayacağı kuponları oluştur</button></div>
-  <div id="bankroll" class="bankroll"></div><div id="learningStats" class="learning-stats"></div><div id="couponState" class="coupon-help">Henüz kupon oluşturulmadı.</div><div id="coupons" class="coupons"></div>
-</section>
-<p id="state">Fikstür yükleniyor…</p>
-<div class="grid" id="fixtures"></div>
+<header class="ws-hero"><div><div class="ws-kicker">GOL MERKEZİ / PRO ANALYTICS / MAÇ ÖNÜ</div><h1>Maçları oku.<br><span style="color:#53efd6">Piyasayı analiz et.</span> <span class="version">PRO 4.0</span></h1><p>Fikstür, bağımsız maç senaryoları ve sanal kupon takibi. Bütün veriler tek profesyonel çalışma alanında.</p></div><div class="ws-hero-art"><div class="ws-orb">⚽</div><div class="ws-art-caption">MATCH INTELLIGENCE / LIVE DATA</div></div></header>
+<div class="ws-metrics" aria-label="Analiz özeti"><div class="ws-metric"><small>Günlük fikstür</small><strong id="wsMatchCount">—</strong><span>Seçili tarihteki maçlar</span></div><div class="ws-metric"><small>Analiz edilen</small><strong id="wsAnalyzedCount">0</strong><span>İncelenen maç sayısı</span></div><div class="ws-metric"><small>Kapsanan ülkeler</small><strong id="wsCountryCount">—</strong><span>Fikstürdeki ülke sayısı</span></div><div class="ws-metric"><small>Kupon stratejisi</small><strong>3+ MAÇ</strong><span>Gerçek oran doğrulaması gerekir</span></div></div>
+<div class="ws-section-head"><div><h2>Fikstür Kontrolü</h2><p>Günü seç, ülkeyi filtrele ve karşılaşmaları araştır.</p></div><span class="ws-section-tag">FİKSTÜR & FİLTRELER</span></div>
+<div class="ws-filter-panel"><div class="toolbar"><label for="day">Maç günü</label><input id="day" type="date" min="{{today}}" max="{{last_day}}" value="{{initial_day}}"><button id="load">↻ Fikstürü getir</button><label for="league">Ülke</label><select id="league" disabled><option value="ALL">Tüm ülkeler</option></select><input id="wsSearch" class="ws-search" type="search" placeholder="Takım veya lig ara…" aria-label="Maçlarda ara"></div><div class="hint">Ülke seçimi alt ligleri de kapsar · Saatler Türkiye saatidir · Analiz yalnızca açılan maç için çalışır.</div></div>
+<div class="ws-workspace"><section class="ws-fixtures-panel"><div class="ws-section-head"><div><h2>Karşılaşma Merkezi</h2><p>Takım bazında inceleme ve maç senaryoları</p></div><span class="ws-section-tag">MAÇ LİSTESİ</span></div><p id="state" class="ws-fixture-status">Fikstür yükleniyor…</p><div class="grid" id="fixtures"></div></section><aside class="ws-lab"><section class="coupon-panel"><div class="ws-kicker">SANAL BAHİS / PERFORMANS</div><div class="coupon-head"><div><h2>🎟️ Kupon Laboratuvarı</h2><div class="coupon-help">Bot doğrulanmış oranlarla en az üç farklı maçtan kupon oluşturur. Her kupon 1.000 TL sanal tutarlıdır. Kupon sayısı sabit değildir.</div></div><button id="makeCoupons" type="button">Kupon adaylarını oluştur →</button></div><div id="bankroll" class="bankroll"></div><div id="learningStats" class="learning-stats"></div><div id="couponState" class="coupon-help">Henüz kupon oluşturulmadı.</div><div id="coupons" class="coupons"></div></section></aside></div>
 </div><script>
 const esc=v=>String(v??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;");
 const day=document.getElementById("day"),state=document.getElementById("state"),root=document.getElementById("fixtures"),leagueSelect=document.getElementById("league");
@@ -4772,8 +4810,10 @@ function renderCoupons(coupons){
 }
 function renderFixtures(){
   const selected=loadedDate;
-  const filtered=leagueSelect.value==="ALL" ? loadedMatches
+  const countryFiltered=leagueSelect.value==="ALL" ? loadedMatches
     : loadedMatches.filter(m=>String(m.country||"Diğer")===leagueSelect.value);
+  const term=(document.getElementById("wsSearch")?.value||"").trim().toLocaleLowerCase("tr-TR");
+  const filtered=term?countryFiltered.filter(m=>[m.home,m.away,m.country,m.league].some(x=>String(x||"").toLocaleLowerCase("tr-TR").includes(term))):countryFiltered;
   state.textContent=filtered.length
     ? `${filtered.length} maç gösteriliyor. Analiz için bir maç seç.`
     : "Seçilen ligde başlamamış maç bulunamadı.";
@@ -4789,6 +4829,7 @@ function renderFixtures(){
         try{
           const a=await getJson("/api/prematch/analyze?date="+encodeURIComponent(selected)+"&fixture="+encodeURIComponent(m.id));
           analyzedMatches.set(Number(m.id),{match:m,analysis:a});
+          document.getElementById("wsAnalyzedCount").textContent=analyzedMatches.size;
           registerPickHistory(m,a);
           const picks=a.suggestions.length
             ? a.suggestions.map(p=>`<div class="pick" style="border:2px solid ${p.risk_level==="green"?"#19ba72":p.risk_level==="yellow"?"#e8b93e":"#e35353"};background:${p.risk_level==="green"?"#0e352a":p.risk_level==="yellow"?"#40341a":"#3d1d26"}"><b>${esc(p.label)}</b><div class="quote">${esc(p.decision_role||"ANALİZ")} · Oran ${p.quote&&Number(p.quote.odd)>=1.30?`${Number(p.quote.odd).toFixed(2)} · ${esc(p.quote.bookmaker)}`:"Doğrulanmadı · Manuel değerlendir"}</div><div class="reason">${esc(p.quote?.market_name||"Model senaryosu / oran yok")}: ${esc(p.quote?.selection||"Tahmini tercih")}${quoteTime(p.quote?.updated)?` · Güncelleme: ${esc(quoteTime(p.quote.updated))}`:""}</div><div class="pick-why"><b>Neden bu tercih?</b><br>${esc(p.explanation || p.reason)}</div><div class="reason">Tahmini olasılık ${p.model_probability!=null?`${(Number(p.model_probability)*100).toFixed(1).replace(".",",")}%`:"-"} · Oranın ima ettiği ${p.implied_probability!=null?`${(Number(p.implied_probability)*100).toFixed(1).replace(".",",")}%`:"-"} · Değer farkı ${p.value_edge_pct!=null?`${Number(p.value_edge_pct)>=0?"+":""}${Number(p.value_edge_pct).toFixed(1).replace(".",",")}%`:"-"}</div><div class="reason">${esc(p.probability_basis||"Market özelinde form verileri kullanıldı.")}</div></div>`).join("")
@@ -4798,6 +4839,7 @@ function renderFixtures(){
             ${h2hHtml(a)}${lineupHtml(a)}<div class="lineup-box"><b>🌐 İnternet araştırması</b><div>${esc(a.web_research?.note||"Kaynak bilgisi yok")}</div>${(a.web_research?.sources||[]).map(x=>`<div><a href="${esc(x.url)}" target="_blank" rel="noopener noreferrer">${esc(x.title)}</a> <small>${esc(x.published||"")}</small></div>`).join("")}</div>${picks}${(a.joint_notes||[]).map(n=>`<div class="joint-note"><b>Birlikte gerçekleşme ihtimali</b><br>${esc(n)}</div>`).join("")}<div class="odds-note">${esc(a.odds_note)}</div><div class="hint">${esc(a.note)}</div>`;
           box.querySelector(".close-analysis").onclick=()=>{
             analyzedMatches.delete(Number(m.id));
+            document.getElementById("wsAnalyzedCount").textContent=analyzedMatches.size;
             box.hidden=true;
             box.innerHTML="";
             button.disabled=false;
@@ -4816,6 +4858,9 @@ async function load(){
   try{
     const data=await getJson("/api/prematch/fixtures?date="+encodeURIComponent(selected));
     loadedDate=selected;loadedMatches=data.matches;
+    document.getElementById("wsMatchCount").textContent=loadedMatches.length.toLocaleString("tr-TR");
+    document.getElementById("wsCountryCount").textContent=new Set(loadedMatches.map(m=>String(m.country||"Diğer"))).size;
+    document.getElementById("wsAnalyzedCount").textContent="0";
     const countries=new Map();
     for(const m of loadedMatches){
       const country=String(m.country||"Diğer");
@@ -4831,6 +4876,7 @@ async function load(){
   }catch(e){state.innerHTML='<span class="error">'+esc(e.message)+'</span>'}
 }
 leagueSelect.onchange=renderFixtures;
+document.getElementById("wsSearch").addEventListener("input",renderFixtures);
 document.getElementById("makeCoupons").onclick=buildCoupons;
 document.getElementById("load").onclick=load;load();
 </script></body></html>"""
