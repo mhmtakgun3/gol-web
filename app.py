@@ -3245,6 +3245,7 @@ def api_prematch_analyze():
                     value_edge_pct=round(100*(prob-1/odd),1) if odd else None,
                     expected_value=round(ev,4) if ev is not None else None,
                     coupon_eligible=bool(ev is not None and ev >= .04 and prob >= .60 and
+                                         abs(prob - 1/odd) <= .22 and
                                          analysis["data_quality"] == "good"),
                     manual_review=not bool(odd and odd >= 1.30),
                     screening_only=False,
@@ -4652,18 +4653,27 @@ function historyQuality(pick){
   return {n:h.n,won:h.won,rate:h.rate,adjusted};
 }
 // Tek başına yüksek olasılık değil, doğrulanmış fiyatın beklenen değeri belirleyici.
-function marketValueScore(p){
+// Ortak karar politikası: tablo ve kuponlar aynı elemeden geçer.
+// Poisson olasılıkları kalibre edilmediğinden ham EV'yi kesin avantaj sayma.
+const GM_MIN_PROB=.60,GM_MIN_ODD=1.30,GM_MIN_EV=.04;
+function decisionMetrics(p,quality){
   const odd=Number(p?.quote?.odd||p?.odd||0);
-  const prob=Number(p?.model_probability??p?.modelProbability??0);
-  if(!(odd>=1.30&&prob>0&&prob<1))return -Infinity;
+  const prob=Number(p?.model_probability??p?.modelProbability??NaN);
+  if(quality!=="good"||!Number.isFinite(prob)||prob<=0||prob>=1||!Number.isFinite(odd)||odd<GM_MIN_ODD)return null;
+  const implied=1/odd;
+  // Yalnızca bir güvenlik kontrolü: tahmin ile fiyat çok ayrışırsa otomatik önerme.
+  // Bu değer kalibre edilmiş olasılık değildir.
+  if(Math.abs(prob-implied)>.22)return null;
   const ev=prob*odd-1;
-  // Veri kalitesi zayıfken pozitif değer iddiası üretme.
-  return ev + Math.min(prob,0.9)*0.035;
+  if(prob<GM_MIN_PROB||ev<GM_MIN_EV)return null;
+  return {odd,prob,ev,implied,score:ev + .08*prob};
+}
+function marketValueScore(p,quality="good"){
+  return decisionMetrics(p,quality)?.score??-Infinity;
 }
 function bestPricedMarket(picks,quality){
-  if(quality!=="good")return null;
-  const eligible=(picks||[]).filter(p=>Number(p?.quote?.odd)>=1.30&&Number(p?.model_probability)>0&&Number(p?.model_probability)<1&&marketValueScore(p)>0.035);
-  eligible.sort((a,b)=>marketValueScore(b)-marketValueScore(a));
+  const eligible=(picks||[]).filter(p=>decisionMetrics(p,quality));
+  eligible.sort((a,b)=>marketValueScore(b,quality)-marketValueScore(a,quality));
   return eligible[0]||null;
 }
 function candidatePool(){
@@ -4680,9 +4690,10 @@ function candidatePool(){
       stats.priced++;
       // Kupon seçiminde geçmiş bahis sonuçları ve geçmiş market başarı oranları kullanılmaz.
       // Yetersiz veriyle yüksek güven iddiası oluşturma.
-      if(quality!=="good"||p<0.60){stats.lowProbability++;continue;}
-      const ev=p*odd-1,edge=(p-1/odd)*100;
-      if(ev<0){stats.lowValue++;continue;}
+      if(quality!=="good"||p<GM_MIN_PROB){stats.lowProbability++;continue;}
+      const metrics=decisionMetrics(pick,quality);
+      if(!metrics){stats.lowValue++;continue;}
+      const ev=metrics.ev,edge=(p-1/odd)*100;
       const candidate={fixture:Number(fixture),home:item.match.home,away:item.match.away,
         kickoff:item.match.kickoff,country:item.match.country,league:item.match.league,
         market:pick.market,label:pick.label,confidence:quality,
@@ -4692,7 +4703,7 @@ function candidatePool(){
       options.push(candidate);
     }
     // Bir maçın uygun alternatiflerini sakla; yalnızca en yüksek olasılıklı markete kilitlenme.
-    options.sort((a,b)=>marketValueScore(b)-marketValueScore(a));
+    options.sort((a,b)=>marketValueScore(b,quality)-marketValueScore(a,quality));
     if(options.length)pool.push({...options[0],options:options.slice(0,8)});
   }
   pool.sort((a,b)=>marketValueScore(b)-marketValueScore(a));
@@ -4915,6 +4926,7 @@ function renderFixtures(){
           const choices=Array.isArray(a.suggestions)?a.suggestions:[];
           const ranked=choices.filter(p=>p?.quote&&Number(p.quote.odd)>=1.30);
           const primary=bestPricedMarket(a.all_suggestions||choices,a.data_quality);
+          // Risk etiketi sadece model olasılığını ifade eder; garanti değildir.
           card.querySelector("[data-market]").textContent=primary?.label||"Değerli seçim yok";
           card.querySelector("[data-price]").textContent=primary?.quote&&Number(primary.quote.odd)>=1.30?Number(primary.quote.odd).toFixed(2):"—";
           const prob=primary?Number(primary.model_probability):NaN;card.querySelector("[data-confidence]").textContent=Number.isFinite(prob)?`${(prob<=1?prob*100:prob).toFixed(0)}%`:"—";
