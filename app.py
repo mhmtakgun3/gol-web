@@ -443,7 +443,7 @@ def api_headers() -> Dict[str, str]:
     }
 
 
-def api_get(path: str, params: Optional[Dict[str, Any]] = None, *, timeout=None) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+def api_get(path: str, params: Optional[Dict[str, Any]] = None) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     if not API_KEY:
         return None, "API_KEY ortam değişkeni tanımlı değil."
 
@@ -454,7 +454,7 @@ def api_get(path: str, params: Optional[Dict[str, Any]] = None, *, timeout=None)
             url,
             headers=api_headers(),
             params=params or {},
-            timeout=REQUEST_TIMEOUT if timeout is None else timeout,
+            timeout=REQUEST_TIMEOUT,
         )
 
         if response.status_code != 200:
@@ -2298,56 +2298,24 @@ def prematch_day(raw: str) -> Optional[date]:
     return requested if today <= requested <= today + timedelta(days=7) else None
 
 
-# Fikstur/form API sorunlarinda Gunicorn worker'ini bekletmeden cevap ver.
-# Hata durumlari kisa sure saklanir; onceki basarili veri varsa korunur.
-_prematch_failures = {}
-_prematch_inflight = set()
-PREMATCH_ERROR_CACHE_SECONDS = 25
-PREMATCH_API_TIMEOUT = (3, 7)  # connect / read (saniye)
-
-
 def prematch_api_cached(key: str, path: str, params: Dict[str, Any], ttl: int
                         ) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
-    now = time.time()
     with cache_lock:
         cached = prematch_cache.get(key)
-        if cached and now - cached["ts"] < ttl:
+        if cached and time.time() - cached["ts"] < ttl:
             return cached["data"], None
-        failed = _prematch_failures.get(key)
-        if failed and now - failed["ts"] < PREMATCH_ERROR_CACHE_SECONDS:
-            if cached:
-                return cached["data"], None
-            return None, failed["error"]
-        # Birden fazla istemci ayni fiksturu ayni anda sorgulamasin.
-        if key in _prematch_inflight:
-            if cached:
-                return cached["data"], None
-            return None, "Veri su anda yukleniyor. Biraz sonra yeniden deneyin."
-        _prematch_inflight.add(key)
-
-    try:
-        data, error = api_get(path, params, timeout=PREMATCH_API_TIMEOUT)
-        if not error and data is not None:
-            response = data.get("response")
-            if not isinstance(response, list):
-                error = "Beklenmeyen API yaniti."
-            else:
-                with cache_lock:
-                    prematch_cache[key] = {"ts": time.time(), "data": response}
-                    _prematch_failures.pop(key, None)
-                    if len(prematch_cache) > 300:
-                        oldest = min(prematch_cache, key=lambda item: prematch_cache[item]["ts"])
-                        prematch_cache.pop(oldest, None)
-                return response, None
-        error = error or "Veri alinamadi."
-        with cache_lock:
-            _prematch_failures[key] = {"ts": time.time(), "error": error}
-        if cached:
-            return cached["data"], None
-        return None, error
-    finally:
-        with cache_lock:
-            _prematch_inflight.discard(key)
+    data, error = api_get(path, params)
+    if error or data is None:
+        return None, error or "Veri alınamadı."
+    response = data.get("response")
+    if not isinstance(response, list):
+        return None, "Beklenmeyen fikstür yanıtı."
+    with cache_lock:
+        prematch_cache[key] = {"ts": time.time(), "data": response}
+        if len(prematch_cache) > 300:
+            oldest = min(prematch_cache, key=lambda item: prematch_cache[item]["ts"])
+            prematch_cache.pop(oldest, None)
+    return response, None
 
 
 def prematch_fixtures(day: date) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
@@ -2374,7 +2342,6 @@ def _prematch_metrics(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "wins": sum(x["win"] for x in rows),
         "draws": sum(x["draw"] for x in rows),
         "losses": sum(x["scored"] < x["conceded"] for x in rows),
-        "unbeaten": sum(x["win"] or x["draw"] for x in rows),
         "btts": sum(x["btts"] for x in rows),
         "over15": sum(x["over15"] for x in rows),
         "over25": sum(x["over25"] for x in rows),
@@ -2383,17 +2350,6 @@ def _prematch_metrics(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "under35": sum(x["under35"] for x in rows),
         "scored2": sum(x["scored2"] for x in rows),
         "conceded2": sum(x["conceded"] >= 2 for x in rows),
-        "ht_count": sum(1 for x in rows if x.get("ht_scored") is not None and x.get("ht_conceded") is not None),
-        "ht_over05": sum(
-            (x["ht_scored"] + x["ht_conceded"]) >= 1
-            for x in rows
-            if x.get("ht_scored") is not None and x.get("ht_conceded") is not None
-        ),
-        "ht_over15": sum(
-            (x["ht_scored"] + x["ht_conceded"]) >= 2
-            for x in rows
-            if x.get("ht_scored") is not None and x.get("ht_conceded") is not None
-        ),
     }
 
 
@@ -2422,7 +2378,6 @@ def prematch_team_form(team_id: int, kickoff: str
             continue
         sides = item.get("teams") or {}
         goals = item.get("goals") or {}
-        halftime = item.get("score", {}).get("halftime") or {}
         home = safe_int((sides.get("home") or {}).get("id"))
         away = safe_int((sides.get("away") or {}).get("id"))
         if team_id not in (home, away) or goals.get("home") is None or goals.get("away") is None:
@@ -2440,16 +2395,14 @@ def prematch_team_form(team_id: int, kickoff: str
             "over35": scored + conceded >= 4,
             "under35": scored + conceded <= 3,
             "scored2": scored >= 2,
-            "ht_scored": safe_int(halftime.get("home")) if halftime.get("home") is not None else None,
-            "ht_conceded": safe_int(halftime.get("away")) if halftime.get("away") is not None else None,
             "draw": scored == conceded,
         })
     finished.sort(key=lambda x: x["date"], reverse=True)
     recent = finished[:8]
     if len(recent) < 5:
         return {"count": len(recent), "insufficient": True}, None
-    home_five = [x for x in finished if x["venue"] == "home"][:8]
-    away_five = [x for x in finished if x["venue"] == "away"][:8]
+    home_five = [x for x in finished if x["venue"] == "home"][:5]
+    away_five = [x for x in finished if x["venue"] == "away"][:5]
     return {
         "count": len(recent),
         "all": _prematch_metrics(recent),
@@ -2494,7 +2447,7 @@ def prematch_h2h(home_id: int, away_id: int, kickoff: str
             "under35": scored + conceded <= 3, "scored2": scored >= 2,
         })
     rows.sort(key=lambda x: x["date"], reverse=True)
-    recent = rows[:8]
+    recent = rows[:5]
     return {"count": len(recent), "insufficient": len(recent) < 2,
             "all": _prematch_metrics(recent) if recent else _prematch_metrics([])}, None
 
@@ -2627,132 +2580,98 @@ def prematch_suggestions(home: Dict[str, Any], away: Dict[str, Any],
                          lineups: Optional[Dict[str, Any]] = None,
                          h2h: Optional[Dict[str, Any]] = None
                          ) -> List[Dict[str, Any]]:
-    """v4.11 maç önü motoru.
-
-    Amaç tek bir marketi zorlamak değil; mevcut veriyle anlamlı olabilecek
-    marketleri tarayıp her birini bağımsız aday olarak üretmektir.
-    Canlı scanner bu fonksiyon tarafından kullanılmaz.
-    """
     if home.get("insufficient") or away.get("insufficient"):
         return []
     h, a = home["all"], away["all"]
     hv, av = home["home"], away["away"]
     picks: List[Dict[str, Any]] = []
-
-    def rate(m, key):
-        return (m.get(key, 0) / m["count"]) if m.get("count") else 0
-
     home_goals = h["scored"] + h["conceded"]
     away_goals = a["scored"] + a["conceded"]
-    enough_venue = hv["count"] >= 4 and av["count"] >= 4
+    enough_venue = hv["count"] >= 2 and av["count"] >= 2
     venue_goals = ((hv["scored"] + hv["conceded"] + av["scored"] + av["conceded"]) / 2
                    if enough_venue else 0)
 
-    # Genel gol çizgileri.
-    if (rate(h, "over15") >= .75 and rate(a, "over15") >= .75
-            and (home_goals + away_goals) / 2 >= 2.25):
-        picks.append({"market": "OVER_1_5", "label": "1,5 ÜST",
-                      "reason": f"Son {h['count']} ve {a['count']} maçta 1,5 ÜST oranları {rate(h,'over15'):.0%} ve {rate(a,'over15'):.0%}; toplam gol ortalamaları {home_goals/2:.1f} ve {away_goals/2:.1f}.", "rank": 2})
-    if (enough_venue and rate(h, "over25") >= .50 and rate(a, "over25") >= .50
-            and venue_goals >= 2.55):
+    if (enough_venue and h["over25"] / h["count"] >= .50
+            and a["over25"] / a["count"] >= .50
+            and (home_goals + away_goals) / 2 >= 2.75 and venue_goals >= 2.6):
         picks.append({"market": "OVER_2_5", "label": "2,5 ÜST",
-                      "reason": f"3+ gol oranları {h['over25']}/{h['count']} ve {a['over25']}/{a['count']}; son 8 iç/dış saha birleşik gol ortalaması {venue_goals:.1f}.", "rank": 4})
-    if (enough_venue and rate(h, "under25") >= .625 and rate(a, "under25") >= .625
-            and venue_goals <= 2.55):
+                      "reason": f"Son maçlarda 3+ gol: {h['over25']}/{h['count']} ve {a['over25']}/{a['count']}; iç/dış saha toplam gol ortalaması {venue_goals:.1f}.", "rank": 4})
+    if (enough_venue and h["under25"] / h["count"] >= .625
+            and a["under25"] / a["count"] >= .625
+            and (home_goals + away_goals) / 2 <= 2.35 and venue_goals <= 2.5):
         picks.append({"market": "UNDER_2_5", "label": "2,5 ALT",
-                      "reason": f"En fazla 2 gol oranları {h['under25']}/{h['count']} ve {a['under25']}/{a['count']}; iç/dış saha birleşik ortalaması {venue_goals:.1f}.", "rank": 4})
-    if (enough_venue and rate(h, "under35") >= .75 and rate(a, "under35") >= .75
-            and venue_goals <= 3.15):
-        picks.append({"market": "UNDER_3_5", "label": "3,5 ALT",
-                      "reason": f"4 gol altı oranları {h['under35']}/{h['count']} ve {a['under35']}/{a['count']}; iç/dış saha toplam ortalaması {venue_goals:.1f}.", "rank": 3})
-    if (enough_venue and rate(h, "over35") >= .375 and rate(a, "over35") >= .375
-            and venue_goals >= 3.35):
-        picks.append({"market": "OVER_3_5", "label": "3,5 ÜST",
-                      "reason": f"4+ gol oranları {h['over35']}/{h['count']} ve {a['over35']}/{a['count']}; iç/dış saha toplam ortalaması {venue_goals:.1f}.", "rank": 3})
-
-    # KG.
-    if (h["count"] >= 4 and a["count"] >= 4
-            and rate(h, "btts") >= .50 and rate(a, "btts") >= .50
-            and ((hv["count"] >= 3 and av["count"] >= 3
-                  and rate(hv, "btts") >= .40 and rate(av, "btts") >= .40)
-                 or (rate(h, "btts") >= .625 and rate(a, "btts") >= .625))):
+                      "reason": f"Son maçlarda en fazla 2 gol: {h['under25']}/{h['count']} ve {a['under25']}/{a['count']}; iç/dış saha ortalaması {venue_goals:.1f}.", "rank": 4})
+    if (enough_venue and h["btts"] / h["count"] >= .50
+            and a["btts"] / a["count"] >= .50
+            and hv["btts"] / hv["count"] >= .50 and av["btts"] / av["count"] >= .50
+            and min(h["scored"], a["scored"], hv["conceded"], av["conceded"]) >= .8):
         picks.append({"market": "BTTS_YES", "label": "KG VAR",
-                      "reason": f"KG oranları genel olarak {h['btts']}/{h['count']} ve {a['btts']}/{a['count']}; iç/dış sahada da %50 üzeri ortak sinyal var.", "rank": 4})
-    if (h["count"] >= 4 and a["count"] >= 4
-            and rate(h, "btts") <= .40 and rate(a, "btts") <= .40
-            and (h["scored"] <= 1.0 or a["scored"] <= 1.0)):
+                      "reason": f"Karşılıklı gol: {h['btts']}/{h['count']} ve {a['btts']}/{a['count']}; iç/dış sahada da iki takım gol yiyor.", "rank": 4})
+    if (enough_venue and h["btts"] / h["count"] <= .38
+            and a["btts"] / a["count"] <= .38
+            and (h["scored"] <= .9 or a["scored"] <= .9)):
         picks.append({"market": "BTTS_NO", "label": "KG YOK",
-                      "reason": f"KG oranları {h['btts']}/{h['count']} ve {a['btts']}/{a['count']}; en az bir takımın gol ortalaması düşük.", "rank": 3})
+                      "reason": f"Son maçlarda KG: {h['btts']}/{h['count']} ve {a['btts']}/{a['count']}; takımlardan birinin gol ortalaması düşük.", "rank": 3})
 
-    # Takım golü.
-    if (hv["count"] >= 4 and rate(h, "scored2") >= .50 and rate(hv, "scored2") >= .50
-            and hv["scored"] >= 1.4 and av["count"] >= 4 and av["conceded"] >= 1.1):
+    # Takım golü: maç toplamının yüksek olması tek başına yeterli değil.
+    if (hv["count"] >= 3 and h["scored2"] / h["count"] >= .50
+            and hv["scored2"] / hv["count"] >= .50
+            and hv["wins"] / hv["count"] >= .50
+            and hv["scored"] >= 1.6 and av["conceded"] is not None
+            and av["count"] >= 2 and av["conceded"] >= 1.2):
         picks.append({"market": "HOME_OVER_1_5", "label": "Ev sahibi 1,5 gol ÜST",
-                      "reason": f"Ev sahibi son {h['count']} maçın {h['scored2']} tanesinde, son {hv['count']} iç saha maçının {hv['scored2']} tanesinde 2+ gol attı; rakip deplasmanda {av['conceded']:.1f} gol yiyor.", "rank": 5})
-    if (av["count"] >= 4 and rate(a, "scored2") >= .50 and rate(av, "scored2") >= .50
-            and av["scored"] >= 1.4 and hv["count"] >= 4 and hv["conceded"] >= 1.1):
+                      "reason": f"Ev sahibi son {h['count']} maçının {h['scored2']} tanesinde, iç sahadaki {hv['count']} maçının {hv['scored2']} tanesinde en az 2 gol attı; rakip dışarıda maç başına {av['conceded']:.1f} gol yiyor.", "rank": 5})
+    if (av["count"] >= 3 and a["scored2"] / a["count"] >= .50
+            and av["scored2"] / av["count"] >= .50
+            and av["wins"] / av["count"] >= .50
+            and av["scored"] >= 1.6 and hv["conceded"] is not None
+            and hv["count"] >= 2 and hv["conceded"] >= 1.2):
         picks.append({"market": "AWAY_OVER_1_5", "label": "Deplasman 1,5 gol ÜST",
-                      "reason": f"Deplasman son {a['count']} maçın {a['scored2']} tanesinde, son {av['count']} dış saha maçının {av['scored2']} tanesinde 2+ gol attı; rakip iç sahada {hv['conceded']:.1f} gol yiyor.", "rank": 5})
+                      "reason": f"Deplasman takımı son {a['count']} maçının {a['scored2']} tanesinde, dışarıdaki {av['count']} maçının {av['scored2']} tanesinde en az 2 gol attı; rakip evinde maç başına {hv['conceded']:.1f} gol yiyor.", "rank": 5})
 
-    # Sonuç / çifte şans.
-    if enough_venue:
+    if (enough_venue and h["under35"] / h["count"] >= .75
+            and a["under35"] / a["count"] >= .75 and venue_goals <= 3.1):
+        picks.append({"market": "UNDER_3_5", "label": "3,5 ALT",
+                      "reason": f"Dört golün altında kalan maç: {h['under35']}/{h['count']} ve {a['under35']}/{a['count']}; iç/dış saha toplam ortalaması {venue_goals:.1f}.", "rank": 2})
+    if (enough_venue and h["over35"] / h["count"] >= .375
+            and a["over35"] / a["count"] >= .375 and venue_goals >= 3.4):
+        picks.append({"market": "OVER_3_5", "label": "3,5 ÜST",
+                      "reason": f"Dört veya daha fazla gol: {h['over35']}/{h['count']} ve {a['over35']}/{a['count']}; iç/dış saha toplam ortalaması {venue_goals:.1f}.", "rank": 3})
+
+    if hv["count"] >= 3 and av["count"] >= 3:
         home_edge = hv["scored"] - hv["conceded"]
         away_edge = av["scored"] - av["conceded"]
-        home_wins, away_wins = rate(hv, "wins"), rate(av, "wins")
-        home_unbeaten, away_unbeaten = (hv["wins"] + hv["draws"]) / hv["count"], (av["wins"] + av["draws"]) / av["count"]
-        if home_wins >= .50 and away_wins <= .375 and home_edge - away_edge >= .55:
+        home_wins, away_wins = hv["wins"] / hv["count"], av["wins"] / av["count"]
+        if (home_wins >= .50 and away_wins <= .40
+                and home_edge - away_edge >= .7 and h["wins"] / h["count"] >= .375):
             picks.append({"market": "HOME", "label": "MS 1",
-                          "reason": f"Ev sahibinin son {hv['count']} iç saha galibiyet oranı {home_wins:.0%}; rakibin deplasman galibiyet oranı {away_wins:.0%}. Gol farkı da ev sahibi lehine.", "rank": 5})
-        if away_wins >= .50 and home_wins <= .375 and away_edge - home_edge >= .55:
+                          "reason": f"İç saha galibiyeti {hv['wins']}/{hv['count']}, rakibin deplasman galibiyeti {av['wins']}/{av['count']}; gol farkı ev sahibinden yana.", "rank": 5})
+        elif (away_wins >= .50 and home_wins <= .40
+              and away_edge - home_edge >= .7 and a["wins"] / a["count"] >= .375):
             picks.append({"market": "AWAY", "label": "MS 2",
-                          "reason": f"Deplasmanın son {av['count']} dış saha galibiyet oranı {away_wins:.0%}; ev sahibinin iç saha galibiyet oranı {home_wins:.0%}. Gol farkı da deplasman lehine.", "rank": 5})
-        if home_unbeaten >= .67 and away_wins <= .40:
+                          "reason": f"Deplasman galibiyeti {av['wins']}/{av['count']}, ev sahibinin iç saha galibiyeti {hv['wins']}/{hv['count']}; gol farkı deplasmandan yana.", "rank": 5})
+        if (hv["wins"] + hv["draws"]) / hv["count"] >= .67 and away_wins <= .33 and home_edge >= away_edge:
             picks.append({"market": "DC_1X", "label": "1X",
-                          "reason": f"Ev sahibi son {hv['count']} iç saha maçının {hv['wins'] + hv['draws']} tanesinde kaybetmedi; rakibin deplasman galibiyet oranı {away_wins:.0%}.", "rank": 3})
-        if away_unbeaten >= .67 and home_wins <= .40:
+                          "reason": f"Ev sahibi iç sahada {hv['wins'] + hv['draws']}/{hv['count']} kez kaybetmedi; rakibin dış saha galibiyeti {av['wins']}/{av['count']}.", "rank": 2})
+        if (av["wins"] + av["draws"]) / av["count"] >= .67 and home_wins <= .33 and away_edge >= home_edge:
             picks.append({"market": "DC_X2", "label": "X2",
-                          "reason": f"Deplasman son {av['count']} dış saha maçının {av['wins'] + av['draws']} tanesinde kaybetmedi; ev sahibinin iç saha galibiyet oranı {home_wins:.0%}.", "rank": 3})
+                          "reason": f"Deplasman takımı dış sahada {av['wins'] + av['draws']}/{av['count']} kez kaybetmedi; ev sahibinin iç saha galibiyeti {hv['wins']}/{hv['count']}.", "rank": 2})
 
-    # İlk yarı marketleri: yalnızca geçmişteki ilk yarı verisi yeterliyse üret.
-    if h.get("ht_count", 0) >= 5 and a.get("ht_count", 0) >= 5:
-        ht_over05 = (h.get("ht_over05", 0) / h["ht_count"] + a.get("ht_over05", 0) / a["ht_count"]) / 2
-        ht_over15 = (h.get("ht_over15", 0) / h["ht_count"] + a.get("ht_over15", 0) / a["ht_count"]) / 2
-        if ht_over05 >= .72:
-            picks.append({"market": "HT_OVER_0_5", "label": "İY 0,5 ÜST",
-                          "reason": f"İlk yarıda en az 1 gol görülme oranı iki takımın son maçlarında ortalama {ht_over05:.0%}.", "rank": 3})
-        if ht_over15 >= .42:
-            picks.append({"market": "HT_OVER_1_5", "label": "İY 1,5 ÜST",
-                          "reason": f"İlk yarıda 2+ gol görülme oranı iki takımın son maçlarında ortalama {ht_over15:.0%}.", "rank": 2})
-        if ht_over15 <= .25:
-            picks.append({"market": "HT_UNDER_1_5", "label": "İY 1,5 ALT",
-                          "reason": f"İlk yarıda 2+ gol oranı iki takımın son maçlarında ortalama yalnızca {ht_over15:.0%}.", "rank": 3})
-
-    # v5.0: Oran veya katı eşik yüzünden marketi analizden gizleme.
-    # Eksik veri yüzdesi güvenilir olmadığı için ayrıca işaretlenir.
-    catalog = {
-        "HOME": "MS 1", "AWAY": "MS 2", "BTTS_YES": "KG VAR",
-        "BTTS_NO": "KG YOK", "OVER_1_5": "1,5 ÜST", "OVER_2_5": "2,5 ÜST",
-        "UNDER_2_5": "2,5 ALT", "OVER_3_5": "3,5 ÜST",
-        "UNDER_3_5": "3,5 ALT", "HOME_OVER_1_5": "Ev sahibi 1,5 gol ÜST",
-        "AWAY_OVER_1_5": "Deplasman 1,5 gol ÜST", "DC_1X": "1X",
-        "DC_X2": "X2", "HT_OVER_0_5": "İY 0,5 ÜST",
-        "HT_OVER_1_5": "İY 1,5 ÜST", "HT_UNDER_1_5": "İY 1,5 ALT",
-    }
-    existing = {p["market"] for p in picks}
-    for code, label in catalog.items():
-        if code not in existing:
-            picks.append({"market": code, "label": label,
-                          "reason": "Market bağımsız değerlendirildi; güçlü eşik teyidi yok.",
-                          "rank": 0, "screening_only": True})
-
-    # H2H ve kadro etkisini ekle.
+    if (not any(p["market"] == "OVER_2_5" for p in picks)
+            and h["over15"] / h["count"] >= .625 and a["over15"] / a["count"] >= .625
+            and home_goals >= 2.4 and away_goals >= 2.4):
+        picks.append({"market": "OVER_1_5", "label": "1,5 ÜST",
+                      "reason": f"En az iki gol: {h['over15']}/{h['count']} ve {a['over15']}/{a['count']}; daha yüksek gol çizgisi için işaret zayıf.", "rank": 1})
     lineup_data = lineups or {"confirmed": False}
     for pick in picks:
         h2h_fit, h2h_note = h2h_market_context(pick["market"], h2h or {})
-        pick["h2h_fit"], pick["h2h_note"] = h2h_fit, h2h_note
+        pick["h2h_fit"] = h2h_fit
+        pick["h2h_note"] = h2h_note
+        pick["reason"] += " " + h2h_note
         pick["rank"] += h2h_fit
         fit, note = lineup_market_note(pick["market"], lineup_data)
-        pick["lineup_fit"], pick["lineup_note"] = fit, note
+        pick["lineup_fit"] = fit
+        pick["lineup_note"] = note
         pick["rank"] += fit
     return sorted(picks, key=lambda p: p["rank"], reverse=True)
 
@@ -2836,8 +2755,8 @@ def prematch_pick_explanation(market: str, home_name: str, away_name: str,
 
 
 PREMATCH_BOOKMAKERS = (
-    "bet365", "1xbet", "betfair", "betfairexchange",
-    "unibet", "bwin", "williamhill", "marathonbet", "10bet",
+    "pinnacle", "pinnaclesports", "bet365", "betfair", "betfairexchange",
+    "unibet", "bwin", "williamhill", "1xbet", "marathonbet", "10bet",
     "888sport", "betway", "betsson", "nordicbet", "betano", "22bet",
 )
 
@@ -2874,8 +2793,6 @@ def prematch_odd_for_market(entries: List[Dict[str, Any]], market_code: str
         "OVER_1_5": ("over", 1.5), "OVER_2_5": ("over", 2.5),
         "UNDER_2_5": ("under", 2.5),
         "OVER_3_5": ("over", 3.5), "UNDER_3_5": ("under", 3.5),
-        "HT_OVER_0_5": ("over", 0.5), "HT_OVER_1_5": ("over", 1.5),
-        "HT_UNDER_1_5": ("under", 1.5),
         "HOME_OVER_1_5": ("over", 1.5),
         "AWAY_OVER_1_5": ("over", 1.5),
     }
@@ -2891,13 +2808,12 @@ def prematch_odd_for_market(entries: List[Dict[str, Any]], market_code: str
                 is_result = name in ("match winner", "1x2", "full time result", "fulltime result")
                 is_double = name == "double chance"
                 is_btts = name in ("both teams score", "both teams to score", "btts")
-                is_total = name in ("goals over/under", "total goals", "over/under", "total goals over/under")
+                is_total = name in ("goals over/under", "total goals", "over/under")
                 is_home_total = name in (
                     "home team over/under", "home team total goals",
                     "home team goals over/under", "home goals over/under",
                     "home team total", "home total goals",
                 )
-                is_first_half_total = ("first half" in name or "1st half" in name or "first-half" in name or "1st-half" in name) and ("over/under" in name or "goals" in name or "total" in name)
                 is_away_total = name in (
                     "away team over/under", "away team total goals",
                     "away team goals over/under", "away goals over/under",
@@ -2909,7 +2825,6 @@ def prematch_odd_for_market(entries: List[Dict[str, Any]], market_code: str
                     matches = False
                     right_total = (is_home_total if market_code == "HOME_OVER_1_5"
                                    else is_away_total if market_code == "AWAY_OVER_1_5"
-                                   else is_first_half_total if market_code.startswith("HT_")
                                    else is_total)
                     if market_code in wanted_total and right_total:
                         direction, line = wanted_total[market_code]
@@ -2932,7 +2847,7 @@ def prematch_odd_for_market(entries: List[Dict[str, Any]], market_code: str
                     if not matches:
                         continue
                     odd = _float_odd(value.get("odd"))
-                    if odd is None or odd <= 1.0 or odd > 25.0:
+                    if odd is None or odd < PREMATCH_MIN_ODD:
                         continue
                     results.append({
                         "odd": round(odd, 2), "bookmaker": book_name,
@@ -2942,20 +2857,7 @@ def prematch_odd_for_market(entries: List[Dict[str, Any]], market_code: str
                     })
     if not results:
         return None
-    # Anormal fiyat ayrışmasında yanlış market/eski oran riskini ele.
-    # Farklı sağlayıcılar arasındaki orta fiyat referanstır; tek kaynak varsa
-    # doğrulama yapılamaz ve sağlayıcının gerçek fiyatı gösterilir.
-    from statistics import median
-    distinct = {}
-    for quote in results:
-        distinct.setdefault(quote["bookmaker"].lower(), quote["odd"])
-    if len(distinct) >= 2:
-        center = median(distinct.values())
-        results = [q for q in results if abs(q["odd"] / center - 1.0) <= 0.25]
-        if not results:
-            return None
-    # Bet365 sonra 1xBet; eski fiyatları yeni gibi göstermemek için
-    # sağlayıcının sunduğu zaman bilgisi korunur.
+    # Önceden belirlenen yabancı sağlayıcı sırası; uç bir en yüksek oranı seçme.
     results.sort(key=lambda quote: (quote["book_priority"], quote["odd"]))
     chosen = results[0]
     chosen.pop("book_priority", None)
@@ -3016,180 +2918,11 @@ def api_prematch_fixtures():
             "id": fixture.get("id"), "kickoff": fixture.get("date"),
             "home": (teams.get("home") or {}).get("name"),
             "away": (teams.get("away") or {}).get("name"),
-            "home_logo": (teams.get("home") or {}).get("logo"),
-            "away_logo": (teams.get("away") or {}).get("logo"),
             "league_id": league.get("id"), "league": league.get("name"),
             "country": league.get("country"),
         })
     result.sort(key=lambda x: x.get("kickoff") or "")
     return jsonify({"date": day.isoformat(), "count": len(result), "matches": result})
-
-
-
-def _prematch_rate(metrics: Dict[str, Any], key: str) -> Optional[float]:
-    count = safe_int(metrics.get("count"), 0)
-    if count <= 0:
-        return None
-    return safe_int(metrics.get(key), 0) / count
-
-
-def prematch_estimated_probability(market: str, home: Dict[str, Any],
-                                   away: Dict[str, Any], h2h: Optional[Dict[str, Any]]) -> Tuple[float, str]:
-    """Maç önü marketine özel, örneklem ağırlıklı tahmini olasılık.
-
-    Bu değer istatistiksel olarak kalibre edilmiş garanti değildir. Genel form,
-    iç/dış saha ve yeterliyse H2H aynı markete göre birleştirilir; küçük örneklem
-    50% merkezine doğru daraltılır. Canlı scanner bu fonksiyonu kullanmaz.
-    """
-    h, a = home.get("all", {}), away.get("all", {})
-    hv, av = home.get("home", {}), away.get("away", {})
-    values: List[Tuple[float, float, str]] = []
-
-    def add(metrics: Dict[str, Any], key: str, weight: float, label: str):
-        rate = _prematch_rate(metrics, key)
-        count = safe_int(metrics.get("count"), 0)
-        if rate is not None and count >= 4:
-            # Venue örneklemi daha hedefli olduğu için çağıran ağırlığı yüksek tutabilir.
-            values.append((rate, weight, label))
-
-    total_keys = {
-        "OVER_1_5": "over15", "OVER_2_5": "over25", "UNDER_2_5": "under25",
-        "OVER_3_5": "over35", "UNDER_3_5": "under35",
-        "BTTS_YES": "btts", "BTTS_NO": "btts",
-    }
-    if market in total_keys:
-        key = total_keys[market]
-        add(h, key, 1.0, "genel ev sahibi")
-        add(a, key, 1.0, "genel deplasman")
-        add(hv, key, 1.45, "ev iç saha")
-        add(av, key, 1.45, "deplasman dış saha")
-        if market == "BTTS_NO":
-            values = [(1-r, w, label) for r,w,label in values]
-        hm = (h2h or {}).get("all", {})
-        hn = safe_int((h2h or {}).get("count"), 0)
-        hkey = {"OVER_1_5":"over15","OVER_2_5":"over25","UNDER_2_5":"under25",
-                "OVER_3_5":"over35","UNDER_3_5":"under35","BTTS_YES":"btts","BTTS_NO":"btts"}.get(market)
-        if hn >= 4 and hkey:
-            hr = safe_int(hm.get(hkey),0) / hn
-            if market == "BTTS_NO": hr = 1-hr
-            values.append((hr, 0.85, "H2H"))
-    elif market in ("HOME_OVER_1_5", "AWAY_OVER_1_5"):
-        if market == "HOME_OVER_1_5":
-            add(h, "scored2", 0.9, "genel ev sahibi hücum")
-            add(hv, "scored2", 1.7, "ev iç saha hücum")
-            add(av, "conceded2", 1.2, "deplasman savunma")
-            hm_key = "scored2"
-        else:
-            add(a, "scored2", 0.9, "genel deplasman hücum")
-            add(av, "scored2", 1.7, "deplasman hücum")
-            add(hv, "conceded2", 1.2, "ev savunma")
-            hm_key = "scored2"
-        hm=(h2h or {}).get("all", {}); hn=safe_int((h2h or {}).get("count"),0)
-        if hn>=4:
-            hr=safe_int(hm.get(hm_key),0)/hn
-            values.append((hr,0.55,"H2H takım golü"))
-    elif market in ("HOME", "AWAY", "DC_1X", "DC_X2"):
-        if market == "HOME":
-            add(hv, "wins", 1.8, "ev iç saha galibiyet")
-            add(av, "losses", 1.6, "deplasman kayıp")
-        elif market == "AWAY":
-            add(av, "wins", 1.8, "deplasman galibiyet")
-            add(hv, "losses", 1.6, "ev sahibi kayıp")
-        elif market == "DC_1X":
-            add(hv, "unbeaten", 1.9, "ev iç saha yenilmeme")
-            add(av, "losses", 1.5, "deplasman kayıp")
-        else:
-            add(av, "unbeaten", 1.9, "deplasman yenilmeme")
-            add(hv, "losses", 1.5, "ev sahibi kayıp")
-        hm=(h2h or {}).get("all", {}); hn=safe_int((h2h or {}).get("count"),0)
-        if hn>=4:
-            if market=="HOME": hr=safe_int(hm.get("wins"),0)/hn
-            elif market=="AWAY": hr=safe_int(hm.get("losses"),0)/hn
-            elif market=="DC_1X": hr=(safe_int(hm.get("wins"),0)+safe_int(hm.get("draws"),0))/hn
-            else: hr=(safe_int(hm.get("losses"),0)+safe_int(hm.get("draws"),0))/hn
-            values.append((hr,0.8,"H2H"))
-    elif market.startswith("HT_"):
-        key = "ht_over05" if market == "HT_OVER_0_5" else "ht_over15"
-        add(h, key, 1.0, "genel ev sahibi İY")
-        add(a, key, 1.0, "genel deplasman İY")
-
-    if market == "HT_UNDER_1_5":
-        values = [(1-r, w, label) for r,w,label in values]
-    if not values:
-        return 0.55, "Yeterli örneklem bulunamadı; model temkinli başlangıç değeri kullandı."
-    weighted = sum(rate*weight for rate,weight,_ in values) / sum(weight for _,weight,_ in values)
-    total_n = safe_int(h.get("count"),0)+safe_int(a.get("count"),0)+safe_int(hv.get("count"),0)+safe_int(av.get("count"),0)
-    shrink = min(0.18, max(0.04, 8.0/max(8.0,total_n)))
-    probability = 0.50 + (weighted-0.50)*(1-shrink)
-    probability = max(0.52, min(0.90, probability))
-    basis = ", ".join(label for _,_,label in values[:4])
-    return round(probability,4), f"Market olasılığı {basis} verilerinin ağırlıklı birleşiminden üretildi."
-
-
-def prematch_scenario_engine(home, away, h2h=None):
-    """Tek skor dağılımından tüm marketleri tutarlı biçimde değerlendirir.
-
-    Bu dağılım kalibre edilmemiş Poisson yaklaşımıdır. Fiyat veya kesinlik
-    iddiası içermez. Örneklem yetersizse veri kalitesini düşürür.
-    """
-    import math
-    general_h, general_a = home.get("all") or {}, away.get("all") or {}
-    venue_h, venue_a = home.get("home") or {}, away.get("away") or {}
-    nh, na = safe_int(general_h.get("count")), safe_int(general_a.get("count"))
-    nvh, nva = safe_int(venue_h.get("count")), safe_int(venue_a.get("count"))
-    quality = "good" if min(nh,na)>=8 and min(nvh,nva)>=4 else ("limited" if min(nh,na)>=4 else "poor")
-
-    def metric(d,key,default):
-        try:
-            v = float(d.get(key))
-            return v if math.isfinite(v) and v>=0 else default
-        except (TypeError,ValueError):
-            return default
-    # Veri zayıfsa ortalamaya daralt: küçük örneklemde aşırı 4+ gol tahmini yok.
-    h_attack=metric(venue_h,"scored",metric(general_h,"scored",1.25))
-    a_defense=metric(venue_a,"conceded",metric(general_a,"conceded",1.25))
-    a_attack=metric(venue_a,"scored",metric(general_a,"scored",1.10))
-    h_defense=metric(venue_h,"conceded",metric(general_h,"conceded",1.10))
-    weight={"good":.85,"limited":.60,"poor":.30}[quality]
-    lh=max(.25,min(3.4,weight*(h_attack+a_defense)/2+(1-weight)*1.35))
-    la=max(.25,min(3.4,weight*(a_attack+h_defense)/2+(1-weight)*1.15))
-    outcomes=[(i,j,math.exp(-lh-la)*lh**i*la**j/(math.factorial(i)*math.factorial(j)))
-              for i in range(13) for j in range(13)]
-    z=sum(p for _,_,p in outcomes)
-    rules=[
-      ("HOME","MS 1","result_home",lambda h,a:h>a),
-      ("AWAY","MS 2","result_away",lambda h,a:a>h),
-      ("OVER_1_5","1,5 ÜST","goals15",lambda h,a:h+a>=2),
-      ("OVER_2_5","2,5 ÜST","goals25",lambda h,a:h+a>=3),
-      ("UNDER_2_5","2,5 ALT","goals25",lambda h,a:h+a<=2),
-      ("OVER_3_5","3,5 ÜST","goals35",lambda h,a:h+a>=4),
-      ("UNDER_3_5","3,5 ALT","goals35",lambda h,a:h+a<=3),
-      ("BTTS_YES","KG VAR","btts",lambda h,a:h>=1 and a>=1),
-      ("BTTS_NO","KG YOK","btts",lambda h,a:h==0 or a==0),
-      ("HOME_OVER_1_5","Ev 1,5 ÜST","home_goals",lambda h,a:h>=2),
-      ("AWAY_OVER_1_5","Dep 1,5 ÜST","away_goals",lambda h,a:a>=2),
-      ("BB_BTTS_OVER25","KG VAR + 2,5 ÜST","btts_builder",lambda h,a:h>=1 and a>=1 and h+a>=3),
-      ("BB_HOME_UNDER55","MS 1 + 5,5 ALT","home_builder",lambda h,a:h>a and h+a<=5),
-      ("BB_HOME_OVER35","MS 1 + 3,5 ÜST","home_builder",lambda h,a:h>a and h+a>=4),
-      ("BB_HOME_TEAM15","MS 1 + Ev 1,5 ÜST","home_builder",lambda h,a:h>a and h>=2),
-      ("BB_AWAY_UNDER55","MS 2 + 5,5 ALT","away_builder",lambda h,a:a>h and h+a<=5),
-      ("BB_AWAY_OVER35","MS 2 + 3,5 ÜST","away_builder",lambda h,a:a>h and h+a>=4),
-      ("BB_AWAY_TEAM15","MS 2 + Dep 1,5 ÜST","away_builder",lambda h,a:a>h and a>=2),
-    ]
-    markets=[]
-    for code,label,family,test in rules:
-        p=sum(v for h,a,v in outcomes if test(h,a))/z
-        markets.append({"market":code,"label":label,"family":family,
-                        "model_probability":round(p,4),
-                        "reason":(f"Beklenen gol: ev {lh:.2f}, deplasman {la:.2f}. "
-                                  f"'{label}' için skor dağılımındaki uygun sonuçların toplamı "
-                                  f"%{p*100:.1f}. Veri kalitesi: {quality}. "
-                                  "Bu model olasılığı geçmiş sonuçlarla kalibre edilmemiştir; varsa bookmaker fiyatı ayrıca gösterilir.")})
-    return {"markets":markets,"data_quality":quality,
-            "scenario":{"home_expected_goals":round(lh,2),"away_expected_goals":round(la,2)},
-            "model_note":"Bütün marketler tek Poisson skor dağılımından hesaplandı; "
-                         "sonuçlar geçmiş maçlarla kalibre edilmedi, kadro ve lig gücü "
-                         "etkileri ayrıca modellenmedi."}
 
 
 @app.route("/api/prematch/analyze")
@@ -3222,55 +2955,89 @@ def api_prematch_analyze():
         return jsonify({"error": home_error or away_error}), 503
     h2h, h2h_error = prematch_h2h(home_id, away_id, fixture.get("date") or "")
     lineups, lineup_error = prematch_lineups(fixture_id, home_id, away_id)
-    # v5: Bağımsız maç senaryosu motoru. Eski prematch_suggestions ve
-    # keyfi 0.56/0.70 filtreleri bu karar yolunda kullanılmaz.
-    from prematch_intelligence import analyze_match, choose_markets, research_match
-    analysis = analyze_match(home or {}, away or {}, h2h or {})
-    web_research = research_match(home_team.get("name") or "", away_team.get("name") or "", fixture.get("date"))
-    odds_entries, odds_error = prematch_fixture_odds(fixture_id)
-    candidates = []
-    for item in analysis["markets"]:
-        item = dict(item)
-        quote = None if item["market"].startswith("BB_") else prematch_odd_for_market(
-            odds_entries or [], item["market"])
-        if quote and item["market"] in ("HOME", "AWAY"):
-            valid, _ = prematch_result_market_check(odds_entries or [], item["market"], quote)
-            if not valid:
+    suggestions = prematch_suggestions(home or {}, away or {}, lineups, h2h)
+    odds_entries, odds_error = prematch_fixture_odds(fixture_id) if suggestions else ([], None)
+    priced = []
+    if odds_entries is not None:
+        for suggestion in suggestions:
+            quote = prematch_odd_for_market(odds_entries, suggestion["market"])
+            market_note = ""
+            if quote and suggestion["market"] in ("HOME", "AWAY"):
+                market_ok, market_note = prematch_result_market_check(
+                    odds_entries, suggestion["market"], quote)
+                if not market_ok:
+                    quote = None
+            # 1,5 ÜST yalnızca gerçek bir alternatif kalmadığında ve daha
+            # anlamlı bir fiyatla gösterilir; ekranı kolay seçimlerle doldurma.
+            if suggestion["market"] == "OVER_1_5" and quote and quote["odd"] < 1.50:
                 quote = None
-        odd = float(quote["odd"]) if quote else None
-        prob = item["model_probability"]
-        ev = (prob * odd - 1) if odd and odd >= 1.30 else None
-        item.update(quote=quote, implied_probability=round(1/odd,4) if odd else None,
-                    value_edge=round(prob-1/odd,4) if odd else None,
-                    value_edge_pct=round(100*(prob-1/odd),1) if odd else None,
-                    expected_value=round(ev,4) if ev is not None else None,
-                    coupon_eligible=bool(ev is not None and ev >= .04 and prob >= .60 and
-                                         analysis["data_quality"] == "good"),
-                    manual_review=not bool(odd and odd >= 1.30),
-                    screening_only=False,
-                    confidence=analysis["data_quality"],
-                    probability_basis=analysis["model_note"],
-                    explanation=item["reason"],
-                    lineup_fit=None)
-        candidates.append(item)
-
-    chosen = choose_markets(candidates, analysis["data_quality"])
-    # Research findings are not interpreted as confirmed lineup/injury facts.
-    note = ("Model analizi her maç için gösterilir. Doğrulanmış 1.30+ fiyatı olmayan "
-            "seçimler manuel inceleme içindir, kupona alınmaz. "
-            "BetBuilder fiyatları API tarafından doğrulanmadı; oran tahmin edilmedi.")
+            if quote:
+                priced.append({
+                    "market": suggestion["market"],
+                    "label": suggestion["label"], "reason": suggestion["reason"],
+                    "explanation": prematch_pick_explanation(
+                        suggestion["market"], home_team.get("name") or "Ev sahibi",
+                        away_team.get("name") or "Deplasman", home, away)
+                        + " İkili rekabet: " + suggestion["h2h_note"]
+                        + " Kadro etkisi: " + suggestion["lineup_note"] + market_note,
+                    "lineup_fit": suggestion["lineup_fit"],
+                    "confidence": prematch_confidence(
+                        suggestion["market"], suggestion["rank"], lineups,
+                        suggestion["lineup_fit"]),
+                    "quote": quote,
+                })
+    if any(item["label"] != "1,5 ÜST" for item in priced):
+        priced = [item for item in priced if item["label"] != "1,5 ÜST"]
+    # İlişkili iki seçimin kendi gerçek oranlarını ve açıklamalarını birlikte koru.
+    paired_markets = (
+        ("KG VAR", "2,5 ÜST"), ("1X", "3,5 ALT"),
+        ("1X", "3,5 ÜST"), ("X2", "3,5 ALT"), ("X2", "3,5 ÜST"),
+    )
+    # MS seçimini ilk üçe zorla sokma; model sırası ve fiyat koşulu belirlesin.
+    displayed = priced[:5]
+    for first, second in paired_markets:
+        if first in {x["label"] for x in displayed}:
+            partner = next((x for x in priced if x["label"] == second), None)
+            if partner and partner not in displayed:
+                displayed.append(partner)
+        elif second in {x["label"] for x in displayed}:
+            partner = next((x for x in priced if x["label"] == first), None)
+            if partner and partner not in displayed:
+                displayed.append(partner)
+    priced = displayed[:5]
+    labels = {item["label"] for item in priced}
+    joint_notes = []
+    if {"KG VAR", "2,5 ÜST"} <= labels:
+        joint_notes.append("KG VAR ve 2,5 ÜST birlikte de gerçekleşebilir: iki takımın karşılıklı gol verisi ve maçların 3+ gole çıkma sıklığı ayrı ayrı eşikleri karşılıyor. İki seçim için gösterilen oranlar birbirinden bağımsızdır; birleşik oran değildir.")
+    for side in ("1X", "X2"):
+        for goal in ("3,5 ALT", "3,5 ÜST"):
+            if {side, goal} <= labels:
+                joint_notes.append(f"{side} ve {goal} birlikte de gerçekleşebilir: yenilmeme ve gol çizgisi eğilimleri ayrı ayrı koşulları sağlıyor. Gösterilen oranlar tekli piyasalara aittir.")
     if odds_error:
-        note += " Oran servisi: " + str(odds_error)
+        odds_note = f"Oran sağlayıcısı yanıt vermedi: {odds_error}"
+    elif suggestions and not priced:
+        odds_note = "Veri eğilimi bulundu; uygun yabancı oran bulunamadı (genel alt sınır 1,30; 1,5 ÜST için 1,50)."
+    elif not suggestions:
+        odds_note = "Veri eğilimi yeterli değil; oran araması yapılmadı."
+    else:
+        odds_note = "Oranlar bilgi amaçlıdır; sağlayıcıda değişebilir."
     return jsonify({
-        "id":fixture_id,"home":home_team.get("name"),"away":away_team.get("name"),
-        "home_form":home,"away_form":away,"h2h":h2h,"h2h_error":h2h_error,
-        "suggestions":chosen,"all_suggestions":candidates,"joint_notes":[],
-        "lineups":lineups,"lineup_note":("Onaylı kadro mevcut." if lineups.get("confirmed")
-            else "Kadrolar henüz kesinleşmedi; model kadro etkisini hesaplamadı."),
-        "lineup_error":lineup_error,"decision":("ANALİZ HAZIR" if chosen else "VERİ YETERSİZ"),
-        "candidate_count":len(candidates),"odds_note":note,
-        "note":analysis["model_note"],"scenario":analysis["scenario"],
-        "data_quality":analysis["data_quality"], "web_research":web_research})
+        "id": fixture_id, "home": home_team.get("name"), "away": away_team.get("name"),
+        "home_form": home, "away_form": away,
+        "h2h": h2h, "h2h_error": h2h_error,
+        "suggestions": priced,
+        "joint_notes": joint_notes,
+        "lineups": lineups,
+        "lineup_note": ("Onaylı ilk 11 analize dahil edildi."
+                        if lineups.get("confirmed")
+                        else "Kadrolar henüz açıklanmadı; analiz form verileriyle hazırlandı."),
+        "lineup_error": lineup_error,
+        "decision": "PAS" if not priced else "EĞİLİM",
+        "candidate_count": len(suggestions), "odds_note": odds_note,
+        "note": ("Son maç formu, iç/dış saha verisi, onaylı ilk 11 ve diziliş birlikte değerlendirildi."
+                 if lineups.get("confirmed") else
+                 "Son maç formu ve iç/dış saha verisi değerlendirildi; kadrolar açıklanınca analiz güncellenir."),
+    })
 
 
 @app.route("/api/prematch/result")
@@ -3296,8 +3063,6 @@ def api_prematch_result():
     return jsonify({
         "fixture": fixture_id, "status": status, "finished": finished,
         "home_goals": home_goals, "away_goals": away_goals,
-        "ht_home_goals": ((item.get("score") or {}).get("halftime") or {}).get("home"),
-        "ht_away_goals": ((item.get("score") or {}).get("halftime") or {}).get("away"),
     })
 
 
@@ -3787,78 +3552,9 @@ select{
   select{min-width:0;flex:1}.grid{grid-template-columns:1fr}.title{font-size:22px}
   .card.featured.bot{grid-column:span 1}
 }
-
-/* GOL MERKEZI PRO | shared visual language, presentation-only */
-:root{--pro-ink:#e9f5ff;--pro-teal:#32e6c5;--pro-gold:#f4ca6b;--pro-line:rgba(112,173,210,.22)}
-html{scroll-behavior:smooth}
-body{background:radial-gradient(ellipse 80% 65% at 8% -8%,rgba(20,107,146,.42),transparent 65%),radial-gradient(ellipse 60% 70% at 100% 14%,rgba(23,71,129,.35),transparent 65%),linear-gradient(145deg,#030a14 0%,#08192c 48%,#040b16 100%) fixed!important;color:var(--pro-ink)!important}
-body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;opacity:.3;background-image:linear-gradient(rgba(102,184,219,.045) 1px,transparent 1px),linear-gradient(90deg,rgba(102,184,219,.045) 1px,transparent 1px);background-size:44px 44px;mask-image:linear-gradient(to bottom,#000,transparent 92%)}
-body>*,.wrap{position:relative;z-index:1}
-.pro-nav{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 16px;margin-bottom:18px;border:1px solid var(--pro-line);border-radius:17px;background:linear-gradient(110deg,rgba(15,40,63,.96),rgba(8,21,38,.93));box-shadow:0 18px 55px rgba(0,0,0,.24),inset 0 1px rgba(255,255,255,.055)}
-.pro-nav .pro-brand{font-size:15px;letter-spacing:.1em;font-weight:900;color:#f5f9ff;margin-right:auto;white-space:nowrap}
-.pro-nav .pro-brand em{font-style:normal;color:var(--pro-teal)}
-.pro-nav a{font-size:12px;font-weight:800;letter-spacing:.01em;text-decoration:none;color:#bfd2e5;padding:10px 13px;border:1px solid transparent;border-radius:10px;transition:all .15s}
-.pro-nav a:hover,.pro-nav a.active{color:#071b26;background:linear-gradient(120deg,#5df2d5,#24bdaf);border-color:#7df7dd;box-shadow:0 4px 20px rgba(37,214,186,.2)}
-.header,header,.toolbar,.coupon-panel,.match,.card,.panel,.coupon{backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
-.header,header{border-color:var(--pro-line)!important}
-.coupon-panel,.match,.card,.coupon{border-color:var(--pro-line)!important;box-shadow:0 16px 40px rgba(0,0,0,.23),inset 0 1px rgba(255,255,255,.035)!important}
-.coupon-panel{background:linear-gradient(140deg,rgba(20,43,66,.95),rgba(12,24,44,.96))!important}
-.match,.card,.coupon{background:linear-gradient(145deg,rgba(22,43,66,.95),rgba(11,22,41,.98))!important}
-button{transition:filter .18s,transform .18s,box-shadow .18s}
-button:hover:not(:disabled){filter:brightness(1.12);box-shadow:0 5px 18px rgba(38,201,169,.14)}
-:focus-visible{outline:2px solid #5df2d5;outline-offset:3px}
-@media(max-width:760px){.pro-nav{gap:4px;padding:10px}.pro-nav .pro-brand{width:100%;margin-bottom:4px}.pro-nav a{flex:1;text-align:center;padding:9px 5px;font-size:11px}}
-
-
-/* GOL MERKEZI PRO 2.0 — complete layout overhaul, UI only */
-:root{--pro-cyan:#45e7d4;--pro-amber:#f6c778;--pro-border:rgba(95,167,199,.19)}
-html{background:#050c18!important}
-body{padding-left:254px!important;min-height:100vh!important;background:radial-gradient(ellipse 70% 55% at 85% -10%,rgba(23,91,137,.28),transparent 72%),radial-gradient(ellipse 50% 55% at 12% 55%,rgba(4,88,102,.21),transparent 76%),linear-gradient(130deg,#050c18 0%,#09182a 45%,#070f1e 100%) fixed!important;color:#e9f3ff!important}
-body:before{background-size:54px 54px!important;opacity:.36!important}
-.pro-nav{display:none!important}
-.pro-sidebar{position:fixed!important;z-index:10000!important;left:0;top:0;bottom:0;width:254px;display:flex;flex-direction:column;padding:27px 15px 20px;background:linear-gradient(175deg,rgba(13,31,49,.98),rgba(6,16,30,.99));border-right:1px solid rgba(97,169,198,.24);box-shadow:15px 0 60px rgba(0,0,0,.24)}
-.pro-identity{display:flex;align-items:center;gap:11px;color:#f1f8ff!important;text-decoration:none!important;font-size:15px;font-weight:900;letter-spacing:.045em;padding:4px 7px 30px;line-height:1.3}
-.pro-identity strong{display:block;font-size:10px;letter-spacing:.2em;color:var(--pro-cyan);margin-top:4px}
-.pro-logo{width:43px;height:43px;flex:none;display:grid;place-items:center;border-radius:14px;background:linear-gradient(135deg,#125c71,#0a294b);box-shadow:0 0 26px rgba(46,218,199,.18);font-size:23px}
-.pro-section-label{font-size:10px;letter-spacing:.18em;color:#6f93a9;font-weight:800;padding:0 12px 12px}
-.pro-sidebar>a:not(.pro-identity){display:flex;align-items:center;gap:12px;padding:15px 13px;border-radius:12px;margin-bottom:8px;text-decoration:none!important;font-size:13px;font-weight:750;color:#aec6d9;border:1px solid transparent;transition:.2s}
-.pro-sidebar>a:not(.pro-identity):hover{color:#fff;background:rgba(72,180,199,.11)}
-.pro-sidebar>a.active:not(.pro-identity){background:linear-gradient(100deg,rgba(36,198,181,.2),rgba(30,99,130,.12));color:#5df2db;border:1px solid rgba(64,221,197,.27);box-shadow:inset 3px 0 #3be3ca}
-.pro-sidebar-bottom{margin-top:auto;padding:17px 10px 4px;border-top:1px solid var(--pro-border);font-size:10px;letter-spacing:.12em;color:#b2d0df;font-weight:800}
-.pro-sidebar-bottom small{display:block;color:#7290a5;letter-spacing:0;margin-top:8px;font-weight:500}
-.pro-pulse{display:inline-block;width:8px;height:8px;border-radius:50%;background:#42e3a4;box-shadow:0 0 12px #42e3a4;margin-right:6px}
-.wrap{max-width:1600px!important;width:calc(100% - 72px)!important;margin:0 auto!important;padding-top:34px!important}
-header,.header{background:linear-gradient(110deg,rgba(16,42,65,.93),rgba(9,25,44,.91))!important;border:1px solid var(--pro-border)!important;border-radius:20px!important;padding:25px 30px!important;box-shadow:0 24px 65px rgba(0,0,0,.18)!important;margin-bottom:24px!important}
-header h1,.header h1{font-size:clamp(25px,2.6vw,38px)!important;letter-spacing:-.045em!important}
-.toolbar,.coupon-panel,.panel,.card,.match,.coupon{background:linear-gradient(145deg,rgba(17,40,61,.92),rgba(9,22,39,.94))!important;border:1px solid var(--pro-border)!important;border-radius:17px!important;box-shadow:0 16px 45px rgba(0,0,0,.19),inset 0 1px rgba(255,255,255,.035)!important}
-.toolbar{padding:22px!important;gap:15px!important;margin-bottom:16px!important}
-.coupon-panel{padding:25px!important;margin:22px 0 30px!important}
-.coupon-head h2{font-size:21px!important;letter-spacing:-.03em}
-.bankroll{gap:12px!important;margin-top:19px!important}
-.bankroll div{padding:15px!important;background:rgba(5,16,32,.63)!important;border:1px solid rgba(93,151,184,.2)!important;border-radius:13px!important}
-.bankroll b{font-size:22px!important;margin-top:9px!important}
-.grid{gap:17px!important}
-.match{padding:23px!important;transition:transform .18s,border-color .18s!important}
-.match:hover{transform:translateY(-3px);border-color:rgba(57,215,195,.43)!important}
-.teams{font-size:20px!important;letter-spacing:-.03em}
-.coupons{gap:14px!important}.coupon{padding:18px!important}
-button{background:linear-gradient(110deg,#118e7b,#0c6e83)!important;border:1px solid rgba(93,240,210,.35)!important;color:#f2fffc!important;font-weight:800!important;box-shadow:0 5px 16px rgba(3,131,121,.13)}
-button:hover:not(:disabled){box-shadow:0 7px 24px rgba(22,197,178,.27)!important}
-input,select{background:#08192b!important;border:1px solid rgba(110,171,203,.34)!important;color:#eef8ff!important}
-.meta,.hint,.coupon-help{color:#9eb8cb!important}
-@media(max-width:1100px){body{padding-left:215px!important}.pro-sidebar{width:215px}.wrap{width:calc(100% - 36px)!important}.bankroll{grid-template-columns:repeat(3,minmax(0,1fr))!important}}
-@media(max-width:760px){body{padding-left:0!important;padding-top:69px!important}.pro-sidebar{width:100%;height:69px;bottom:auto;flex-direction:row;align-items:center;padding:9px 12px;gap:5px;border-right:0;border-bottom:1px solid var(--pro-border)}.pro-identity{padding:0;margin-right:auto;font-size:11px;gap:6px}.pro-identity strong{font-size:8px}.pro-logo{width:33px;height:33px;font-size:17px}.pro-section-label,.pro-sidebar-bottom{display:none}.pro-sidebar>a:not(.pro-identity){font-size:0;padding:10px 9px;margin:0;gap:0}.pro-sidebar>a:not(.pro-identity) span{display:none}.wrap{width:calc(100% - 22px)!important;padding-top:15px!important}header,.header{padding:20px!important}.coupon-panel{padding:15px!important}.bankroll{grid-template-columns:repeat(2,minmax(0,1fr))!important}.coupons,.grid{grid-template-columns:1fr!important}}
-
-
-/* PRO 3.0 visual depth */
-body{background:radial-gradient(ellipse 80% 55% at 72% -12%,rgba(0,194,190,.25),transparent 65%),radial-gradient(ellipse 55% 65% at 14% 76%,rgba(28,84,174,.24),transparent 70%),linear-gradient(130deg,#030916 0%,#071c32 48%,#020713 100%)!important;background-attachment:fixed!important}
-.pro-sidebar{box-shadow:18px 0 65px rgba(0,0,0,.42)!important}
-.wrap,main{position:relative}
-.card,.panel,.coupon-panel{box-shadow:0 20px 50px rgba(0,0,0,.27),inset 0 1px rgba(255,255,255,.035)!important}
 </style>
 </head>
 <body>
-<aside class="pro-sidebar" aria-label="Ana navigasyon"><a class="pro-identity" href="/"><span class="pro-logo">⚽</span><span>GOL MERKEZİ<strong>PRO ANALYTICS</strong></span></a><div class="pro-section-label">KONTROL MERKEZİ</div><a href="/" class="NAVLIVE active">◉ <span>Canlı Gol Merkezi</span></a><a href="/tahmin" class="NAVPRE">▦ <span>Maç Analizi & Kupon</span></a><a href="/radar" class="NAVRADAR">◈ <span>Piyasa Radarı</span></a><div class="pro-sidebar-bottom"><span class="pro-pulse"></span> ANALİZ PLATFORMU <small>Gol Merkezi • Pro Workspace</small></div></aside>
 <div class="wrap">
   <div class="header">
     <div class="brand">
@@ -3905,7 +3601,7 @@ body{background:radial-gradient(ellipse 80% 55% at 72% -12%,rgba(0,194,190,.25),
       <span><span class="dot" style="background:#ff3f4f"></span>0–44 Zayıf</span>
       <span>🧠 BOT PICK</span>
     </div>
-    <div>Gol Sinyal Merkezi v6.3 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
+    <div>Gol Sinyal Merkezi v4.10 &nbsp; | &nbsp; Gerçek istatistik, akıllı analiz.</div>
   </div>
 </div>
 
@@ -4397,144 +4093,30 @@ button{border:1px solid #2cab79;background:#0e6f50;color:white;cursor:pointer;fo
 .bankroll{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:7px;margin-top:12px}
 .bankroll div{background:#121a2c;border:1px solid #3d4d6b;border-radius:8px;padding:8px;font-size:11px;color:#acbdd0}
 .bankroll b{display:block;color:#f2f6ff;font-size:15px;margin-top:3px}.profit{color:#72e7a9!important}.loss{color:#ff9198!important}
-.learning-stats{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}.learning-stats span{background:#10182a;border:1px solid #3b4963;border-radius:7px;padding:6px 8px;font-size:11px;color:#c3d0df}.learning-stats b{color:#f1f6ff}.learning-stats .good{color:#72e7a9}.learning-stats .bad{color:#ff9ba1}
 .coupons{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px;margin-top:11px}
-.coupon-risk{display:inline-block;margin:0 0 8px;padding:4px 8px;border-radius:7px;font-size:11px;font-weight:900;letter-spacing:.2px}
-.coupon-risk.safe{background:#123b2a;border:1px solid #2c9b6b;color:#72e7a9}
-.coupon-risk.balanced{background:#403717;border:1px solid #a88d28;color:#ffe082}
-.coupon-risk.value{background:#43252a;border:1px solid #b14d5c;color:#ffabb4}
-.coupon-meta{font-size:11px;color:#b8c5d7;line-height:1.5;margin-bottom:7px}
 .coupon{background:#121a2c;border:1px solid #4c6381;border-radius:9px;padding:10px}
 .coupon-title{font-weight:800;color:#cdb8ff;margin-bottom:7px}.coupon-leg{font-size:12px;border-top:1px solid #2f3c55;padding:7px 0;line-height:1.45}
-.coupon-total{font-size:12px;color:#80e8b6;margin-top:7px;font-weight:800}.won{color:#72e7a9}.lost{color:#ff9198}.open{color:#ffd379}.void{color:#9aa7b8}.remove-coupon{margin-top:9px;font-size:11px;padding:6px 9px;background:#3a2028;border:1px solid #75404c;color:#ffb7bf;border-radius:7px;cursor:pointer}.close-analysis{font-size:11px;padding:6px 9px;background:#263247;border:1px solid #536783;color:#dce7f5;border-radius:7px;cursor:pointer}
+.coupon-total{font-size:12px;color:#80e8b6;margin-top:7px;font-weight:800}.won{color:#72e7a9}.lost{color:#ff9198}.open{color:#ffd379}.void{color:#9aa7b8}
 @media(max-width:680px){.grid,.form,.lineup-teams,.coupons{grid-template-columns:1fr}.bankroll{grid-template-columns:repeat(2,minmax(0,1fr))}.teams{font-size:16px}}
-/* v7 prematch-only design system; does not modify live dashboard */
-:root{--pm-bg:#071320;--pm-card:#102237;--pm-border:#29455d;--pm-accent:#36d9b0}
-html,body{background:radial-gradient(ellipse at 12% -12%,#1b3954 0%,transparent 44%),linear-gradient(145deg,#071321,#0b192a 62%,#081725);color:#ecf4fb}
-.wrap{width:min(1180px,calc(100% - 32px));margin:auto;padding:22px 0 65px}
-header{background:linear-gradient(120deg,#10283e,#0c2035);border:1px solid #2b5066;border-radius:18px;padding:20px 24px;box-shadow:0 14px 45px #0003}
-header h1{letter-spacing:-.5px;font-size:clamp(22px,3vw,30px)}
-.toolbar{border-radius:16px;background:#102438;border:1px solid #34526a;padding:17px;gap:12px;box-shadow:0 8px 25px #0002}
-button,#load{border-radius:10px;min-height:39px;transition:transform .16s,filter .16s}
-button:hover,#load:hover{filter:brightness(1.12);transform:translateY(-1px)}
-input,select{border-radius:10px;min-height:40px}
-.coupon-panel{border:1px solid #455b80;border-radius:16px;background:linear-gradient(135deg,#172438,#172136);box-shadow:0 10px 30px #0002}
-.match-card,.match,.fixture,.analysis,.pick{box-shadow:0 8px 25px #0002}
-.pick{border-radius:13px!important;padding:16px!important;line-height:1.55}
-.pick-why{line-height:1.7}
-.form div,.lineup-box{border-radius:11px}
-.hint,.odds-note{line-height:1.6}
-@media(max-width:700px){.wrap{width:calc(100% - 20px);padding-top:10px}header{padding:16px}.toolbar{padding:12px;flex-wrap:wrap}.toolbar input,.toolbar select{max-width:100%}}
-
-/* GOL MERKEZI PRO | shared visual language, presentation-only */
-:root{--pro-ink:#e9f5ff;--pro-teal:#32e6c5;--pro-gold:#f4ca6b;--pro-line:rgba(112,173,210,.22)}
-html{scroll-behavior:smooth}
-body{background:radial-gradient(ellipse 80% 65% at 8% -8%,rgba(20,107,146,.42),transparent 65%),radial-gradient(ellipse 60% 70% at 100% 14%,rgba(23,71,129,.35),transparent 65%),linear-gradient(145deg,#030a14 0%,#08192c 48%,#040b16 100%) fixed!important;color:var(--pro-ink)!important}
-body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;opacity:.3;background-image:linear-gradient(rgba(102,184,219,.045) 1px,transparent 1px),linear-gradient(90deg,rgba(102,184,219,.045) 1px,transparent 1px);background-size:44px 44px;mask-image:linear-gradient(to bottom,#000,transparent 92%)}
-body>*,.wrap{position:relative;z-index:1}
-.pro-nav{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 16px;margin-bottom:18px;border:1px solid var(--pro-line);border-radius:17px;background:linear-gradient(110deg,rgba(15,40,63,.96),rgba(8,21,38,.93));box-shadow:0 18px 55px rgba(0,0,0,.24),inset 0 1px rgba(255,255,255,.055)}
-.pro-nav .pro-brand{font-size:15px;letter-spacing:.1em;font-weight:900;color:#f5f9ff;margin-right:auto;white-space:nowrap}
-.pro-nav .pro-brand em{font-style:normal;color:var(--pro-teal)}
-.pro-nav a{font-size:12px;font-weight:800;letter-spacing:.01em;text-decoration:none;color:#bfd2e5;padding:10px 13px;border:1px solid transparent;border-radius:10px;transition:all .15s}
-.pro-nav a:hover,.pro-nav a.active{color:#071b26;background:linear-gradient(120deg,#5df2d5,#24bdaf);border-color:#7df7dd;box-shadow:0 4px 20px rgba(37,214,186,.2)}
-.header,header,.toolbar,.coupon-panel,.match,.card,.panel,.coupon{backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
-.header,header{border-color:var(--pro-line)!important}
-.coupon-panel,.match,.card,.coupon{border-color:var(--pro-line)!important;box-shadow:0 16px 40px rgba(0,0,0,.23),inset 0 1px rgba(255,255,255,.035)!important}
-.coupon-panel{background:linear-gradient(140deg,rgba(20,43,66,.95),rgba(12,24,44,.96))!important}
-.match,.card,.coupon{background:linear-gradient(145deg,rgba(22,43,66,.95),rgba(11,22,41,.98))!important}
-button{transition:filter .18s,transform .18s,box-shadow .18s}
-button:hover:not(:disabled){filter:brightness(1.12);box-shadow:0 5px 18px rgba(38,201,169,.14)}
-:focus-visible{outline:2px solid #5df2d5;outline-offset:3px}
-@media(max-width:760px){.pro-nav{gap:4px;padding:10px}.pro-nav .pro-brand{width:100%;margin-bottom:4px}.pro-nav a{flex:1;text-align:center;padding:9px 5px;font-size:11px}}
-
-
-/* GOL MERKEZI PRO 2.0 — complete layout overhaul, UI only */
-:root{--pro-cyan:#45e7d4;--pro-amber:#f6c778;--pro-border:rgba(95,167,199,.19)}
-html{background:#050c18!important}
-body{padding-left:254px!important;min-height:100vh!important;background:radial-gradient(ellipse 70% 55% at 85% -10%,rgba(23,91,137,.28),transparent 72%),radial-gradient(ellipse 50% 55% at 12% 55%,rgba(4,88,102,.21),transparent 76%),linear-gradient(130deg,#050c18 0%,#09182a 45%,#070f1e 100%) fixed!important;color:#e9f3ff!important}
-body:before{background-size:54px 54px!important;opacity:.36!important}
-.pro-nav{display:none!important}
-.pro-sidebar{position:fixed!important;z-index:10000!important;left:0;top:0;bottom:0;width:254px;display:flex;flex-direction:column;padding:27px 15px 20px;background:linear-gradient(175deg,rgba(13,31,49,.98),rgba(6,16,30,.99));border-right:1px solid rgba(97,169,198,.24);box-shadow:15px 0 60px rgba(0,0,0,.24)}
-.pro-identity{display:flex;align-items:center;gap:11px;color:#f1f8ff!important;text-decoration:none!important;font-size:15px;font-weight:900;letter-spacing:.045em;padding:4px 7px 30px;line-height:1.3}
-.pro-identity strong{display:block;font-size:10px;letter-spacing:.2em;color:var(--pro-cyan);margin-top:4px}
-.pro-logo{width:43px;height:43px;flex:none;display:grid;place-items:center;border-radius:14px;background:linear-gradient(135deg,#125c71,#0a294b);box-shadow:0 0 26px rgba(46,218,199,.18);font-size:23px}
-.pro-section-label{font-size:10px;letter-spacing:.18em;color:#6f93a9;font-weight:800;padding:0 12px 12px}
-.pro-sidebar>a:not(.pro-identity){display:flex;align-items:center;gap:12px;padding:15px 13px;border-radius:12px;margin-bottom:8px;text-decoration:none!important;font-size:13px;font-weight:750;color:#aec6d9;border:1px solid transparent;transition:.2s}
-.pro-sidebar>a:not(.pro-identity):hover{color:#fff;background:rgba(72,180,199,.11)}
-.pro-sidebar>a.active:not(.pro-identity){background:linear-gradient(100deg,rgba(36,198,181,.2),rgba(30,99,130,.12));color:#5df2db;border:1px solid rgba(64,221,197,.27);box-shadow:inset 3px 0 #3be3ca}
-.pro-sidebar-bottom{margin-top:auto;padding:17px 10px 4px;border-top:1px solid var(--pro-border);font-size:10px;letter-spacing:.12em;color:#b2d0df;font-weight:800}
-.pro-sidebar-bottom small{display:block;color:#7290a5;letter-spacing:0;margin-top:8px;font-weight:500}
-.pro-pulse{display:inline-block;width:8px;height:8px;border-radius:50%;background:#42e3a4;box-shadow:0 0 12px #42e3a4;margin-right:6px}
-.wrap{max-width:1600px!important;width:calc(100% - 72px)!important;margin:0 auto!important;padding-top:34px!important}
-header,.header{background:linear-gradient(110deg,rgba(16,42,65,.93),rgba(9,25,44,.91))!important;border:1px solid var(--pro-border)!important;border-radius:20px!important;padding:25px 30px!important;box-shadow:0 24px 65px rgba(0,0,0,.18)!important;margin-bottom:24px!important}
-header h1,.header h1{font-size:clamp(25px,2.6vw,38px)!important;letter-spacing:-.045em!important}
-.toolbar,.coupon-panel,.panel,.card,.match,.coupon{background:linear-gradient(145deg,rgba(17,40,61,.92),rgba(9,22,39,.94))!important;border:1px solid var(--pro-border)!important;border-radius:17px!important;box-shadow:0 16px 45px rgba(0,0,0,.19),inset 0 1px rgba(255,255,255,.035)!important}
-.toolbar{padding:22px!important;gap:15px!important;margin-bottom:16px!important}
-.coupon-panel{padding:25px!important;margin:22px 0 30px!important}
-.coupon-head h2{font-size:21px!important;letter-spacing:-.03em}
-.bankroll{gap:12px!important;margin-top:19px!important}
-.bankroll div{padding:15px!important;background:rgba(5,16,32,.63)!important;border:1px solid rgba(93,151,184,.2)!important;border-radius:13px!important}
-.bankroll b{font-size:22px!important;margin-top:9px!important}
-.grid{gap:17px!important}
-.match{padding:23px!important;transition:transform .18s,border-color .18s!important}
-.match:hover{transform:translateY(-3px);border-color:rgba(57,215,195,.43)!important}
-.teams{font-size:20px!important;letter-spacing:-.03em}
-.coupons{gap:14px!important}.coupon{padding:18px!important}
-button{background:linear-gradient(110deg,#118e7b,#0c6e83)!important;border:1px solid rgba(93,240,210,.35)!important;color:#f2fffc!important;font-weight:800!important;box-shadow:0 5px 16px rgba(3,131,121,.13)}
-button:hover:not(:disabled){box-shadow:0 7px 24px rgba(22,197,178,.27)!important}
-input,select{background:#08192b!important;border:1px solid rgba(110,171,203,.34)!important;color:#eef8ff!important}
-.meta,.hint,.coupon-help{color:#9eb8cb!important}
-@media(max-width:1100px){body{padding-left:215px!important}.pro-sidebar{width:215px}.wrap{width:calc(100% - 36px)!important}.bankroll{grid-template-columns:repeat(3,minmax(0,1fr))!important}}
-@media(max-width:760px){body{padding-left:0!important;padding-top:69px!important}.pro-sidebar{width:100%;height:69px;bottom:auto;flex-direction:row;align-items:center;padding:9px 12px;gap:5px;border-right:0;border-bottom:1px solid var(--pro-border)}.pro-identity{padding:0;margin-right:auto;font-size:11px;gap:6px}.pro-identity strong{font-size:8px}.pro-logo{width:33px;height:33px;font-size:17px}.pro-section-label,.pro-sidebar-bottom{display:none}.pro-sidebar>a:not(.pro-identity){font-size:0;padding:10px 9px;margin:0;gap:0}.pro-sidebar>a:not(.pro-identity) span{display:none}.wrap{width:calc(100% - 22px)!important;padding-top:15px!important}header,.header{padding:20px!important}.coupon-panel{padding:15px!important}.bankroll{grid-template-columns:repeat(2,minmax(0,1fr))!important}.coupons,.grid{grid-template-columns:1fr!important}}
-
-
-/* PRO 3.0 visual depth */
-body{background:radial-gradient(ellipse 80% 55% at 72% -12%,rgba(0,194,190,.25),transparent 65%),radial-gradient(ellipse 55% 65% at 14% 76%,rgba(28,84,174,.24),transparent 70%),linear-gradient(130deg,#030916 0%,#071c32 48%,#020713 100%)!important;background-attachment:fixed!important}
-.pro-sidebar{box-shadow:18px 0 65px rgba(0,0,0,.42)!important}
-.wrap,main{position:relative}
-.card,.panel,.coupon-panel{box-shadow:0 20px 50px rgba(0,0,0,.27),inset 0 1px rgba(255,255,255,.035)!important}
-
-/* GOL MERKEZI PRO / Prematch Workspace 4.0 — structural redesign */
-:root{--ws-mint:#50efd4;--ws-blue:#4ca8f5;--ws-gold:#f4c66e;--ws-muted:#9bb6c9}
-body{background:radial-gradient(ellipse 60% 43% at 76% 4%,rgba(16,157,170,.22),transparent 75%),radial-gradient(ellipse 45% 55% at 25% 75%,rgba(27,73,166,.23),transparent 78%),linear-gradient(125deg,#030a15,#081a2d 51%,#030a16)!important;background-attachment:fixed!important}
-.wrap{max-width:1740px!important;width:calc(100% - 68px)!important;padding:26px 0 100px!important}
-.ws-hero{position:relative;overflow:hidden;display:grid;grid-template-columns:minmax(0,1.3fr) minmax(290px,.7fr);align-items:center;gap:25px;min-height:235px;padding:36px 40px!important;background:radial-gradient(circle at 83% 47%,rgba(39,228,202,.15),transparent 32%),linear-gradient(112deg,#112d48 0%,#0a2036 48%,#061322 100%)!important;border:1px solid rgba(92,202,221,.29)!important}
-.ws-hero:after{content:'';position:absolute;right:7%;top:-90px;width:390px;height:390px;border:1px solid rgba(73,232,216,.17);border-radius:50%;box-shadow:0 0 0 42px rgba(54,213,220,.035),0 0 0 95px rgba(54,213,220,.025);pointer-events:none}
-.ws-kicker{color:var(--ws-mint);font-size:11px;letter-spacing:.24em;font-weight:900;margin-bottom:15px}.ws-hero h1{font-size:clamp(32px,3.2vw,51px)!important;line-height:1.08;max-width:750px;margin-bottom:16px!important}.ws-hero p{font-size:15px;max-width:590px}.ws-hero .version{font-size:11px;letter-spacing:0;vertical-align:middle}
-.ws-hero-art{position:relative;z-index:1;display:flex;justify-content:center;align-items:center;min-height:175px}.ws-orb{display:grid;place-items:center;width:175px;height:175px;border-radius:50%;background:radial-gradient(circle at 30% 25%,#37dbc3,#126c86 45%,#0a2540 73%);box-shadow:0 0 70px #25d4ce44,inset -18px -18px 45px #04172a;transform:rotate(-14deg);font-size:75px;border:1px solid #66eadc77}.ws-art-caption{position:absolute;bottom:0;right:0;padding:10px 15px;background:#061b2bcf;border:1px solid #48d9c455;border-radius:11px;font-size:11px;letter-spacing:.1em;color:#b8fff0;font-weight:800}
-.ws-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin:18px 0 24px}.ws-metric{border:1px solid rgba(96,181,210,.2);border-radius:17px;padding:19px 20px;background:linear-gradient(145deg,rgba(18,46,69,.95),rgba(6,21,39,.98));box-shadow:0 12px 30px #0003}.ws-metric small{display:block;color:#9dbbcd;font-size:11px;font-weight:750;letter-spacing:.08em;text-transform:uppercase}.ws-metric strong{display:block;font-size:29px;letter-spacing:-.05em;margin:8px 0 4px}.ws-metric span{font-size:11px;color:#7e9eaf}.ws-metric:nth-child(2) strong{color:var(--ws-mint)}.ws-metric:nth-child(4) strong{color:var(--ws-gold)}
-.ws-section-head{display:flex;align-items:center;justify-content:space-between;gap:15px;flex-wrap:wrap;margin:27px 0 14px}.ws-section-head h2{margin:0;font-size:23px;letter-spacing:-.04em}.ws-section-head p{font-size:12px;margin-top:5px}.ws-section-tag{font-size:10px;letter-spacing:.12em;color:#50efd4;border:1px solid #39d2bf55;border-radius:100px;padding:8px 12px;background:#0a3a3a55;font-weight:850}
-.ws-filter-panel{border:1px solid rgba(95,167,199,.25);background:linear-gradient(145deg,rgba(13,34,55,.95),rgba(7,20,38,.97));padding:23px;border-radius:20px;box-shadow:0 15px 35px #0003}.ws-filter-panel .toolbar{margin:0!important;background:transparent!important;border:0!important;box-shadow:none!important;padding:0!important}.ws-filter-panel label{font-size:12px;font-weight:800;color:#a9c8d8}.ws-filter-panel input,.ws-filter-panel select{min-height:46px!important}.ws-filter-panel button{min-height:46px!important}.ws-search{width:min(330px,100%);flex:1;min-width:170px}.ws-filter-panel .hint{margin:13px 0 0!important}
-.ws-workspace{display:grid;grid-template-columns:minmax(0,1fr) minmax(300px,360px);gap:20px;align-items:start;margin-top:23px}.ws-fixtures-panel{min-width:0}.ws-fixtures-panel .grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:14px!important}.ws-fixtures-panel .match{position:relative;overflow:hidden;padding:22px!important;min-height:185px;border:1px solid #34536a66!important;background:linear-gradient(145deg,#122e45,#08182b)!important}.ws-fixtures-panel .match:before{content:'';position:absolute;top:0;left:0;width:4px;height:100%;background:linear-gradient(#48efd0,#3486bd)}.ws-fixtures-panel .match .meta{color:#7fb4ce!important;font-weight:700;letter-spacing:.02em;line-height:1.6}.ws-fixtures-panel .teams{font-size:20px!important;margin:14px 0 20px!important;line-height:1.3}.ws-fixtures-panel .match button{font-size:12px;padding:11px 15px}.ws-fixtures-panel .match:has(.analysis:not([hidden])){grid-column:1/-1}.ws-fixtures-panel .match .analysis{overflow-wrap:anywhere}
-.ws-lab{position:sticky;top:22px;min-width:0}.ws-lab .coupon-panel{margin:0!important;padding:24px!important;border:1px solid rgba(79,225,201,.24)!important;background:radial-gradient(circle at 95% 0%,#1c726b33,transparent 43%),linear-gradient(145deg,#112e40,#081628)!important}.ws-lab .coupon-head{display:block}.ws-lab .coupon-head h2{font-size:22px!important}.ws-lab .coupon-help{line-height:1.65;margin:11px 0}.ws-lab #makeCoupons{width:100%;margin-top:16px;min-height:49px!important}.ws-lab .bankroll{grid-template-columns:repeat(2,minmax(0,1fr))!important}.ws-lab .bankroll div{padding:13px!important}.ws-lab .bankroll b{font-size:19px!important}.ws-lab .bankroll div:last-child{grid-column:1/-1}.ws-lab .coupons{grid-template-columns:1fr!important}.ws-lab .learning-stats{max-height:160px;overflow:auto}.ws-lab .coupon{padding:14px!important}.ws-lab #couponState{font-size:11px}
-.ws-fixture-status{padding:10px 0 12px!important;font-size:13px!important;color:#accbdc!important}
-@media(max-width:1250px){.ws-workspace{grid-template-columns:1fr}.ws-lab{position:static;grid-row:1}.ws-lab .bankroll{grid-template-columns:repeat(5,minmax(0,1fr))!important}.ws-lab .bankroll div:last-child{grid-column:auto}.ws-lab .coupons{grid-template-columns:repeat(2,minmax(0,1fr))!important}}
-@media(max-width:950px){.ws-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.ws-hero{grid-template-columns:1fr}.ws-hero-art{display:none}.ws-lab .bankroll{grid-template-columns:repeat(2,minmax(0,1fr))!important}.ws-lab .bankroll div:last-child{grid-column:1/-1}}
-@media(max-width:760px){.wrap{width:calc(100% - 22px)!important}.ws-hero{padding:26px 22px!important;min-height:0}.ws-hero h1{font-size:31px!important}.ws-fixtures-panel .grid{grid-template-columns:1fr!important}.ws-lab .coupons{grid-template-columns:1fr!important}.ws-metric{padding:15px}.ws-metric strong{font-size:24px}.ws-filter-panel{padding:16px}.ws-filter-panel .toolbar{align-items:stretch!important}.ws-search{width:100%;flex:auto}.ws-section-head h2{font-size:20px}}
-
-/* GOL MERKEZI PRO / dashboard 5.0 — rebuilt structure, not a recolor */
-:root{--gm-bg:#090e24;--gm-panel:#131a39;--gm-line:#28335e;--gm-lime:#a5ff38;--gm-txt:#f3f5ff;--gm-muted:#8f9abc}
-body{background:radial-gradient(ellipse 65% 70% at 65% 0%,#182a55 0%,transparent 70%),linear-gradient(120deg,#090d22,#0b1230 68%,#080d20)!important;color:var(--gm-txt)!important;font-family:Inter,system-ui,-apple-system,'Segoe UI',sans-serif!important}
-.pro-sidebar{width:222px!important;background:#090d22!important;border-right:1px solid #222c51!important;box-shadow:none!important}
-.pro-sidebar>a.active:not(.pro-identity){background:#1a2350!important;color:var(--gm-lime)!important;box-shadow:inset 3px 0 var(--gm-lime)!important;border-color:#29365d!important}
-body{padding-left:222px!important}.wrap{max-width:1900px!important;width:calc(100% - 52px)!important;padding-top:23px!important}
-.gm-topbar{display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:22px;padding:5px 0 3px}.gm-eyebrow{font-size:10px;letter-spacing:.18em;color:#a1ff4d;font-weight:900}.gm-eyebrow b{color:#7c89b5}.gm-topbar h1{font-size:clamp(25px,2.5vw,35px);margin:7px 0 5px;letter-spacing:-.04em}.gm-topbar p{color:var(--gm-muted);font-size:12px}.gm-live-dot{display:inline-block;width:8px;height:8px;background:var(--gm-lime);border-radius:50%;box-shadow:0 0 12px #a5ff38}.gm-top-actions{display:flex;align-items:center;gap:12px}.gm-top-actions span{font-size:10px;letter-spacing:.14em;color:#8795b9}.gm-top-actions a{background:#a5ff38;color:#08131e;padding:12px 16px;border-radius:9px;text-decoration:none;font-size:12px;font-weight:900}
-.gm-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:13px;margin-bottom:17px}.gm-kpi{min-height:139px;background:linear-gradient(130deg,#1b2652,#121a3c)!important;border:1px solid #303b70;border-radius:16px;position:relative;overflow:hidden;padding:18px 19px}.gm-kpi-label{font-size:10px;color:#a9b6d6;font-weight:800;letter-spacing:.075em}.gm-kpi-label span{float:right;color:var(--gm-lime)}.gm-kpi strong{font-size:clamp(25px,2.4vw,36px);display:block;margin:14px 0 4px;letter-spacing:-.05em}.gm-kpi-footer{font-size:10px;color:#8291b5}.gm-kpi svg{position:absolute;bottom:13px;right:12px;width:38%;height:35px;opacity:.9;filter:drop-shadow(0 0 4px #8cff3d35)}
-.gm-dashboard-grid{display:grid;grid-template-columns:minmax(0,1fr) 335px;gap:16px;align-items:start}.gm-main-col,.gm-right-col{display:flex;flex-direction:column;gap:16px;min-width:0}.gm-card{background:linear-gradient(145deg,#151d41,#101735)!important;border:1px solid #29345d!important;border-radius:17px;padding:20px!important;box-shadow:0 15px 36px #0002!important}.gm-section-title{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:16px}.gm-section-title h2{font-size:18px;margin:5px 0 0;letter-spacing:-.03em}.gm-status,.gm-chip{font-size:9px;letter-spacing:.05em;color:#9dadce;border:1px solid #35426d;background:#111934;border-radius:6px;padding:7px 9px;font-weight:800;white-space:nowrap}.gm-status i{display:inline-block;width:6px;height:6px;border-radius:50%;background:#a5ff38;margin-right:5px}.gm-filters{display:flex;gap:10px;flex-wrap:wrap;align-items:end}.gm-filters label{font-size:10px;color:#a7b3d4;font-weight:700;display:flex;flex-direction:column;gap:7px}.gm-filters input,.gm-filters select{height:40px!important;background:#0c1430!important;border:1px solid #35416c!important;color:#eaf0ff!important;border-radius:8px;padding:0 10px;max-width:230px}.gm-filters button,.gm-create{background:var(--gm-lime)!important;color:#101629!important;border:0!important;border-radius:9px!important;font-size:12px!important;min-height:40px!important;padding:10px 15px!important;font-weight:900!important;box-shadow:none!important}.gm-search-label{flex:1}.gm-search-label input{width:100%;max-width:none}.gm-match-panel .grid{display:grid!important;grid-template-columns:1fr!important;gap:0!important}.gm-match-panel .match{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px 15px;align-items:center;min-height:0!important;padding:15px 5px!important;background:transparent!important;border:0!important;border-radius:0!important;border-bottom:1px solid #2a365c!important;box-shadow:none!important;transform:none!important}.gm-match-panel .match:before{display:none!important}.gm-match-panel .match .meta{grid-column:1/-1;color:#8292b8!important;font-size:10px!important}.gm-match-panel .teams{font-size:15px!important;margin:0!important;font-weight:800;letter-spacing:-.02em}.gm-match-panel .match button{padding:9px 12px!important;font-size:11px!important;border-radius:7px!important;min-width:105px}.gm-match-panel .match .analysis{grid-column:1/-1;max-width:100%;margin-top:9px}.gm-match-panel .match:has(.analysis:not([hidden])){background:#101934!important;padding:15px!important;border-radius:12px!important}.gm-match-panel .match:hover{background:#1b264a!important}.gm-match-panel .ws-fixture-status{color:#899abc!important;font-size:11px!important}.gm-league-bars{display:flex;flex-direction:column;gap:13px}.gm-bar-line{display:flex;justify-content:space-between;font-size:11px;color:#bdc7e1;margin-bottom:6px}.gm-bar-line strong{color:#dbe4ff}.gm-bar-track{height:7px;background:#0b1230;border-radius:20px;overflow:hidden}.gm-bar-fill{height:100%;background:linear-gradient(90deg,#3a7ff0,#a5ff38);border-radius:20px}.gm-empty{font-size:12px;color:#8291b5;padding:18px 0}.gm-coupon-explain{font-size:11px;line-height:1.6;color:#96a4c6}.gm-create{width:100%;margin:14px 0}.gm-coupon-card .bankroll{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:9px!important}.gm-coupon-card .bankroll div{padding:12px!important;background:#0b1430!important;border:1px solid #29365f!important}.gm-coupon-card .bankroll b{font-size:17px!important}.gm-coupon-card .bankroll div:last-child{grid-column:1/-1}.gm-coupon-card .coupons{grid-template-columns:1fr!important}.gm-coupon-card .coupon{padding:13px!important}.gm-coupon-card .learning-stats{max-height:115px;overflow:auto}.gm-coupon-card #couponState{font-size:10px;line-height:1.5}.gm-coupon-card .coupon-leg{font-size:11px}.gm-coupon-card .coupon-total{font-size:11px}
-@media(max-width:1280px){.gm-dashboard-grid{grid-template-columns:minmax(0,1fr) 290px}.gm-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(max-width:980px){.gm-dashboard-grid{grid-template-columns:1fr}.gm-right-col{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(max-width:760px){body{padding-left:0!important}.pro-sidebar{width:100%!important}.wrap{width:calc(100% - 22px)!important}.gm-topbar{flex-direction:column;align-items:flex-start}.gm-top-actions{width:100%;justify-content:space-between}.gm-right-col{grid-template-columns:1fr}.gm-kpis{gap:8px}.gm-kpi{padding:13px;min-height:120px}.gm-kpi strong{font-size:25px}.gm-card{padding:14px!important}.gm-match-panel .teams{font-size:13px!important}.gm-filters label{flex:1;min-width:125px}.gm-filters input,.gm-filters select{max-width:none;width:100%}}
-
-/* Reference-inspired integrated dashboard */
-.gm-nav .pro-section-label{margin-top:20px!important;margin-bottom:8px!important;color:#7e8fb5!important;font-size:10px!important;letter-spacing:.16em!important}.gm-nav>a:not(.pro-identity){padding:11px 10px!important;margin-bottom:3px!important;font-size:12px!important}.gm-nav>a.active:not(.pro-identity){color:#a5ff38!important}.gm-nav .pro-sidebar-bottom{margin-top:auto!important}
-.gm-table-head{display:grid;grid-template-columns:105px minmax(200px,1fr) 120px 60px 110px;gap:12px;align-items:center;padding:12px;background:#1b2853;border-radius:8px;color:#91a5d0;font-size:10px;font-weight:900}.gm-match-panel .match{display:grid!important;grid-template-columns:105px minmax(200px,1fr) 120px 60px 110px!important;gap:12px!important;align-items:center!important;padding:14px 12px!important;min-height:68px!important}.gm-match-time{display:flex;flex-direction:column;gap:5px;color:#e8eeff;font-size:12px}.gm-match-time small{font-size:10px;color:#8497c0;overflow:hidden;text-overflow:ellipsis;max-width:100px;white-space:nowrap}.gm-teams{display:flex;gap:9px;align-items:center;min-width:0;flex-wrap:wrap}.gm-team{display:flex;gap:7px;align-items:center;min-width:0}.gm-team b{font-size:12px;color:#f0f4ff;font-weight:750}.gm-vs{font-size:10px;color:#7c89b1}.gm-team-logo{height:27px;width:27px;object-fit:contain;flex-shrink:0;filter:drop-shadow(0 2px 2px #0005)}.gm-team-placeholder{display:inline-flex;align-items:center;justify-content:center;height:27px;width:27px;border-radius:50%;background:#243660;font-size:13px}.gm-market{font-size:11px;font-weight:800;color:#5ce7c5;background:#083a3a;border-radius:6px;padding:8px;text-align:center}.gm-price{font-weight:900;font-size:13px;color:#fff;text-align:center}.gm-match-panel .match button.analyze-btn{background:#243d7a!important;color:#e8f2ff!important;border:1px solid #3d5e9e!important;min-width:0!important;font-size:11px!important}.gm-match-panel .match .analysis{grid-column:1/-1!important;border:1px solid #2c3d6e;border-radius:11px;padding:12px;background:#0b1533}.gm-coupon-card .learning-stats{display:none!important}.gm-kpi:nth-child(3) strong{color:#a5ff38}
-@media(max-width:1450px){.gm-table-head,.gm-match-panel .match{grid-template-columns:90px minmax(170px,1fr) 100px 45px 85px!important;gap:8px!important}.gm-team b{font-size:11px}}@media(max-width:1200px){.gm-table-head{display:none}.gm-match-panel .match{grid-template-columns:85px minmax(170px,1fr) 90px!important}.gm-match-panel .gm-market,.gm-match-panel .gm-price{display:none}}@media(max-width:760px){.gm-nav .pro-section-label,.gm-nav .pro-sidebar-bottom{display:none!important}.gm-match-panel .match{grid-template-columns:1fr auto!important}.gm-match-time{grid-column:1/-1}.gm-teams{grid-column:1}.gm-match-panel .match button.analyze-btn{grid-column:2}}
-</style></head><body>
-<aside class="pro-sidebar gm-nav" aria-label="Ana navigasyon"><a class="pro-identity" href="/"><span class="pro-logo">⚽</span><span>GOL MERKEZİ<strong>PRO ANALYTICS</strong></span></a><div class="pro-section-label">KONTROL MERKEZİ</div><a href="/">◉ <span>Canlı Gol Merkezi</span></a><a href="/tahmin" class="active">▦ <span>Maç Analizi &amp; Kupon</span></a><a href="/radar">◈ <span>Piyasa Radarı</span></a><div class="pro-section-label">İSTATİSTİKLER</div><a href="#gm-performance">▥ <span>Performans</span></a><a href="#gm-coupon">▤ <span>Kupon Geçmişi</span></a><a href="#gm-coupon">◫ <span>Sanal Bakiye</span></a><div class="pro-section-label">ARAÇLAR</div><a href="#gm-fixtures">☆ <span>Fikstür</span></a><a href="#gm-leagues">▤ <span>Lig Dağılımı</span></a><a href="/radar">⚙ <span>Piyasa Araçları</span></a><div class="pro-sidebar-bottom"><span class="pro-pulse"></span> ANALİZ PLATFORMU<small>Gol Merkezi • Pro Workspace</small></div></aside><div class="wrap">
-<div class="gm-topbar"><div><span class="gm-eyebrow">GOL MERKEZİ <b> / ANALYTICS DASHBOARD</b></span><h1>Analiz Kontrol Merkezi <span class="gm-live-dot"></span></h1><p>Fikstür, futbol analizi ve sanal kupon performansı · Gerçek veriler, şeffaf sonuçlar</p></div><div class="gm-top-actions"><span id="gmToday">PRO ANALYTICS</span><a href="/radar">◈ Piyasa Radarı ↗</a></div></div>
-<div class="gm-kpis" id="gm-performance"><div class="gm-kpi"><div class="gm-kpi-label">GÜNLÜK KARŞILAŞMA <span>↗</span></div><strong id="wsMatchCount">—</strong><div class="gm-kpi-footer">Seçili tarihteki maç sayısı</div></div><div class="gm-kpi"><div class="gm-kpi-label">ANALİZ EDİLEN <span>↗</span></div><strong id="wsAnalyzedCount">0</strong><div class="gm-kpi-footer">Bu oturumda incelenen maçlar</div></div><div class="gm-kpi"><div class="gm-kpi-label">SANAL NET KÂR / ZARAR <span>↗</span></div><strong id="gmNet">—</strong><div class="gm-kpi-footer" id="gmRoi">Sonuçlanmış kuponlar üzerinden</div></div><div class="gm-kpi"><div class="gm-kpi-label">KAPSANAN ÜLKELER <span>↗</span></div><strong id="wsCountryCount">—</strong><div class="gm-kpi-footer">Günlük fikstür dağılımı</div></div></div>
-<div class="gm-dashboard-grid"><section class="gm-main-col"><div class="gm-card gm-controls"><div class="gm-section-title"><div><span class="gm-eyebrow">MATCH CENTER</span><h2>Günlük Fikstür</h2></div><span class="gm-status"><i></i> VERİ KAYNAĞI: API</span></div><div class="gm-filters"><label>Maç günü <input id="day" type="date" min="{{today}}" max="{{last_day}}" value="{{initial_day}}"></label><button id="load">↻ Fikstürü getir</button><label>Ülke <select id="league" disabled><option value="ALL">Tüm ülkeler</option></select></label><label class="gm-search-label">Ara <input id="wsSearch" type="search" placeholder="Takım veya lig adı…"></label></div></div><div class="gm-card gm-match-panel" id="gm-fixtures"><div class="gm-section-title"><div><span class="gm-eyebrow">FIXTURE EXPLORER</span><h2>Karşılaşmalar</h2></div><span class="gm-chip" id="gmFixtureCount">Fikstür yükleniyor</span></div><p id="state" class="ws-fixture-status">Fikstür yükleniyor…</p><div class="gm-table-head"><span>SAAT / LİG</span><span>KARŞILAŞMA</span><span>BOT TERCİHİ</span><span>ORAN</span><span>ANALİZ</span></div><div class="grid" id="fixtures"></div></div></section><aside class="gm-right-col"><section class="gm-card gm-league-card" id="gm-leagues"><div class="gm-section-title"><div><span class="gm-eyebrow">MATCH DISTRIBUTION</span><h2>Lig Dağılımı</h2></div><span class="gm-chip">GÜNLÜK</span></div><div id="gmLeagueBars" class="gm-league-bars"><div class="gm-empty">Fikstür yüklendiğinde gösterilecek.</div></div></section><section class="gm-card gm-coupon-card" id="gm-coupon"><div class="gm-section-title"><div><span class="gm-eyebrow">VIRTUAL PORTFOLIO</span><h2>Kupon Laboratuvarı</h2></div><span class="gm-chip">3+ MAÇ</span></div><p class="gm-coupon-explain">Sanal kuponlar ve sonuçlanmış performans. Oranlar doğrulanmadan kupona alınmaz.</p><button id="makeCoupons" type="button" class="gm-create">+ Kupon adaylarını oluştur</button><div id="bankroll" class="bankroll"></div><div id="learningStats" class="learning-stats"></div><div id="couponState" class="coupon-help">Henüz kupon oluşturulmadı.</div><div id="coupons" class="coupons"></div></section></aside></div>
-<script>
+</style></head><body><div class="wrap">
+<header><div><h1>📅 Maç Önü Tahminleri <span class="version">v4.10</span></h1><p>Maç seç; son maçların formunu ve gol eğilimlerini incele.</p></div>
+<a href="/">← Canlı Gol Merkezi</a></header>
+<div class="toolbar">
+  <label for="day">Maç günü</label>
+  <input id="day" type="date" min="{{today}}" max="{{last_day}}" value="{{initial_day}}">
+  <button id="load">Fikstürü getir</button>
+  <label for="league">Ülke</label>
+  <select id="league" disabled><option value="ALL">Tüm ülkeler</option></select>
+</div>
+<div class="hint">Bir ülke seçildiğinde o ülkenin uygun tüm alt ligleri birlikte gösterilir • Saatler Türkiye saatidir • Analiz, açtığın maç için yapılır.</div>
+<section class="coupon-panel">
+  <div class="coupon-head"><div><h2>🎟️ Botun Sanal Bahis Defteri</h2><div class="coupon-help">Bot yalnızca 3 farklı maçtan oluşan, yüksek birlikte tutma ihtimalli kombineleri oynar. Her kupon 1.000 TL; kupon sayısı sabit değildir. Aynı maç günün aktif kuponlarında yalnız bir kez kullanılır.</div></div>
+  <button id="makeCoupons" type="button">Botun oynayacağı kuponları oluştur</button></div>
+  <div id="bankroll" class="bankroll"></div><div id="couponState" class="coupon-help">Henüz kupon oluşturulmadı.</div><div id="coupons" class="coupons"></div>
+</section>
+<p id="state">Fikstür yükleniyor…</p>
+<div class="grid" id="fixtures"></div>
+</div><script>
 const esc=v=>String(v??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;");
 const day=document.getElementById("day"),state=document.getElementById("state"),root=document.getElementById("fixtures"),leagueSelect=document.getElementById("league");
 let loadedMatches=[],loadedDate="",analyzedMatches=new Map();
@@ -4564,166 +4146,96 @@ async function getJson(url){
   return body;
 }
 const couponStoreKey="golPrematchCouponsV2";
-const pickHistoryKey="golPrematchPickHistoryV4";
 const couponStake=1000;
-const couponStrategyVersion="v9.1-market-diversity";
 function couponStore(){try{return JSON.parse(localStorage.getItem(couponStoreKey)||"{}")||{}}catch{return {}}}
 function saveCouponStore(store){localStorage.setItem(couponStoreKey,JSON.stringify(store))}
-function pickHistory(){try{return JSON.parse(localStorage.getItem(pickHistoryKey)||"[]")||[]}catch{return []}}
-function savePickHistory(items){localStorage.setItem(pickHistoryKey,JSON.stringify(items.slice(-2500)))}
-function marketHistoryStats(market){
-  const all=pickHistory().filter(x=>x.market===market&&x.status!=="VOID"),settled=all.filter(x=>x.status==="WON"||x.status==="LOST");
-  const won=settled.filter(x=>x.status==="WON").length,n=settled.length;
-  // Beta(4,4) smoothing: küçük örneklemde tek bir kötü/iyi sonuç sistemi uçurmasın.
-  const rate=n?(won+4)/(n+8):0.667;
-  return {n,won,rate};
-}
-function registerPickHistory(match,analysis){
-  const history=pickHistory(),existing=new Set(history.map(x=>`${x.fixture}:${x.market}`));
-  for(const pick of analysis.suggestions||[]){
-    const key=`${Number(match.id)}:${pick.market}`;
-    if(existing.has(key))continue;
-    history.push({fixture:Number(match.id),fixtureDate:match.kickoff,home:match.home,away:match.away,
-      country:match.country,league:match.league,market:pick.market,label:pick.label,
-      modelProbability:Number(pick.model_probability||0),impliedProbability:Number(pick.implied_probability||0),
-      odd:Number(pick.quote?.odd||0),valueEdge:Number(pick.value_edge_pct||0),status:"OPEN",created:new Date().toISOString()});
-  }
-  savePickHistory(history);
-}
-async function settlePickHistory(){
-  const history=pickHistory(),open=history.filter(x=>x.status==="OPEN"&&x.fixture);
-  const now=Date.now(),eligible=open.filter(x=>{
-    const t=Date.parse(x.fixtureDate||"");return Number.isFinite(t)&&t<now-60*60*1000;
-  }).slice(-80);
-  const fixtures=[...new Set(eligible.map(x=>Number(x.fixture)))];
-  if(!fixtures.length)return;
-  const results=new Map();
-  await Promise.all(fixtures.map(async id=>{try{const r=await getJson(`/api/prematch/result?fixture=${encodeURIComponent(id)}`);if(r.finished&&r.home_goals!==null&&r.away_goals!==null)results.set(id,{h:Number(r.home_goals),a:Number(r.away_goals),hh:r.ht_home_goals==null?null:Number(r.ht_home_goals),ha:r.ht_away_goals==null?null:Number(r.ht_away_goals)});}catch{}}));
-  if(!results.size)return;
-  let changed=false;
-  for(const item of history){
-    const r=results.get(Number(item.fixture));if(!r||item.status!=="OPEN")continue;
-    item.status=legResult(item.market,r.h,r.a,r.hh,r.ha)?"WON":"LOST";item.score=`${r.h}-${r.a}`;item.settledAt=new Date().toISOString();changed=true;
-  }
-  if(changed)savePickHistory(history);
-}
-function historyQuality(pick){
-  const h=marketHistoryStats(pick.market),p=Number(pick.model_probability||0);
-  const reliability=Math.min(0.55,h.n/30);
-  const adjusted=p*(1-reliability)+h.rate*reliability;
-  return {n:h.n,won:h.won,rate:h.rate,adjusted};
-}
+const modelProbability=confidence=>Math.max(.50,Math.min(.90,Number(confidence||0)/100-.04));
 function candidatePool(){
-  const pool=[],stats={matches:analyzedMatches.size,suggestions:0,priced:0,lowProbability:0,lowOdd:0,lowValue:0,weakHistory:0,eligible:0};
+  const pool=[],stats={suggestions:0,lowConfidence:0,lowOdd:0};
   for(const [fixture,item] of analyzedMatches){
-    const picks=item.analysis.all_suggestions||item.analysis.suggestions||[];
-    const quality=item.analysis.data_quality||"";
-    const options=[];
-    for(const pick of picks){
+    for(const pick of item.analysis.suggestions||[]){
       stats.suggestions++;
-      const odd=Number(pick.quote?.odd||0),p=Number(pick.model_probability||0);
-      if(!Number.isFinite(p)||p<=0||p>=1)continue;
-      if(!Number.isFinite(odd)||odd<1.30){stats.lowOdd++;continue;}
-      stats.priced++;
-      // Kupon seçiminde geçmiş bahis sonuçları ve geçmiş market başarı oranları kullanılmaz.
-      // Yetersiz veriyle yüksek güven iddiası oluşturma.
-      if(quality!=="good"||p<0.60){stats.lowProbability++;continue;}
-      const ev=p*odd-1,edge=(p-1/odd)*100;
-      if(ev<0){stats.lowValue++;continue;}
-      const candidate={fixture:Number(fixture),home:item.match.home,away:item.match.away,
-        kickoff:item.match.kickoff,country:item.match.country,league:item.match.league,
-        market:pick.market,label:pick.label,confidence:quality,
-        modelProbability:p,baseModelProbability:p,impliedProbability:1/odd,
-        valueEdge:edge,historicalRate:null,historicalN:0,
-        odd,bookmaker:pick.quote.bookmaker||"",status:"OPEN"};
-      options.push(candidate);
+      const confidence=Number(pick.confidence||0),odd=Number(pick.quote?.odd||0);
+      if(confidence<80){stats.lowConfidence++;continue;}
+      if(odd<1.30){stats.lowOdd++;continue;}
+      pool.push({fixture:Number(fixture),home:item.match.home,away:item.match.away,kickoff:item.match.kickoff,
+        market:pick.market,label:pick.label,confidence,odd,bookmaker:pick.quote.bookmaker,status:"OPEN"});
     }
-    // Bir maçın uygun alternatiflerini sakla; yalnızca en yüksek olasılıklı markete kilitlenme.
-    options.sort((a,b)=>b.modelProbability-a.modelProbability||b.valueEdge-a.valueEdge);
-    if(options.length)pool.push({...options[0],options:options.slice(0,8)});
   }
-  pool.sort((a,b)=>b.modelProbability-a.modelProbability||b.valueEdge-a.valueEdge);
-  stats.eligible=pool.length;pool.stats=stats;return pool;
-}
-function couponRisk(probability){
-  const p=Number(probability||0);
-  if(p>=0.50)return {key:"safe",label:"🟢 GÖRECELİ DÜŞÜK RİSK",risk:"DÜŞÜK"};
-  if(p>=0.35)return {key:"balanced",label:"🟡 ORTA RİSK",risk:"ORTA"};
-  if(p>=0.30)return {key:"value",label:"🔴 YÜKSEK RİSK",risk:"YÜKSEK"};
-  return {key:"none",label:"❌ NO BET",risk:"ÇOK YÜKSEK"};
+  pool.sort((a,b)=>b.confidence-a.confidence||a.odd-b.odd);pool.stats=stats;return pool;
 }
 function buildCoupons(){
   const store=couponStore(),existing=store[loadedDate]||[],pool=candidatePool();
-  const activeExisting=existing.filter(c=>c.status!=="VOID");
-  // Aynı gün daha önce seçilmiş maçları yeni kuponlarda tekrar kullanma.
-  const usedToday=new Set(activeExisting.flatMap(c=>(c.legs||[]).map(l=>Number(l.fixture))));
-  const available=pool.filter(p=>!usedToday.has(Number(p.fixture)));
-  const combos=[];
-  // Her maç için alternatif marketleri karşılaştır; aynı kuponda 3,5 ALT en fazla bir kez.
-  // Farklı market bulunmuyorsa daha riskli bir tercih uydurmak yerine kuponu atla.
-  const under35=x=>String(x.market||"").toUpperCase()==="UNDER_3_5";
-  for(let i=0;i<available.length;i++)for(let j=i+1;j<available.length;j++)for(let k=j+1;k<available.length;k++){
-    const fixtures=[available[i],available[j],available[k]];
-    if(new Set(fixtures.map(x=>x.fixture)).size!==3)continue;
-    let bestCombo=null;
-    for(const a of fixtures[0].options)for(const b of fixtures[1].options)for(const c of fixtures[2].options){
-      const legs=[a,b,c];
-      if(legs.filter(under35).length>1)continue;
-      // Üç farklı market ailesini ödüllendir; aynı marketin üç kez tekrarını engelle.
-      const families=new Set(legs.map(x=>String(x.market||"")));
-      if(families.size<2)continue;
-      const total=legs.reduce((v,x)=>v*x.odd,1);
-      const probability=legs.reduce((v,x)=>v*x.modelProbability,1)*0.90;
-      if(total>12||probability<0.30)continue;
-      const diversityBonus=(families.size-1)*0.015;
-      const score=probability+diversityBonus;
-      if(!bestCombo||score>bestCombo.score){
-        const risk=couponRisk(probability);
-        const signature=legs.map(x=>`${x.fixture}:${x.market}`).sort().join("|");
-        const expectedReturn=couponStake*total*probability;
-        bestCombo={legs,total,probability,expectedReturn,expectedProfit:expectedReturn-couponStake,
-          expectedRoi:(expectedReturn-couponStake)/couponStake,signature,
-          score,riskKey:risk.key,riskLabel:risk.label,riskLevel:risk.risk};
-      }
+  // v4.3'ün aşırı maç tekrarına sahip henüz oynanmamış kuponlarını silmeden
+  // iptal et; başarı ve para hesabını yeni stratejiyle temiz başlat.
+  for(const coupon of existing){
+    if((coupon.status||"OPEN")==="OPEN"&&(coupon.legs||[]).length<3){
+      coupon.status="VOID";coupon.voidReason="Yeni kupon kuralı: en az 3 maç";
+      for(const leg of coupon.legs||[])if((leg.status||"OPEN")==="OPEN")leg.status="VOID";
+      continue;
     }
-    if(bestCombo)combos.push(bestCombo);
+    if((coupon.status||"OPEN")==="OPEN"&&!['v4.4','v4.5','v4.6','v4.7'].includes(coupon.strategyVersion)){
+      coupon.status="VOID";coupon.voidReason="Yeni risk dağılımı: aynı maç tek kupon";
+      for(const leg of coupon.legs||[])if((leg.status||"OPEN")==="OPEN")leg.status="VOID";
+    }
   }
-  combos.sort((a,b)=>b.probability-a.probability||a.total-b.total);
-  const chosen=[],newUse=new Set();
-  // Kupon sayısı sabit değil; maç tekrarına izin vermeyen kaliteli kombinasyonlar alınır.
+  const activeExisting=existing.filter(c=>c.status!=="VOID");
+  const existingSignatures=new Set(activeExisting.map(c=>c.signature||c.legs.map(x=>`${x.fixture}:${x.market}`).sort().join("|")));
+  const usedFixtures=new Set(activeExisting.flatMap(c=>(c.legs||[]).map(x=>Number(x.fixture))));
+  const combos=[],rejected={sameMatch:0,usedMatch:0,duplicate:0,totalOdd:0,probability:0,roi:0};
+  function consider(legs){
+    if(new Set(legs.map(x=>x.fixture)).size!==legs.length){rejected.sameMatch++;return;}
+    if(legs.some(x=>usedFixtures.has(Number(x.fixture)))){rejected.usedMatch++;return;}
+    const signature=legs.map(x=>`${x.fixture}:${x.market}`).sort().join("|");
+    if(existingSignatures.has(signature)){rejected.duplicate++;return;}
+    const min=Math.min(...legs.map(x=>x.confidence)),avg=legs.reduce((s,x)=>s+x.confidence,0)/legs.length;
+    const total=legs.reduce((s,x)=>s*x.odd,1);
+    const probability=legs.reduce((p,x)=>p*modelProbability(x.confidence),1);
+    const expectedReturn=couponStake*total*probability;
+    const expectedProfit=expectedReturn-couponStake;
+    const expectedRoi=expectedProfit/couponStake;
+    const minProbability=.42;
+    if(total<1.60||total>5.00){rejected.totalOdd++;return;}
+    if(probability<minProbability){rejected.probability++;return;}
+    if(expectedRoi<.10){rejected.roi++;return;}
+    combos.push({legs,min,avg,total,probability,expectedReturn,expectedProfit,expectedRoi,
+      signature,score:expectedRoi*10000+probability*1000+min});
+  }
+  for(let i=0;i<pool.length;i++)for(let j=i+1;j<pool.length;j++)for(let k=j+1;k<pool.length;k++)consider([pool[i],pool[j],pool[k]]);
+  combos.sort((a,b)=>b.score-a.score);
+  const chosen=[],newUsedFixtures=new Set();
+  // Sabit kupon adedi yok: analiz edilen güçlü seçim havuzu büyüdükçe botun
+  // bu turda alacağı kupon sayısı 1-8 arasında kademeli artar.
+  const batchLimit=Math.min(8,Math.max(1,Math.ceil(Math.sqrt(pool.length))));
   for(const combo of combos){
-    if(combo.legs.some(l=>newUse.has(Number(l.fixture))))continue;
-    chosen.push({...combo,stake:couponStake,status:"OPEN",strategyVersion:couponStrategyVersion,created:new Date().toISOString()});
-    combo.legs.forEach(l=>newUse.add(Number(l.fixture)));
+    const fixtures=combo.legs.map(x=>Number(x.fixture));
+    if(fixtures.some(id=>newUsedFixtures.has(id)))continue;
+    chosen.push({...combo,stake:couponStake,status:"OPEN",strategyVersion:"v4.7",created:new Date().toISOString()});
+    fixtures.forEach(id=>newUsedFixtures.add(id));
+    if(chosen.length>=batchLimit)break;
   }
   if(!chosen.length){
-    saveCouponStore(store);renderCoupons(existing);
+    saveCouponStore(store);
+    renderCoupons(existing);
     const s=pool.stats||{};
-    document.getElementById("couponState").textContent=`v9.1: ${s.matches||0} maç, ${s.suggestions||0} market incelendi. ${s.eligible||0} maç veri kalitesi, %60+ model olasılığı ve doğrulanmış 1.30+ oran şartlarını geçti. Tekrarsız 3 maçlı, farklı market içeren ve en az %30 temkinli model olasılığına sahip kombinasyon bulunamadı; zorla kupon üretilmedi.`;
+    document.getElementById("couponState").textContent=`Yeni 3 maçlı kupon bulunamadı: ${s.suggestions||0} tercih incelendi; ${s.lowConfidence||0} tercih 80 güvenin altında, ${s.lowOdd||0} tercih 1,30 oranın altında kaldı. Kupon havuzuna ${pool.length} tercih girdi. Kombinelerde ${rejected.probability} olasılık, ${rejected.roi} beklenen değer, ${rejected.totalOdd} toplam oran ve ${rejected.usedMatch} daha önce kullanılmış maç nedeniyle elendi.`;
     return;
   }
-  store[loadedDate]=[...existing,...chosen];saveCouponStore(store);renderCoupons(store[loadedDate]);
-  const safe=chosen.filter(c=>c.riskKey==="safe").length,balanced=chosen.filter(c=>c.riskKey==="balanced").length,value=chosen.filter(c=>c.riskKey==="value").length;
-  document.getElementById("couponState").textContent=`v9.1: ${chosen.length} sanal kupon oluşturuldu • 🟢 ${safe} göreceli düşük risk • 🟡 ${balanced} orta risk • 🔴 ${value} yüksek risk • toplam ${(chosen.length*couponStake).toLocaleString("tr-TR")} TL sanal bahis • her kupon 3 farklı maç. Olasılıklar kalibre edilmemiş model tahminidir.`;
+  store[loadedDate]=[...existing,...chosen];saveCouponStore(store);
+  renderCoupons(store[loadedDate]);
+  document.getElementById("couponState").textContent=`Bot bu turda ${chosen.length} yeni kupona toplam ${(chosen.length*couponStake).toLocaleString("tr-TR")} TL sanal bahis aldı.`;
 }
-
-function legResult(market,h,a,hh=null,ha=null){
+function legResult(market,h,a){
   const total=h+a;
-  const htTotal=(hh===null||ha===null)?null:hh+ha;
   if(market==="HOME")return h>a;if(market==="AWAY")return a>h;
   if(market==="DC_1X")return h>=a;if(market==="DC_X2")return a>=h;
   if(market==="HOME_OVER_1_5")return h>=2;if(market==="AWAY_OVER_1_5")return a>=2;
   if(market==="BTTS_YES")return h>0&&a>0;if(market==="BTTS_NO")return h===0||a===0;
   if(market==="OVER_1_5")return total>=2;if(market==="OVER_2_5")return total>=3;
   if(market==="UNDER_2_5")return total<=2;if(market==="OVER_3_5")return total>=4;
-  if(market==="UNDER_3_5")return total<=3;
-  if(market==="HT_OVER_0_5")return htTotal!==null&&htTotal>=1;
-  if(market==="HT_OVER_1_5")return htTotal!==null&&htTotal>=2;
-  if(market==="HT_UNDER_1_5")return htTotal!==null&&htTotal<=1;
-  return false;
+  if(market==="UNDER_3_5")return total<=3;return false;
 }
 async function settleCoupons(){
-  await settlePickHistory();
   const store=couponStore();let changed=false;
   for(const coupons of Object.values(store))for(const coupon of coupons||[]){
     if(coupon.status==="VOID")continue;
@@ -4732,7 +4244,7 @@ async function settleCoupons(){
     try{
       const r=await getJson(`/api/prematch/result?fixture=${encodeURIComponent(leg.fixture)}`);
       if(r.finished&&r.home_goals!==null&&r.away_goals!==null){
-        leg.status=legResult(leg.market,Number(r.home_goals),Number(r.away_goals),r.ht_home_goals==null?null:Number(r.ht_home_goals),r.ht_away_goals==null?null:Number(r.ht_away_goals))?"WON":"LOST";
+        leg.status=legResult(leg.market,Number(r.home_goals),Number(r.away_goals))?"WON":"LOST";
         leg.score=`${r.home_goals}-${r.away_goals}`;changed=true;
       }
     }catch{}
@@ -4751,8 +4263,7 @@ async function settleCoupons(){
 }
 function bankrollStats(store){
   const stored=Object.values(store).flatMap(x=>Array.isArray(x)?x:[]),voided=stored.filter(c=>c.status==="VOID");
-  // Eski kuponları silmeden v4.12 performansını ayrı ölç.
-  const all=stored.filter(c=>c.status!=="VOID"&&c.strategyVersion===couponStrategyVersion);
+  const all=stored.filter(c=>c.status!=="VOID");
   const won=all.filter(c=>c.status==="WON"),lost=all.filter(c=>c.status==="LOST"),open=all.filter(c=>(c.status||"OPEN")==="OPEN");
   const settled=[...won,...lost],stakeOf=c=>Number(c.stake||couponStake);
   const totalStaked=all.reduce((s,c)=>s+stakeOf(c),0);
@@ -4761,33 +4272,14 @@ function bankrollStats(store){
   return {total:all.length,voided:voided.length,won:won.length,lost:lost.length,open:open.length,totalStaked,returned,
     net:returned-settledStaked,success:settled.length?won.length/settled.length*100:0};
 }
-function renderLearningStats(){
-  const markets=[
-    ["OVER_1_5","1,5 ÜST"],["OVER_2_5","2,5 ÜST"],["UNDER_2_5","2,5 ALT"],
-    ["UNDER_3_5","3,5 ALT"],["OVER_3_5","3,5 ÜST"],["BTTS_YES","KG VAR"],
-    ["BTTS_NO","KG YOK"],["HOME_OVER_1_5","Ev 1,5 ÜST"],["AWAY_OVER_1_5","Dep 1,5 ÜST"],
-    ["DC_1X","1X"],["DC_X2","X2"],["HOME","MS1"],["AWAY","MS2"],
-    ["HT_OVER_0_5","İY 0,5 ÜST"],["HT_OVER_1_5","İY 1,5 ÜST"],["HT_UNDER_1_5","İY 1,5 ALT"]
-  ];
-  const active=markets.map(([m,l])=>{const x=marketHistoryStats(m);return {...x,label:l}}).filter(x=>x.n>0).sort((a,b)=>b.n-a.n).slice(0,8);
-  document.getElementById("learningStats").innerHTML=active.length
-    ? `<span><b>🧠 Öğrenme:</b></span>`+active.map(x=>`<span>${x.label}: <b class="${x.rate>=.65?"good":x.rate<.55?"bad":""}">%${(x.rate*100).toFixed(0)}</b> (${x.n})</span>`).join("")
-    : `<span><b>🧠 Öğrenme:</b> Henüz yeterli geçmiş sonuç yok; v5.0 önce veri topluyor.</span>`;
-}
-
 function renderBankroll(store){
   const s=bankrollStats(store),netClass=s.net>=0?"profit":"loss",money=n=>`${Number(n||0).toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`;
-  document.getElementById("gmNet").textContent=(s.net>=0?"+":"")+money(s.net);
-  document.getElementById("gmNet").style.color=s.net>=0?"#a5ff38":"#ff7c88";
-  const settledStakes=s.totalStaked-s.open*couponStake;
-  document.getElementById("gmRoi").textContent=settledStakes>0?`ROI %${(100*s.net/settledStakes).toFixed(1)} · ${s.won+s.lost} sonuçlanan kupon`:"Henüz sonuçlanmış kupon yok";
   document.getElementById("bankroll").innerHTML=
     `<div>Toplam kupon<b>${s.total}</b></div>`+
     `<div>Tutan / Yatan<b><span class="won">${s.won}</span> / <span class="lost">${s.lost}</span></b></div>`+
     `<div>Botun toplam başarısı<b>%${s.success.toFixed(1).replace(".",",")}</b></div>`+
     `<div>Toplam sanal bahis<b>${money(s.totalStaked)}</b></div>`+
     `<div>Gerçekleşen net kâr/zarar<b class="${netClass}">${s.net>=0?"+":""}${money(s.net)}</b></div>`;
-  renderLearningStats();
 }
 function renderCoupons(coupons){
   const root=document.getElementById("coupons"),store=couponStore();root.innerHTML="";
@@ -4795,78 +4287,49 @@ function renderCoupons(coupons){
   renderBankroll(store);
   let won=0,lost=0,legWon=0,legLost=0;
   for(const list of Object.values(store))for(const c of list||[]){
-    if(c.strategyVersion!==couponStrategyVersion)continue;
     if(c.status==="WON")won++;if(c.status==="LOST")lost++;
     for(const l of c.legs||[]){if(l.status==="WON")legWon++;if(l.status==="LOST")legLost++;}
   }
   const settled=won+lost,settledLegs=legWon+legLost;
   document.getElementById("couponState").textContent=coupons.length
-    ? `Bugün ${coupons.length} aktif kupon • v5.0 kupon başarısı: ${settled?Math.round(won/settled*100):0}% (${won}/${settled}) • Seçim başarısı: ${settledLegs?Math.round(legWon/settledLegs*100):0}% (${legWon}/${settledLegs})`
-    : "Bu tarih için v5.0 aktif kupon yok. Eski kuponlar performans hesabından ayrı tutuluyor.";
+    ? `Bu gün için ${coupons.length} kupon • Genel kupon başarısı: ${settled?Math.round(won/settled*100):0}% (${won}/${settled}) • Seçim başarısı: ${settledLegs?Math.round(legWon/settledLegs*100):0}% (${legWon}/${settledLegs})`
+    : "Bu tarih için kayıtlı kupon yok.";
   coupons.forEach((c,i)=>{
     const el=document.createElement("div");el.className="coupon";
     const status=c.status||"OPEN",statusText=status==="WON"?"TUTTU":status==="LOST"?"YATMADI":status==="VOID"?"İPTAL":"BEKLİYOR";
     const stake=Number(c.stake||couponStake),total=Number(c.total||1),potential=stake*total;
     const probability=Number(c.probability||0),expectedProfit=Number(c.expectedProfit||0);
-    const risk=couponRisk(probability);
-    const riskHtml=risk.key!=="none"?`<span class="coupon-risk ${risk.key}">${risk.label} • RİSK: ${risk.risk}</span>`:"";
-    const couponType=c.legs?.length===2?"2 MAÇ":c.legs?.length===3?"3 MAÇ":c.legs?.length===4?"4 MAÇ":`${c.legs?.length||0} MAÇ`;
     el.innerHTML=`<div class="coupon-title">Kupon ${i+1} • <span class="${status.toLowerCase()}">${statusText}</span></div>`+
-      riskHtml+`<div class="coupon-meta"><b>${couponType}</b> • Birlikte tutma ihtimali <b>%${(probability*100).toFixed(1).replace(".",",")}</b> • Risk <b>${risk.risk}</b></div>`+
-      c.legs.map(l=>`<div class="coupon-leg"><b>${esc(l.home)} — ${esc(l.away)}</b><br>${esc(l.label)} • ${Number(l.odd||0).toFixed(2)} ${esc(l.bookmaker||"")}<br>Model olasılığı %${(Number(l.modelProbability||0)*100).toFixed(1).replace(".",",")} • Değer +${Number(l.valueEdge||0).toFixed(1).replace(".",",")}%${l.historicalN?` • Market geçmişi %${(Number(l.historicalRate||0)*100).toFixed(0)} (${l.historicalN} analiz)`:""} • <span class="${String(l.status||"OPEN").toLowerCase()}">${l.status==="WON"?"TUTTU":l.status==="LOST"?"YATTI":l.status==="VOID"?"İPTAL":"AÇIK"}</span></div>`).join("")+
-      `<div class="coupon-total">Toplam oran ${total.toFixed(2)} • ${status==="VOID"?`Bahis iptal • Para ve başarı hesabına dahil değil`: `Bahis ${stake.toLocaleString("tr-TR")} TL • ${status==="OPEN"?`Potansiyel dönüş ${potential.toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`:status==="WON"?`Dönüş ${potential.toLocaleString("tr-TR",{maximumFractionDigits:0})} TL • Net +${(potential-stake).toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`:`Net -${stake.toLocaleString("tr-TR")} TL`}`}<br>${probability?`Kuponun birlikte tutma ihtimali %${(probability*100).toFixed(1).replace(".",",")} • Teorik beklenen değer ${expectedProfit>=0?"+":""}${expectedProfit.toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`:`Eski kupon • olasılık kaydı yok`}</div>`+
-      `<button type="button" class="remove-coupon">Kuponu kaldır</button>`;
+      c.legs.map(l=>`<div class="coupon-leg"><b>${esc(l.home)} — ${esc(l.away)}</b><br>${esc(l.label)} • ${l.odd.toFixed(2)} ${esc(l.bookmaker)}<br>Model güveni ${l.confidence}/100${l.score?` • Skor ${esc(l.score)}`:""} • <span class="${String(l.status||"OPEN").toLowerCase()}">${l.status==="WON"?"TUTTU":l.status==="LOST"?"YATTI":l.status==="VOID"?"İPTAL":"AÇIK"}</span></div>`).join("")+
+      `<div class="coupon-total">Toplam oran ${total.toFixed(2)} • ${status==="VOID"?`Bahis iptal • Para ve başarı hesabına dahil değil`: `Bahis ${stake.toLocaleString("tr-TR")} TL • ${status==="OPEN"?`Potansiyel dönüş ${potential.toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`:status==="WON"?`Dönüş ${potential.toLocaleString("tr-TR",{maximumFractionDigits:0})} TL • Net +${(potential-stake).toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`:`Net -${stake.toLocaleString("tr-TR")} TL`}`}<br>${probability?`Kuponun birlikte tutma ihtimali %${(probability*100).toFixed(1).replace(".",",")} • Teorik beklenen değer ${expectedProfit>=0?"+":""}${expectedProfit.toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`:"Eski kupon • olasılık kaydı yok"}</div>`;
     root.appendChild(el);
-    el.querySelector(".remove-coupon").onclick=()=>{
-      if(!confirm("Bu kuponu listeden kaldırmak istediğine emin misin? Kaldırılan kupon başarı ve kâr/zarar hesabına dahil edilmez."))return;
-      const current=couponStore();
-      const signature=c.signature||c.legs.map(l=>`${l.fixture}:${l.market}`).sort().join("|");
-      current[loadedDate]=(current[loadedDate]||[]).filter(x=>{
-        const xs=x.signature||x.legs.map(l=>`${l.fixture}:${l.market}`).sort().join("|");
-        return xs!==signature;
-      });
-      saveCouponStore(current);
-      renderCoupons(current[loadedDate]||[]);
-    };
   });
 }
 function renderFixtures(){
   const selected=loadedDate;
-  const countryFiltered=leagueSelect.value==="ALL" ? loadedMatches
+  const filtered=leagueSelect.value==="ALL" ? loadedMatches
     : loadedMatches.filter(m=>String(m.country||"Diğer")===leagueSelect.value);
-  const term=(document.getElementById("wsSearch")?.value||"").trim().toLocaleLowerCase("tr-TR");
-  const filtered=term?countryFiltered.filter(m=>[m.home,m.away,m.country,m.league].some(x=>String(x||"").toLocaleLowerCase("tr-TR").includes(term))):countryFiltered;
-  document.getElementById("gmFixtureCount").textContent=filtered.length+" MAÇ";
   state.textContent=filtered.length
     ? `${filtered.length} maç gösteriliyor. Analiz için bir maç seç.`
     : "Seçilen ligde başlamamış maç bulunamadı.";
   root.innerHTML="";
   for(const m of filtered){
       const card=document.createElement("article");card.className="match";
-      const logo=(u,n)=>typeof u==="string"&&/^https:\/\/[a-z0-9.-]+\//i.test(u)?`<img class="gm-team-logo" src="${esc(u)}" alt="${esc(n)} logosu" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display='none'">`:`<span class="gm-team-placeholder">⚽</span>`;
-      card.innerHTML=`<div class="gm-match-time"><b>${esc(shownTime(m.kickoff))}</b><small>${esc(m.league||m.country||"")}</small></div><div class="gm-teams"><span class="gm-team">${logo(m.home_logo,m.home)}<b>${esc(m.home)}</b></span><span class="gm-vs">—</span><span class="gm-team">${logo(m.away_logo,m.away)}<b>${esc(m.away)}</b></span></div><span class="gm-market" data-market>Analiz bekliyor</span><span class="gm-price" data-price>—</span><button type="button" class="analyze-btn">Analiz et →</button><div class="analysis" hidden></div>`;
-      const button=card.querySelector(".analyze-btn"),box=card.querySelector(".analysis");
+      card.innerHTML=`<div class="meta">🏆 ${esc(m.country)} • ${esc(m.league)} &nbsp; ⏰ ${esc(shownTime(m.kickoff))}</div>
+        <div class="teams">${esc(m.home)} — ${esc(m.away)}</div>
+        <button type="button">Bu maçı analiz et</button><div class="analysis" hidden></div>`;
+      const button=card.querySelector("button"),box=card.querySelector(".analysis");
       button.onclick=async()=>{
         button.disabled=true;box.hidden=false;box.textContent="Son maçlar inceleniyor…";
         try{
           const a=await getJson("/api/prematch/analyze?date="+encodeURIComponent(selected)+"&fixture="+encodeURIComponent(m.id));
           analyzedMatches.set(Number(m.id),{match:m,analysis:a});
-          document.getElementById("wsAnalyzedCount").textContent=analyzedMatches.size;
-          registerPickHistory(m,a);
-          const choices=Array.isArray(a.suggestions)?a.suggestions:[];
-          const ranked=choices.filter(p=>p?.quote&&Number(p.quote.odd)>=1.30);
-          const primary=ranked[0]||choices[0];
-          card.querySelector("[data-market]").textContent=primary?.label||"Uygun seçim yok";
-          card.querySelector("[data-price]").textContent=primary?.quote&&Number(primary.quote.odd)>=1.30?Number(primary.quote.odd).toFixed(2):"—";
-          box.innerHTML=`<div class="gm-decision"><div class="gm-decision-label">BOT ANALİZİ</div><div class="gm-decision-top"><strong>${esc(primary?.label||"Uygun tercih bulunamadı")}</strong><span class="gm-odd">${primary?.quote&&Number(primary.quote.odd)>=1.30?Number(primary.quote.odd).toFixed(2)+" ORAN":"ORAN DOĞRULANMADI"}</span></div><div class="gm-decision-meta"><span>${esc(primary?.decision_role||"Model değerlendirmesi")}</span><span>${esc(primary?.quote?.bookmaker||"Fiyat kaynağı yok")}</span></div><p>Maç istatistikleri ve piyasa fiyatları arka planda değerlendirildi. Model tahminleri kesin sonuç değildir.</p><button type="button" class="close-analysis">✕ Kapat</button></div>`;
-          box.querySelector(".close-analysis").onclick=()=>{
-            analyzedMatches.delete(Number(m.id));
-            document.getElementById("wsAnalyzedCount").textContent=analyzedMatches.size;
-            box.hidden=true;
-            box.innerHTML="";
-            button.disabled=false;
-            button.textContent="Bu maçı tekrar analiz et";
-          };
+          const picks=a.suggestions.length
+            ? a.suggestions.map(p=>`<div class="pick"><b>${esc(p.label)}</b><div class="quote">Oran ${Number(p.quote.odd).toFixed(2)} · ${esc(p.quote.bookmaker)}</div><div class="reason">${esc(p.quote.market_name)}: ${esc(p.quote.selection)}${quoteTime(p.quote.updated)?` · Güncelleme: ${esc(quoteTime(p.quote.updated))}`:""}</div><div class="pick-why"><b>Neden bu tercih?</b><br>${esc(p.explanation || p.reason)}</div></div>`).join("")
+            : `<div class="pas">PAS • ${a.candidate_count ? "Modelde eğilim var, ancak fiyat koşulu sağlanmadı." : "Yeterli ortak veri işareti yok."}</div>`;
+          box.innerHTML=`<div class="form"><div><b>${esc(a.home)}</b><br>${esc(formText(a.home_form,"home"))}</div>
+            <div><b>${esc(a.away)}</b><br>${esc(formText(a.away_form,"away"))}</div></div>
+            ${h2hHtml(a)}${lineupHtml(a)}${picks}${(a.joint_notes||[]).map(n=>`<div class="joint-note"><b>Birlikte gerçekleşme ihtimali</b><br>${esc(n)}</div>`).join("")}<div class="odds-note">${esc(a.odds_note)}</div><div class="hint">${esc(a.note)}</div>`;
         }catch(e){box.innerHTML='<span class="error">'+esc(e.message)+'</span>'}
         finally{button.disabled=false}
       };
@@ -4880,13 +4343,6 @@ async function load(){
   try{
     const data=await getJson("/api/prematch/fixtures?date="+encodeURIComponent(selected));
     loadedDate=selected;loadedMatches=data.matches;
-    document.getElementById("wsMatchCount").textContent=loadedMatches.length.toLocaleString("tr-TR");
-    document.getElementById("wsCountryCount").textContent=new Set(loadedMatches.map(m=>String(m.country||"Diğer"))).size;
-    const leagueCounts=new Map();for(const m of loadedMatches){const k=String(m.league||"Diğer");leagueCounts.set(k,(leagueCounts.get(k)||0)+1)}
-    const leagueTop=[...leagueCounts.entries()].sort((a,b)=>b[1]-a[1]).slice(0,6);
-    const leagueMax=Math.max(1,...leagueTop.map(x=>x[1]));
-    document.getElementById("gmLeagueBars").innerHTML=leagueTop.length?leagueTop.map(([name,count])=>`<div><div class="gm-bar-line"><span>${esc(name)}</span><strong>${count} maç</strong></div><div class="gm-bar-track"><div class="gm-bar-fill" style="width:${100*count/leagueMax}%"></div></div></div>`).join(""):'<div class="gm-empty">Fikstür bulunamadı.</div>';
-    document.getElementById("wsAnalyzedCount").textContent="0";
     const countries=new Map();
     for(const m of loadedMatches){
       const country=String(m.country||"Diğer");
@@ -4902,7 +4358,6 @@ async function load(){
   }catch(e){state.innerHTML='<span class="error">'+esc(e.message)+'</span>'}
 }
 leagueSelect.onchange=renderFixtures;
-document.getElementById("wsSearch").addEventListener("input",renderFixtures);
 document.getElementById("makeCoupons").onclick=buildCoupons;
 document.getElementById("load").onclick=load;load();
 </script></body></html>"""
@@ -4918,9 +4373,6 @@ def prematch_page():
         last_day=(today + timedelta(days=7)).isoformat(),
     )
 
-
-from populer_radar import radar_bp
-app.register_blueprint(radar_bp)
 
 # Gunicorn import ettiğinde scanner başlasın.
 ensure_scanner_started()
