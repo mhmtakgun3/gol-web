@@ -156,6 +156,8 @@ RULES = [
  ('HOME_OVER_1_5','Ev 1,5 ÜST','home_goals',lambda h,a:h>=2),
  ('AWAY_OVER_1_5','Dep 1,5 ÜST','away_goals',lambda h,a:a>=2),
  ('BB_BTTS_OVER25','KG VAR + 2,5 ÜST','btts_builder',lambda h,a:h>0 and a>0 and h+a>=3),
+ ('BB_HOME_OVER15','MS 1 + 1,5 ÜST','home_builder',lambda h,a:h>a and h+a>=2),
+ ('BB_AWAY_OVER15','MS 2 + 1,5 ÜST','away_builder',lambda h,a:a>h and h+a>=2),
  ('BB_HOME_UNDER55','MS 1 + 5,5 ALT','home_builder',lambda h,a:h>a and h+a<=5),
  ('BB_AWAY_UNDER55','MS 2 + 5,5 ALT','away_builder',lambda h,a:a>h and h+a<=5),
  ('BB_HOME_OVER35','MS 1 + 3,5 ÜST','home_builder',lambda h,a:h>a and h+a>=4),
@@ -233,37 +235,41 @@ def choose_markets(candidates, quality):
         c['coupon_eligible']=bool(c['price_verified'] and c.get('coupon_eligible')
                                   and p>=.60 and quality=='good')
         c['manual_review']=not c['coupon_eligible']
-    # Compare priced candidates first, but don't make a 35% longshot the headline.
-    priced=[c for c in candidates if c['price_verified'] and c['model_probability']>=.60]
-    priced.sort(key=lambda c:(c['model_probability'],c.get('expected_value') or -1),reverse=True)
-    # Model-only research: consider single markets AND correlated builders.
-    # 1.5 over at 1.08 is still a useful observation, never an executable pick.
-    unpriced=[c for c in candidates if not c['price_verified']]
-    unpriced.sort(key=lambda c:c['model_probability'],reverse=True)
-    builders=[c for c in unpriced if c['market'].startswith('BB_')]
-    builders.sort(key=lambda c:c['model_probability'],reverse=True)
+    # Futbol senaryosu fiyattan bağımsız seçilir. Yüksek taban oranlı
+    # 3,5 ALT'ın her maçta otomatik kazanmasını önlemek için futbol
+    # yönü belirleyen sonuç, KG ve gol üstü senaryolarını önce karşılaştır.
+    # Birleşik market ancak tekil MS tahmini de yeterince destekliyorsa öne çıkar.
+    by_code={c['market']:c for c in candidates}
+    preferred=[]
+    for side,combo in (('HOME','BB_HOME_OVER15'),('AWAY','BB_AWAY_OVER15')):
+        result=by_code.get(side); builder=by_code.get(combo)
+        if result and builder and result['model_probability']>=.51 and builder['model_probability']>=.42:
+            preferred.append(builder)
+    for code in ('HOME','AWAY','BTTS_YES','OVER_2_5','OVER_1_5',
+                 'BB_BTTS_OVER25','HOME_OVER_1_5','AWAY_OVER_1_5',
+                 'BB_HOME_TEAM15','BB_AWAY_TEAM15','UNDER_2_5','BTTS_NO'):
+        c=by_code.get(code)
+        if c and c['model_probability']>=.52: preferred.append(c)
+    # ALT 3,5 ancak gerçekten düşük gol beklentisinde, alternatif yoksa.
+    scenario=next((c for c in preferred if c['market'] in ('HOME','AWAY','BTTS_YES','OVER_2_5','OVER_1_5') ),None)
+    preferred.sort(key=lambda c:(c['model_probability'] +
+        (.24 if c['market'] in ('BB_HOME_OVER15','BB_AWAY_OVER15') else 0) +
+        (.05 if c['market'] in ('HOME','AWAY','BTTS_YES','OVER_2_5') else 0)),reverse=True)
     selected=[]
     def add(item):
         family=_scenario_family(item['market'])
         if family in {_scenario_family(x['market']) for x in selected}: return False
         selected.append(item)
         return True
-    # If available, first an attractive priced market, otherwise a strong builder
-    # model scenario, and finally a representative single-market football forecast.
-    for c in priced:
-        if add(c): break
-    if not selected:
-        for c in builders:
-            if c['model_probability']>=.50 and add(c): break
-    if not selected:
-        for c in unpriced:
-            if c['model_probability']>=.50 and add(c): break
-    for group in (builders,priced,unpriced):
-        for c in group:
-            if len(selected)>=2: break
-            if c['model_probability']<.50: continue
-            add(c)
+    if preferred: add(preferred[0])
+    for c in preferred[1:]:
         if len(selected)>=2: break
+        add(c)
+    if not selected:
+        fallback=sorted(candidates,key=lambda c:c['model_probability'],reverse=True)
+        for c in fallback:
+            if c['market']=='UNDER_3_5' and c['model_probability']<.80: continue
+            if add(c): break
     for i,c in enumerate(selected):
         c['is_main']=i==0
         c['decision_role']=('ANA MAÇ SENARYOSU · ' if i==0 else 'ALTERNATİF · ')+c['decision_role']
