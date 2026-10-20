@@ -4673,40 +4673,29 @@ function marketValueScore(p,quality="good"){
 }
 function bestPricedMarket(picks,quality){
   const eligible=(picks||[]).filter(p=>decisionMetrics(p,quality));
-  eligible.sort((a,b)=>marketValueScore(b,quality)-marketValueScore(a,quality));
-  return eligible[0]||null;
+  // ALT, yalnızca başka uygun market yoksa değerlendirilir.
+  const primary=eligible.filter(p=>!String(p.market||"").includes("UNDER") && p.market!=="BTTS_NO");
+  const choices=primary.length?primary:eligible;
+  choices.sort((a,b)=>marketValueScore(b,quality)-marketValueScore(a,quality));
+  return choices[0]||null;
 }
 function candidatePool(){
-  const pool=[],stats={matches:analyzedMatches.size,suggestions:0,priced:0,lowProbability:0,lowOdd:0,lowValue:0,weakHistory:0,eligible:0};
+  const pool=[],stats={matches:analyzedMatches.size,eligible:0};
   for(const [fixture,item] of analyzedMatches){
-    const picks=item.analysis.all_suggestions||item.analysis.suggestions||[];
-    const quality=item.analysis.data_quality||"";
-    const options=[];
-    for(const pick of picks){
-      stats.suggestions++;
-      const odd=Number(pick.quote?.odd||0),p=Number(pick.model_probability||0);
-      if(!Number.isFinite(p)||p<=0||p>=1)continue;
-      if(!Number.isFinite(odd)||odd<1.30){stats.lowOdd++;continue;}
-      stats.priced++;
-      // Kupon seçiminde geçmiş bahis sonuçları ve geçmiş market başarı oranları kullanılmaz.
-      // Yetersiz veriyle yüksek güven iddiası oluşturma.
-      if(quality!=="good"||p<GM_MIN_PROB){stats.lowProbability++;continue;}
-      const metrics=decisionMetrics(pick,quality);
-      if(!metrics){stats.lowValue++;continue;}
-      const ev=metrics.ev,edge=(p-1/odd)*100;
-      const candidate={fixture:Number(fixture),home:item.match.home,away:item.match.away,
+    const a=item.analysis||{},quality=a.data_quality||"poor";
+    if(quality==="poor")continue;
+    const picks=(a.suggestions||[]).filter(p=>p&&p.market&&Number(p.model_probability)>=.50);
+    const options=picks.map(p=>{
+      const odd=Number(p.quote?.odd||0),validOdd=Number.isFinite(odd)&&odd>=1.30;
+      return {fixture:Number(fixture),home:item.match.home,away:item.match.away,
         kickoff:item.match.kickoff,country:item.match.country,league:item.match.league,
-        market:pick.market,label:pick.label,confidence:quality,
-        modelProbability:p,baseModelProbability:p,impliedProbability:1/odd,
-        valueEdge:edge,historicalRate:null,historicalN:0,
-        odd,bookmaker:pick.quote.bookmaker||"",status:"OPEN"};
-      options.push(candidate);
-    }
-    // Bir maçın uygun alternatiflerini sakla; yalnızca en yüksek olasılıklı markete kilitlenme.
-    options.sort((a,b)=>marketValueScore(b,quality)-marketValueScore(a,quality));
-    if(options.length)pool.push({...options[0],options:options.slice(0,8)});
+        market:p.market,label:p.label,confidence:quality,
+        modelProbability:Number(p.model_probability),baseModelProbability:Number(p.model_probability),
+        odd:validOdd?odd:null,bookmaker:validOdd?(p.quote?.bookmaker||""):"",
+        explanation:p.explanation||p.reason||"",status:"OPEN"};
+    });
+    if(options.length)pool.push({...options[0],options});
   }
-  pool.sort((a,b)=>marketValueScore(b)-marketValueScore(a));
   stats.eligible=pool.length;pool.stats=stats;return pool;
 }
 // v10: Dinamik kupon portföyü. Kupon düzeyinde olasılık çarpımı veya sabit sayı yok.
@@ -4726,13 +4715,12 @@ function couponFamily(p){
 }
 function isFavoritePick(p){
   const m=String(p.market||"").toUpperCase();
-  return ["HOME","AWAY","DC_1X","DC_X2"].includes(m)&&Number(p.modelProbability)>=.64&&Number(p.odd)>=1.30&&Number(p.odd)<=2.15;
+  return ["HOME","AWAY","BB_HOME_OVER15","BB_AWAY_OVER15"].includes(m)&&Number(p.modelProbability)>=.52;
 }
 function legQuality(p){
   const prob=Number(p.modelProbability||0),odd=Number(p.odd||0);
-  const edge=prob-1/odd;
-  // Maç bazlı kalite. Geçmiş kupon sonuçları veya çarpılmış kupon olasılığı kullanılmaz.
-  return prob*.65+Math.min(.18,Math.max(-.15,edge))*.8+Math.min(odd,3)*.015;
+  // Analiz sırası esastır; oranı olmayan tahmin de değerlendirilir.
+  return prob*.65+(p.confidence==="good"?.12:0)+(String(p.market).startsWith("BB_")?.025:0);
 }
 function buildCoupons(){
   const store=couponStore(),existing=store[loadedDate]||[],pool=candidatePool();
@@ -4748,10 +4736,10 @@ function buildCoupons(){
   const chosen=[],remaining=new Map(selections.map(x=>[x.fixture,x]));
   const addCoupon=(legs,strategy)=>{
     if(legs.length!==3||new Set(legs.map(x=>x.fixture)).size!==3)return false;
-    const total=legs.reduce((v,x)=>v*Number(x.odd),1);
-    if(!Number.isFinite(total)||total<=1)return false;
+    const total=legs.reduce((v,x)=>v*Number(x.odd||1),1);
+    const allPriced=legs.every(x=>Number.isFinite(Number(x.odd))&&Number(x.odd)>=1.30);
     const signature=legs.map(x=>`${x.fixture}:${x.market}`).sort().join("|");
-    chosen.push({legs:legs.map(({favoriteOption,qualityScore,...leg})=>leg),total,signature,
+    chosen.push({legs:legs.map(({favoriteOption,qualityScore,...leg})=>leg),total:allPriced?total:null,priced:allPriced,signature,
       stake:couponStake,status:"OPEN",strategy,strategyVersion:couponStrategyVersionV10,
       created:new Date().toISOString()});
     legs.forEach(x=>remaining.delete(x.fixture));return true;
@@ -4787,6 +4775,11 @@ function legResult(market,h,a,hh=null,ha=null){
   const total=h+a;
   const htTotal=(hh===null||ha===null)?null:hh+ha;
   if(market==="HOME")return h>a;if(market==="AWAY")return a>h;
+  if(market==="BB_HOME_OVER15")return h>a&&total>=2;
+  if(market==="BB_AWAY_OVER15")return a>h&&total>=2;
+  if(market==="BB_BTTS_OVER25")return h>0&&a>0&&total>=3;
+  if(market==="BB_HOME_TEAM15")return h>a&&h>=2;
+  if(market==="BB_AWAY_TEAM15")return a>h&&a>=2;
   if(market==="DC_1X")return h>=a;if(market==="DC_X2")return a>=h;
   if(market==="HOME_OVER_1_5")return h>=2;if(market==="AWAY_OVER_1_5")return a>=2;
   if(market==="BTTS_YES")return h>0&&a>0;if(market==="BTTS_NO")return h===0||a===0;
@@ -4819,8 +4812,8 @@ async function settleCoupons(){
     coupon.status=coupon.legs.some(x=>x.status==="LOST")?"LOST":coupon.legs.every(x=>x.status==="WON")?"WON":"OPEN";
     const stake=Number(coupon.stake||couponStake),total=Number(coupon.total||1);
     coupon.stake=stake;
-    coupon.payout=coupon.status==="WON"?stake*total:coupon.status==="LOST"?0:0;
-    coupon.profit=coupon.status==="WON"?coupon.payout-stake:coupon.status==="LOST"?-stake:0;
+    coupon.payout=coupon.status==="WON"&&coupon.priced!==false?stake*total:0;
+    coupon.profit=coupon.priced===false?0:coupon.status==="WON"?coupon.payout-stake:coupon.status==="LOST"?-stake:0;
   }
   saveCouponStore(store);
   renderCoupons(store[loadedDate]||[]);
@@ -4828,7 +4821,7 @@ async function settleCoupons(){
 function bankrollStats(store){
   const stored=Object.values(store).flatMap(x=>Array.isArray(x)?x:[]),voided=stored.filter(c=>c.status==="VOID");
   // Eski kuponları silmeden v4.12 performansını ayrı ölç.
-  const all=stored.filter(c=>c.status!=="VOID"&&c.strategyVersion===couponStrategyVersion);
+  const all=stored.filter(c=>c.status!=="VOID"&&c.priced!==false&&(c.strategyVersion===couponStrategyVersion||c.strategyVersion===couponStrategyVersionV10));
   const won=all.filter(c=>c.status==="WON"),lost=all.filter(c=>c.status==="LOST"),open=all.filter(c=>(c.status||"OPEN")==="OPEN");
   const settled=[...won,...lost],stakeOf=c=>Number(c.stake||couponStake);
   const totalStaked=all.reduce((s,c)=>s+stakeOf(c),0);
@@ -4889,8 +4882,8 @@ function renderCoupons(coupons){
     const couponType=c.legs?.length===2?"2 MAÇ":c.legs?.length===3?"3 MAÇ":c.legs?.length===4?"4 MAÇ":`${c.legs?.length||0} MAÇ`;
     el.innerHTML=`<div class="coupon-title">Kupon ${i+1} • <span class="${status.toLowerCase()}">${statusText}</span></div>`+
       riskHtml+`<div class="coupon-meta"><b>${couponType}</b> • ${c.strategyVersion===couponStrategyVersionV10?"Tekrarsız maç seçimi • maç bazlı değerlendirme":"Önceki sürüm kuponu"}</div>`+
-      c.legs.map(l=>`<div class="coupon-leg"><b>${esc(l.home)} — ${esc(l.away)}</b><br>${esc(l.label)} • ${Number(l.odd||0).toFixed(2)} ${esc(l.bookmaker||"")}<br>Model olasılığı %${(Number(l.modelProbability||0)*100).toFixed(1).replace(".",",")} • Değer +${Number(l.valueEdge||0).toFixed(1).replace(".",",")}%${l.historicalN?` • Market geçmişi %${(Number(l.historicalRate||0)*100).toFixed(0)} (${l.historicalN} analiz)`:""} • <span class="${String(l.status||"OPEN").toLowerCase()}">${l.status==="WON"?"TUTTU":l.status==="LOST"?"YATTI":l.status==="VOID"?"İPTAL":"AÇIK"}</span></div>`).join("")+
-      `<div class="coupon-total">Toplam oran ${total.toFixed(2)} • ${status==="VOID"?`Bahis iptal • Para ve başarı hesabına dahil değil`: `Bahis ${stake.toLocaleString("tr-TR")} TL • ${status==="OPEN"?`Potansiyel dönüş ${potential.toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`:status==="WON"?`Dönüş ${potential.toLocaleString("tr-TR",{maximumFractionDigits:0})} TL • Net +${(potential-stake).toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`:`Net -${stake.toLocaleString("tr-TR")} TL`}`}</div>`+
+      c.legs.map(l=>`<div class="coupon-leg"><b>${esc(l.home)} — ${esc(l.away)}</b><br>${esc(l.label)} • ${l.odd?Number(l.odd).toFixed(2)+" "+esc(l.bookmaker||""):"ORAN YOK · SADECE TAHMİN"}<br>Model olasılığı %${(Number(l.modelProbability||0)*100).toFixed(1).replace(".",",")} • Değer +${Number(l.valueEdge||0).toFixed(1).replace(".",",")}%${l.historicalN?` • Market geçmişi %${(Number(l.historicalRate||0)*100).toFixed(0)} (${l.historicalN} analiz)`:""} • <span class="${String(l.status||"OPEN").toLowerCase()}">${l.status==="WON"?"TUTTU":l.status==="LOST"?"YATTI":l.status==="VOID"?"İPTAL":"AÇIK"}</span></div>`).join("")+
+      `<div class="coupon-total">${c.priced===false?"Oran doğrulanmadı · sanal ödeme hesabı yok":"Toplam oran "+total.toFixed(2)} • ${status==="VOID"?`Bahis iptal • Para ve başarı hesabına dahil değil`: `Bahis ${stake.toLocaleString("tr-TR")} TL • ${status==="OPEN"?`Potansiyel dönüş ${potential.toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`:status==="WON"?`Dönüş ${potential.toLocaleString("tr-TR",{maximumFractionDigits:0})} TL • Net +${(potential-stake).toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`:`Net -${stake.toLocaleString("tr-TR")} TL`}`}</div>`+
       `<button type="button" class="remove-coupon">Kuponu kaldır</button>`;
     root.appendChild(el);
     el.querySelector(".remove-coupon").onclick=()=>{
@@ -4936,7 +4929,7 @@ function renderFixtures(){
           registerPickHistory(m,a);
           const choices=Array.isArray(a.suggestions)?a.suggestions:[];
           const ranked=choices.filter(p=>p?.quote&&Number(p.quote.odd)>=1.30);
-          const primary=bestPricedMarket(a.all_suggestions||choices,a.data_quality);
+          const primary=choices.find(p=>p.is_main)||choices[0]||null;
           // Risk etiketi sadece model olasılığını ifade eder; garanti değildir.
           card.querySelector("[data-market]").textContent=primary?.label||"Değerli seçim yok";
           card.querySelector("[data-price]").textContent=primary?.quote&&Number(primary.quote.odd)>=1.30?Number(primary.quote.odd).toFixed(2):"—";
