@@ -84,7 +84,7 @@ def _translate_title_tr(title):
 
 def research_match(home, away, kickoff=None):
     """Filter dated RSS leads by exact team relevance; never claim verified injuries."""
-    if os.getenv('PREMATCH_WEB_RESEARCH','1').lower() in ('0','false','off'):
+    if os.getenv('PREMATCH_WEB_RESEARCH','0').lower() in ('0','false','off'):
         return {'status':'disabled','sources':[],'note':'İnternet araştırması kapalı.'}
     home=str(home or '').strip(); away=str(away or '').strip()
     if not _team_tokens(home) or not _team_tokens(away):

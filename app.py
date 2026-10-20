@@ -30,7 +30,7 @@ SIGNAL_LIMIT = int(os.getenv("SIGNAL_LIMIT", "65"))
 FIRST_HALF_LIMIT = int(os.getenv("FIRST_HALF_05_LIMIT", "58"))
 FIRST_HALF_15_LIMIT = int(os.getenv("FIRST_HALF_15_LIMIT", "68"))
 BOT_PICK_LIMIT = 78
-BOT_PICK_MINUTE = 10
+BOT_PICK_MINUTE = 55
 BOT_PICK_CONFIRM_SCANS = 2
 BOT_PICK_LATE_MINUTE = 75
 BOT_PICK_MIN_RECENT_PRESSURE = 45
@@ -1297,8 +1297,6 @@ def calculate_bot_pick(
     home_goals: int,
     away_goals: int,
     momentum: Dict[str, Any],
-    first_half_signal: int = 0,
-    match_status: str = "",
 ) -> Tuple[int, str, List[str], int]:
     """
     BOTUN SEÇİMİ artık:
@@ -1328,26 +1326,6 @@ def calculate_bot_pick(
     recent_target = safe_int(recent.get("target"), 0)
     recent_inside = safe_int(recent.get("inside"), 0)
 
-    # 10–35: yalnızca ilk yarı 0-0 için İY 0.5 Üst.
-    # Son 5/10 dakikalık gerçek aksiyon şarttır; toplam şut birikimi yetmez.
-    if 10 <= minute <= 35:
-        if match_status != "1H" or home_goals + away_goals != 0:
-            return 0, "", ["İY 0.5 Üst için ilk yarı 0-0 koşulu yok"], 0
-        if (first_half_signal < FIRST_HALF_LIMIT or momentum_score < 35
-                or (recent_target < 1 and recent_inside < 2)):
-            return 0, "", ["İlk yarıda güncel gol baskısı henüz yeterli değil"], 0
-        early_score = min(100, round(
-            first_half_signal * 0.65 + momentum_score * 0.35
-            + (8 if recent_target >= 2 else 0)
-            + (5 if recent_inside >= 3 else 0)
-        ))
-        reasons = ["İlk yarı 0-0", "Son 5–10 dakikada gol baskısı"]
-        if recent_target:
-            reasons.append(f"Yakın dönemde {recent_target} yeni isabetli şut")
-        return early_score, "İY 0.5 Üst", reasons, 0
-
-    # 36–59: güncel baskı yeterliyse genel gol beklentisini erken değerlendir.
-    # 60–74: normal baskı eşiği; 75+ daha güçlü yakın dönem kanıtı gerekir.
     # Eski şut birikimi tek başına yeni gol seçimi üretemez.
     # Özellikle 75'ten sonra kalan süre azaldığı için hem güçlü güncel
     # baskı hem de yakın zamanda isabetli/ceza içi aksiyon gerekir.
@@ -1355,7 +1333,7 @@ def calculate_bot_pick(
         if (momentum_score < BOT_PICK_LATE_MIN_RECENT_PRESSURE
                 or recent_target < 1 or recent_inside < 1):
             return 0, "", ["Geç dakikada güncel isabetli şut ve ceza içi baskısı yetersiz"], 0
-    elif (momentum_score < (35 if minute < 60 else BOT_PICK_MIN_RECENT_PRESSURE)
+    elif (momentum_score < BOT_PICK_MIN_RECENT_PRESSURE
           or (recent_target < 1 and recent_inside < 2)):
         return 0, "", ["Son 5 dakikadaki gol aksiyonu yetersiz"], 0
 
@@ -2078,8 +2056,6 @@ def analyze_match(match: Dict[str, Any]) -> bool:
         home_goals,
         away_goals,
         momentum,
-        first_half_signal=first_half_signal,
-        match_status=snapshot.get("status", ""),
     )
 
     with memory_lock:
@@ -3792,7 +3768,6 @@ select{
 
     <div class="header-right">
       <a class="info-pill" href="/tahmin" style="text-decoration:none;color:inherit">📅 Maç Önü Tahminleri</a>
-      <a class="info-pill" href="/radar" style="text-decoration:none;color:inherit">📊 Popüler Radar</a>
       <div class="status-pill" id="systemState">● Sistem Aktif</div>
       <div class="info-pill" id="lastScan">Son güncelleme: -</div>
       <div class="info-pill" id="scanEvery">↻ 30 sn'de bir</div>
@@ -4397,7 +4372,7 @@ async function getJson(url){
 const couponStoreKey="golPrematchCouponsV2";
 const pickHistoryKey="golPrematchPickHistoryV4";
 const couponStake=1000;
-const couponStrategyVersion="v7.0";
+const couponStrategyVersion="v8.0-independent";
 function couponStore(){try{return JSON.parse(localStorage.getItem(couponStoreKey)||"{}")||{}}catch{return {}}}
 function saveCouponStore(store){localStorage.setItem(couponStoreKey,JSON.stringify(store))}
 function pickHistory(){try{return JSON.parse(localStorage.getItem(pickHistoryKey)||"[]")||[]}catch{return []}}
@@ -4439,9 +4414,10 @@ async function settlePickHistory(){
   if(changed)savePickHistory(history);
 }
 function historyQuality(pick){
-  // Geçmiş market sonuçları sadece rapor içindir; yeni tahminleri değiştirmez.
-  const h=marketHistoryStats(pick.market);
-  return {n:h.n,won:h.won,rate:h.n?h.won/h.n:0,adjusted:Number(pick.model_probability||0)};
+  const h=marketHistoryStats(pick.market),p=Number(pick.model_probability||0);
+  const reliability=Math.min(0.55,h.n/30);
+  const adjusted=p*(1-reliability)+h.rate*reliability;
+  return {n:h.n,won:h.won,rate:h.rate,adjusted};
 }
 function candidatePool(){
   const pool=[],stats={matches:analyzedMatches.size,suggestions:0,priced:0,lowProbability:0,lowOdd:0,lowValue:0,weakHistory:0,eligible:0};
@@ -4455,22 +4431,21 @@ function candidatePool(){
       if(!Number.isFinite(baseP)||baseP<=0||baseP>=1)continue;
       if(!Number.isFinite(odd)||odd<1.30){stats.lowOdd++;continue;}
       stats.priced++;
-      const hist=historyQuality(pick);
-      // Geçmişte 12+ sonuç yokken yapay güven artışı uygulanmaz.
-      const p=baseP; // Geçmiş başarı yeni model olasılığını etkilemez.
+      // v8: Her maç yalnızca kendi güncel verileriyle değerlendirilir.
+      // Geçmiş bahis/market başarı oranı, tahmin veya filtre girdisi DEĞİLDİR.
+      const p=baseP;
       if(p<0.52){stats.lowProbability++;continue;}
       const ev=p*odd-1,edge=(p-1/odd)*100;
       if(ev<0.02){stats.lowValue++;continue;}
-      // Geçmiş market oranı seçimleri elemez.
       const candidate={fixture:Number(fixture),home:item.match.home,away:item.match.away,
         kickoff:item.match.kickoff,country:item.match.country,league:item.match.league,
         market:pick.market,label:pick.label,confidence:pick.confidence||"",
         modelProbability:p,baseModelProbability:baseP,impliedProbability:1/odd,
-        valueEdge:edge,historicalRate:hist.rate,historicalN:hist.n,
+        valueEdge:edge,historicalRate:null,historicalN:0,
         odd,bookmaker:pick.quote.bookmaker||"",status:"OPEN"};
       // Bir maçtan yalnızca tek seçim: kuponlarda aynı maçın riskini çoğaltma.
-      const priority=c=>c.modelProbability*c.odd-1-(c.market==="UNDER_3_5"?0.035:0);
-      if(!best||priority(candidate)>priority(best))best=candidate;
+      if(!best||candidate.modelProbability*candidate.odd-1 >
+          best.modelProbability*best.odd-1)best=candidate;
     }
     if(best)pool.push(best);
   }
@@ -4520,10 +4495,9 @@ function buildCoupons(){
     if(expectedRoi<.02){rejected.roi++;return;}
     const risk=couponRisk(probability);
     if(risk.key==="none")return;
-    const sizeBonus=legs.length===3?2:1;
-    const under35Count=legs.filter(x=>x.market==="UNDER_3_5").length;
-    const diversityPenalty=Math.max(0,under35Count-1)*25;
-    const score=minEdge*30+probability*1000+expectedRoi*900+sizeBonus-diversityPenalty;
+    const historicalBonus=0; // v8: geçmiş başarısı sıralamayı etkilemez
+    const sizeBonus=legs.length===2?3:legs.length===3?2:1;
+    const score=minEdge*30+probability*1000+expectedRoi*900+sizeBonus;
     combos.push({legs,total,probability,expectedReturn,expectedProfit,expectedRoi,signature,score,riskKey:risk.key,riskLabel:risk.label,riskLevel:risk.risk});
   }
   // Yalnızca 3 maçlı kuponlar; NO BET mümkündür.
@@ -4616,10 +4590,10 @@ function renderLearningStats(){
     ["DC_1X","1X"],["DC_X2","X2"],["HOME","MS1"],["AWAY","MS2"],
     ["HT_OVER_0_5","İY 0,5 ÜST"],["HT_OVER_1_5","İY 1,5 ÜST"],["HT_UNDER_1_5","İY 1,5 ALT"]
   ];
-  const active=markets.map(([m,l])=>{const x=marketHistoryStats(m);return {...x,rate:x.n?x.won/x.n:0,label:l}}).filter(x=>x.n>0).sort((a,b)=>b.n-a.n).slice(0,8);
+  const active=markets.map(([m,l])=>{const x=marketHistoryStats(m);return {...x,label:l}}).filter(x=>x.n>0).sort((a,b)=>b.n-a.n).slice(0,8);
   document.getElementById("learningStats").innerHTML=active.length
-    ? `<span><b>📊 Geçmiş sonuçlar (seçimi etkilemez):</b></span>`+active.map(x=>`<span>${x.label}: <b class="${x.rate>=.65?"good":x.rate<.55?"bad":""}">%${(x.rate*100).toFixed(0)}</b> (${x.n})</span>`).join("")
-    : `<span><b>📊 Geçmiş sonuçlar (seçimi etkilemez):</b> Henüz sonuçlanmış geçmiş seçim bulunmuyor.</span>`;
+    ? `<span><b>🧠 Öğrenme:</b></span>`+active.map(x=>`<span>${x.label}: <b class="${x.rate>=.65?"good":x.rate<.55?"bad":""}">%${(x.rate*100).toFixed(0)}</b> (${x.n})</span>`).join("")
+    : `<span><b>🧠 Öğrenme:</b> Henüz yeterli geçmiş sonuç yok; v5.0 önce veri topluyor.</span>`;
 }
 
 function renderBankroll(store){
