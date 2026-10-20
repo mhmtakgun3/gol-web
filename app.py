@@ -4680,26 +4680,35 @@ function bestPricedMarket(picks,quality){
   return choices[0]||null;
 }
 function candidatePool(){
-  const pool=[],stats={matches:analyzedMatches.size,eligible:0};
+  // Tek otorite analiz motorudur: kupon motoru kendi marketini uyduramaz.
+  const pool=[],stats={matches:analyzedMatches.size,eligible:0,unpriced:0,rejected:0};
   for(const [fixture,item] of analyzedMatches){
     const a=item.analysis||{},quality=a.data_quality||"poor";
-    if(quality==="poor")continue;
-    const picks=(a.suggestions||[]).filter(p=>p&&p.market&&Number(p.model_probability)>=.50);
-    const options=picks.map(p=>{
-      const odd=Number(p.quote?.odd||0),validOdd=Number.isFinite(odd)&&odd>=1.30;
-      return {fixture:Number(fixture),home:item.match.home,away:item.match.away,
-        kickoff:item.match.kickoff,country:item.match.country,league:item.match.league,
-        market:p.market,label:p.label,confidence:quality,
-        modelProbability:Number(p.model_probability),baseModelProbability:Number(p.model_probability),
-        odd:validOdd?odd:null,bookmaker:validOdd?(p.quote?.bookmaker||""):"",
-        explanation:p.explanation||p.reason||"",status:"OPEN"};
-    });
-    if(options.length)pool.push({...options[0],options});
+    const picks=Array.isArray(a.suggestions)?a.suggestions:[];
+    const main=picks.find(p=>p?.is_main)||picks[0];
+    if(!main||quality!=="good"){stats.rejected++;continue;}
+    // Analiz PAS dediyse veya ana tahminin doğrulanmış fiyatı yoksa PAS.
+    // Alternatif markete geçip 3,5 ALT kuponu üretme.
+    const odd=Number(main.quote?.odd||0);
+    if(!main.coupon_eligible||!main.price_verified||!Number.isFinite(odd)||odd<GM_MIN_ODD){
+      if(!Number.isFinite(odd)||odd<GM_MIN_ODD)stats.unpriced++;
+      else stats.rejected++;
+      continue;
+    }
+    const prob=Number(main.model_probability);
+    if(!Number.isFinite(prob)||prob<=0||prob>=1){stats.rejected++;continue;}
+    const leg={fixture:Number(fixture),home:item.match.home,away:item.match.away,
+      kickoff:item.match.kickoff,country:item.match.country,league:item.match.league,
+      market:main.market,label:main.label,confidence:quality,
+      modelProbability:prob,baseModelProbability:prob,odd,
+      bookmaker:main.quote?.bookmaker||"",explanation:main.explanation||main.reason||"",
+      valueEdge:Number(main.value_edge_pct||0),status:"OPEN"};
+    pool.push({...leg,options:[leg]});
   }
   stats.eligible=pool.length;pool.stats=stats;return pool;
 }
 // v10: Dinamik kupon portföyü. Kupon düzeyinde olasılık çarpımı veya sabit sayı yok.
-const couponStrategyVersionV10="v10-dynamic-portfolio";
+const couponStrategyVersionV10="v11-main-pick-only";
 function couponRisk(probability){
   const p=Number(probability||0);
   if(p>=.70)return {key:"safe",label:"GÜÇLÜ ADAY",risk:"GÖRECELİ DÜŞÜK"};
@@ -4728,7 +4737,7 @@ function buildCoupons(){
   const available=pool.filter(p=>!usedToday.has(Number(p.fixture)));
   // Her maç için bir tercih. Aynı maçı farklı marketle ikinci kez kullanmak da yasak.
   const selections=available.map(p=>{
-    const options=(p.options||[p]).filter(x=>Number.isFinite(legQuality(x)));
+    const options=(p.options||[p]).filter(x=>Number.isFinite(legQuality(x))&&Number(x.odd)>=GM_MIN_ODD);
     const favorite=options.filter(isFavoritePick).sort((a,b)=>legQuality(b)-legQuality(a))[0];
     const best=options.sort((a,b)=>legQuality(b)-legQuality(a))[0];
     return best?{...best,fixture:Number(p.fixture),favoriteOption:favorite||null,qualityScore:legQuality(best)}:null;
@@ -4737,7 +4746,8 @@ function buildCoupons(){
   const addCoupon=(legs,strategy)=>{
     if(legs.length!==3||new Set(legs.map(x=>x.fixture)).size!==3)return false;
     const total=legs.reduce((v,x)=>v*Number(x.odd||1),1);
-    const allPriced=legs.every(x=>Number.isFinite(Number(x.odd))&&Number(x.odd)>=1.30);
+    const allPriced=legs.every(x=>Number.isFinite(Number(x.odd))&&Number(x.odd)>=GM_MIN_ODD);
+    if(!allPriced)return false;
     const signature=legs.map(x=>`${x.fixture}:${x.market}`).sort().join("|");
     chosen.push({legs:legs.map(({favoriteOption,qualityScore,...leg})=>leg),total:allPriced?total:null,priced:allPriced,signature,
       stake:couponStake,status:"OPEN",strategy,strategyVersion:couponStrategyVersionV10,
@@ -4763,7 +4773,7 @@ function buildCoupons(){
   if(!chosen.length){
     renderCoupons(existing);
     const s=pool.stats||{};
-    document.getElementById("couponState").textContent=`${s.matches||0} analiz edilen maçtan ${s.eligible||0} uygun aday var; tekrarsız üçlü kupon için en az 3 kullanılmamış maç gerekli. Tüm fikstürün analizi tamamlanmadan havuz sınırlı kalır.`;
+    document.getElementById("couponState").textContent=`${s.matches||0} analiz edilen maçtan ${s.eligible||0} uygun aday var; tekrarsız üçlü kupon için en az 3 kullanılmamış maç gerekli. ${s.unpriced||0} maçta ana tercih için doğrulanmış oran yok, ${s.rejected||0} maç PAS/uygunsuz. Tüm fikstürün analizi tamamlanmadan havuz sınırlı kalır.`;
     return;
   }
   store[loadedDate]=[...existing,...chosen];saveCouponStore(store);renderCoupons(store[loadedDate]);
