@@ -4572,7 +4572,7 @@ body{background:radial-gradient(ellipse at 58% -22%,#122a58 0,transparent 48%),l
 <aside class="pro-sidebar gm-nav" aria-label="Ana navigasyon"><a class="pro-identity" href="/"><span class="pro-logo">⚽</span><span>GOL MERKEZİ<strong>PRO ANALYTICS</strong></span></a><div class="pro-section-label">KONTROL MERKEZİ</div><a href="/">◉ <span>Canlı Gol Merkezi</span></a><a href="/tahmin" class="active">▦ <span>Maç Analizi &amp; Kupon</span></a><a href="/radar">◈ <span>Piyasa Radarı</span></a><div class="pro-section-label">İSTATİSTİKLER</div><a href="#gm-performance">▥ <span>Performans</span></a><a href="#gm-coupon">▤ <span>Kupon Geçmişi</span></a><a href="#gm-coupon">◫ <span>Sanal Bakiye</span></a><div class="pro-section-label">ARAÇLAR</div><a href="#gm-fixtures">☆ <span>Fikstür</span></a><a href="#gm-leagues">▤ <span>Lig Dağılımı</span></a><a href="/radar">⚙ <span>Piyasa Araçları</span></a><div class="pro-sidebar-bottom"><span class="pro-pulse"></span> ANALİZ PLATFORMU<small>Gol Merkezi • Pro Workspace</small></div></aside><div class="wrap">
 <div class="gm-topbar"><div><span class="gm-eyebrow">GOL MERKEZİ <b> / ANALYTICS DASHBOARD</b></span><h1>Analiz Kontrol Merkezi <span class="gm-live-dot"></span></h1><p>Fikstür, futbol analizi ve sanal kupon performansı · Gerçek veriler, şeffaf sonuçlar</p></div><div class="gm-top-actions"><span id="gmToday">PRO ANALYTICS</span><a href="/radar">◈ Piyasa Radarı ↗</a></div></div>
 <div class="gm-kpis" id="gm-performance"><div class="gm-kpi"><div class="gm-kpi-label">🏆 TOPLAM MAÇ <span>↗</span></div><strong id="wsMatchCount">—</strong><div class="gm-kpi-footer">Seçili tarihteki maç sayısı</div></div><div class="gm-kpi"><div class="gm-kpi-label">🎯 ANALİZ EDİLEN <span>↗</span></div><strong id="wsAnalyzedCount">0</strong><div class="gm-kpi-footer">Bu oturumda incelenen maçlar</div></div><div class="gm-kpi"><div class="gm-kpi-label">📈 ANALİZ KAPSAMI</div><strong id="gmCoverage">—</strong><div class="gm-kpi-footer">Günlük analiz oranı</div></div><div class="gm-kpi"><div class="gm-kpi-label">💰 SANAL KÂR / ZARAR <span>↗</span></div><strong id="gmNet">—</strong><div class="gm-kpi-footer" id="gmRoi">Sonuçlanmış kuponlar üzerinden</div></div><div class="gm-kpi"><div class="gm-kpi-label">🌍 KAPSANAN ÜLKE <span>↗</span></div><strong id="wsCountryCount">—</strong><div class="gm-kpi-footer">Günlük fikstür dağılımı</div></div></div>
-<div class="gm-dashboard-grid"><section class="gm-main-col"><div class="gm-card gm-controls"><div class="gm-section-title"><div><span class="gm-eyebrow">MATCH CENTER</span><h2>Günlük Fikstür</h2></div><span class="gm-status"><i></i> VERİ KAYNAĞI: API</span></div><div class="gm-filters"><label>Maç günü <input id="day" type="date" min="{{today}}" max="{{last_day}}" value="{{initial_day}}"></label><button id="load">↻ Fikstürü getir</button><label>Ülke <select id="league" disabled><option value="ALL">Tüm ülkeler</option></select></label><label class="gm-search-label">Ara <input id="wsSearch" type="search" placeholder="Takım veya lig adı…"></label></div></div><div class="gm-card gm-match-panel" id="gm-fixtures"><div class="gm-section-title"><div><span class="gm-eyebrow">FIXTURE EXPLORER</span><h2>Karşılaşmalar</h2></div><span class="gm-chip" id="gmFixtureCount">Fikstür yükleniyor</span></div><p id="state" class="ws-fixture-status">Fikstür yükleniyor…</p><div class="gm-table-head"><span>SAAT / LİG</span><span>KARŞILAŞMA</span><span>BOT TERCİHİ</span><span>ORAN</span><span>GÜVEN</span><span>RİSK</span><span>FORM</span><span>ANALİZ</span></div><div class="grid" id="fixtures"></div></div></section><aside class="gm-right-col"><section class="gm-card gm-league-card" id="gm-leagues"><div class="gm-section-title"><div><span class="gm-eyebrow">MATCH DISTRIBUTION</span><h2>Lig Dağılımı</h2></div><span class="gm-chip">GÜNLÜK</span></div><div id="gmLeagueBars" class="gm-league-bars"><div class="gm-empty">Fikstür yüklendiğinde gösterilecek.</div></div></section><section class="gm-card gm-coupon-card" id="gm-coupon"><div class="gm-section-title"><div><span class="gm-eyebrow">VIRTUAL PORTFOLIO</span><h2>Kupon Laboratuvarı</h2></div><span class="gm-chip">3+ MAÇ</span></div><p class="gm-coupon-explain">Sanal kuponlar ve sonuçlanmış performans. Oranlar doğrulanmadan kupona alınmaz.</p><div class="gm-coupon-tabs"><button type="button" class="gm-tab active" id="gmAutoTab">Otomatik Kupon</button><button type="button" class="gm-tab" id="gmManualTab">Manuel Seçim</button></div><div class="gm-coupon-controls"><label>Kupon sayısı <input type="number" id="gmCouponCount" min="1" max="10" value="3"></label><label>Her kupon tutarı <span>1.000 TL</span></label></div><button id="makeCoupons" type="button" class="gm-create">+ Kupon adaylarını oluştur</button><div id="bankroll" class="bankroll"></div><div id="learningStats" class="learning-stats"></div><div id="couponState" class="coupon-help">Henüz kupon oluşturulmadı.</div><div id="coupons" class="coupons"></div></section><section class="gm-card gm-performance-card"><div class="gm-section-title"><div><span class="gm-eyebrow">PERFORMANCE</span><h2>Günlük Performans</h2></div><span class="gm-chip">Sanal kayıtlar</span></div><div id="gmPerfMini" class="gm-perf-mini"><div><small>Kupon</small><strong>—</strong></div><div><small>Kazanan</small><strong>—</strong></div><div><small>Başarı</small><strong>—</strong></div></div><div class="gm-perf-note">Yalnızca sonuçlanan kuponlar değerlendirilir.</div></section><section class="gm-card gm-donut-card"><div class="gm-section-title"><div><span class="gm-eyebrow">LEAGUE BREAKDOWN</span><h2>Lig Dağılımı</h2></div></div><div class="gm-donut-layout"><div class="gm-donut" id="gmDonut"><span id="gmDonutTotal">—<small>Maç</small></span></div><div id="gmDonutLegend" class="gm-donut-legend"></div></div></section></aside></div><section class="gm-card gm-live-card"><div class="gm-section-title"><div><span class="gm-eyebrow">● LIVE</span><h2>Canlı Skorlar</h2></div><a href="/">Tüm Canlı Maçlar ↗</a></div><div id="gmLiveScores" class="gm-live-scores"><div class="gm-empty">Canlı skorlar yükleniyor…</div></div></section>
+<div class="gm-dashboard-grid"><section class="gm-main-col"><div class="gm-card gm-controls"><div class="gm-section-title"><div><span class="gm-eyebrow">MATCH CENTER</span><h2>Günlük Fikstür</h2></div><span class="gm-status"><i></i> VERİ KAYNAĞI: API</span></div><div class="gm-filters"><label>Maç günü <input id="day" type="date" min="{{today}}" max="{{last_day}}" value="{{initial_day}}"></label><button id="load">↻ Fikstürü getir</button><label>Ülke <select id="league" disabled><option value="ALL">Tüm ülkeler</option></select></label><label class="gm-search-label">Ara <input id="wsSearch" type="search" placeholder="Takım veya lig adı…"></label></div></div><div class="gm-card gm-match-panel" id="gm-fixtures"><div class="gm-section-title"><div><span class="gm-eyebrow">FIXTURE EXPLORER</span><h2>Karşılaşmalar</h2></div><span class="gm-chip" id="gmFixtureCount">Fikstür yükleniyor</span></div><p id="state" class="ws-fixture-status">Fikstür yükleniyor…</p><div class="gm-table-head"><span>SAAT / LİG</span><span>KARŞILAŞMA</span><span>BOT TERCİHİ</span><span>ORAN</span><span>GÜVEN</span><span>RİSK</span><span>FORM</span><span>ANALİZ</span></div><div class="grid" id="fixtures"></div></div></section><aside class="gm-right-col"><section class="gm-card gm-league-card" id="gm-leagues"><div class="gm-section-title"><div><span class="gm-eyebrow">MATCH DISTRIBUTION</span><h2>Lig Dağılımı</h2></div><span class="gm-chip">GÜNLÜK</span></div><div id="gmLeagueBars" class="gm-league-bars"><div class="gm-empty">Fikstür yüklendiğinde gösterilecek.</div></div></section><section class="gm-card gm-coupon-card" id="gm-coupon"><div class="gm-section-title"><div><span class="gm-eyebrow">VIRTUAL PORTFOLIO</span><h2>Kupon Laboratuvarı</h2></div><span class="gm-chip">3+ MAÇ</span></div><p class="gm-coupon-explain">Sanal kuponlar ve sonuçlanmış performans. Oranlar doğrulanmadan kupona alınmaz.</p><div class="gm-coupon-tabs"><button type="button" class="gm-tab active" id="gmAutoTab">Otomatik Kupon</button><button type="button" class="gm-tab" id="gmManualTab">Manuel Seçim</button></div><div class="gm-coupon-controls"><label>Kupon sayısı <span>Otomatik · uygun maç sayısına göre</span></label><label>Her kupon tutarı <span>1.000 TL</span></label></div><button id="makeCoupons" type="button" class="gm-create">+ Kupon adaylarını oluştur</button><div id="bankroll" class="bankroll"></div><div id="learningStats" class="learning-stats"></div><div id="couponState" class="coupon-help">Henüz kupon oluşturulmadı.</div><div id="coupons" class="coupons"></div></section><section class="gm-card gm-performance-card"><div class="gm-section-title"><div><span class="gm-eyebrow">PERFORMANCE</span><h2>Günlük Performans</h2></div><span class="gm-chip">Sanal kayıtlar</span></div><div id="gmPerfMini" class="gm-perf-mini"><div><small>Kupon</small><strong>—</strong></div><div><small>Kazanan</small><strong>—</strong></div><div><small>Başarı</small><strong>—</strong></div></div><div class="gm-perf-note">Yalnızca sonuçlanan kuponlar değerlendirilir.</div></section><section class="gm-card gm-donut-card"><div class="gm-section-title"><div><span class="gm-eyebrow">LEAGUE BREAKDOWN</span><h2>Lig Dağılımı</h2></div></div><div class="gm-donut-layout"><div class="gm-donut" id="gmDonut"><span id="gmDonutTotal">—<small>Maç</small></span></div><div id="gmDonutLegend" class="gm-donut-legend"></div></div></section></aside></div><section class="gm-card gm-live-card"><div class="gm-section-title"><div><span class="gm-eyebrow">● LIVE</span><h2>Canlı Skorlar</h2></div><a href="/">Tüm Canlı Maçlar ↗</a></div><div id="gmLiveScores" class="gm-live-scores"><div class="gm-empty">Canlı skorlar yükleniyor…</div></div></section>
 <script>
 const esc=v=>String(v??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;");
 const day=document.getElementById("day"),state=document.getElementById("state"),root=document.getElementById("fixtures"),leagueSelect=document.getElementById("league");
@@ -4605,7 +4605,7 @@ async function getJson(url){
 const couponStoreKey="golPrematchCouponsV2";
 const pickHistoryKey="golPrematchPickHistoryV4";
 const couponStake=1000;
-const couponStrategyVersion="v9.1-market-diversity";
+const couponStrategyVersion="v9.1-market-diversity"; // eski kuponları okumak için korunur
 function couponStore(){try{return JSON.parse(localStorage.getItem(couponStoreKey)||"{}")||{}}catch{return {}}}
 function saveCouponStore(store){localStorage.setItem(couponStoreKey,JSON.stringify(store))}
 function pickHistory(){try{return JSON.parse(localStorage.getItem(pickHistoryKey)||"[]")||[]}catch{return []}}
@@ -4709,66 +4709,78 @@ function candidatePool(){
   pool.sort((a,b)=>marketValueScore(b)-marketValueScore(a));
   stats.eligible=pool.length;pool.stats=stats;return pool;
 }
+// v10: Dinamik kupon portföyü. Kupon düzeyinde olasılık çarpımı veya sabit sayı yok.
+const couponStrategyVersionV10="v10-dynamic-portfolio";
 function couponRisk(probability){
   const p=Number(probability||0);
-  if(p>=0.50)return {key:"safe",label:"🟢 GÖRECELİ DÜŞÜK RİSK",risk:"DÜŞÜK"};
-  if(p>=0.35)return {key:"balanced",label:"🟡 ORTA RİSK",risk:"ORTA"};
-  if(p>=0.30)return {key:"value",label:"🔴 YÜKSEK RİSK",risk:"YÜKSEK"};
-  return {key:"none",label:"❌ NO BET",risk:"ÇOK YÜKSEK"};
+  if(p>=.70)return {key:"safe",label:"GÜÇLÜ ADAY",risk:"GÖRECELİ DÜŞÜK"};
+  if(p>=.60)return {key:"balanced",label:"DEĞER ADAYI",risk:"ORTA"};
+  return {key:"value",label:"FIRSAT ADAYI",risk:"YÜKSEK"};
+}
+function couponFamily(p){
+  const m=String(p.market||"").toUpperCase();
+  if(["HOME","AWAY","DC_1X","DC_X2"].includes(m))return "result";
+  if(m.includes("OVER")||m.includes("UNDER"))return "goals";
+  if(m.includes("BTTS")||m.includes("KG"))return "btts";
+  return "other";
+}
+function isFavoritePick(p){
+  const m=String(p.market||"").toUpperCase();
+  return ["HOME","AWAY","DC_1X","DC_X2"].includes(m)&&Number(p.modelProbability)>=.64&&Number(p.odd)>=1.30&&Number(p.odd)<=2.15;
+}
+function legQuality(p){
+  const prob=Number(p.modelProbability||0),odd=Number(p.odd||0);
+  const edge=prob-1/odd;
+  // Maç bazlı kalite. Geçmiş kupon sonuçları veya çarpılmış kupon olasılığı kullanılmaz.
+  return prob*.65+Math.min(.18,Math.max(-.15,edge))*.8+Math.min(odd,3)*.015;
 }
 function buildCoupons(){
   const store=couponStore(),existing=store[loadedDate]||[],pool=candidatePool();
-  const activeExisting=existing.filter(c=>c.status!=="VOID");
-  // Aynı gün daha önce seçilmiş maçları yeni kuponlarda tekrar kullanma.
-  const usedToday=new Set(activeExisting.flatMap(c=>(c.legs||[]).map(l=>Number(l.fixture))));
+  const usedToday=new Set(existing.filter(c=>c.status!=="VOID").flatMap(c=>(c.legs||[]).map(l=>Number(l.fixture))));
   const available=pool.filter(p=>!usedToday.has(Number(p.fixture)));
-  const combos=[];
-  // Her maç için alternatif marketleri karşılaştır; aynı kuponda 3,5 ALT en fazla bir kez.
-  // Farklı market bulunmuyorsa daha riskli bir tercih uydurmak yerine kuponu atla.
-  const under35=x=>String(x.market||"").toUpperCase()==="UNDER_3_5";
-  for(let i=0;i<available.length;i++)for(let j=i+1;j<available.length;j++)for(let k=j+1;k<available.length;k++){
-    const fixtures=[available[i],available[j],available[k]];
-    if(new Set(fixtures.map(x=>x.fixture)).size!==3)continue;
-    let bestCombo=null;
-    for(const a of fixtures[0].options)for(const b of fixtures[1].options)for(const c of fixtures[2].options){
-      const legs=[a,b,c];
-      if(legs.filter(under35).length>1)continue;
-      // Üç farklı market ailesini ödüllendir; aynı marketin üç kez tekrarını engelle.
-      const families=new Set(legs.map(x=>String(x.market||"")));
-      if(families.size<2)continue;
-      const total=legs.reduce((v,x)=>v*x.odd,1);
-      const probability=legs.reduce((v,x)=>v*x.modelProbability,1)*0.90;
-      if(total>12||probability<0.30)continue;
-      const diversityBonus=(families.size-1)*0.015;
-      const score=legs.reduce((v,x)=>v+marketValueScore(x),0)+diversityBonus;
-      if(!bestCombo||score>bestCombo.score){
-        const risk=couponRisk(probability);
-        const signature=legs.map(x=>`${x.fixture}:${x.market}`).sort().join("|");
-        const expectedReturn=couponStake*total*probability;
-        bestCombo={legs,total,probability,expectedReturn,expectedProfit:expectedReturn-couponStake,
-          expectedRoi:(expectedReturn-couponStake)/couponStake,signature,
-          score,riskKey:risk.key,riskLabel:risk.label,riskLevel:risk.risk};
-      }
-    }
-    if(bestCombo)combos.push(bestCombo);
+  // Her maç için bir tercih. Aynı maçı farklı marketle ikinci kez kullanmak da yasak.
+  const selections=available.map(p=>{
+    const options=(p.options||[p]).filter(x=>Number.isFinite(legQuality(x)));
+    const favorite=options.filter(isFavoritePick).sort((a,b)=>legQuality(b)-legQuality(a))[0];
+    const best=options.sort((a,b)=>legQuality(b)-legQuality(a))[0];
+    return best?{...best,fixture:Number(p.fixture),favoriteOption:favorite||null,qualityScore:legQuality(best)}:null;
+  }).filter(Boolean).sort((a,b)=>b.qualityScore-a.qualityScore);
+  const chosen=[],remaining=new Map(selections.map(x=>[x.fixture,x]));
+  const addCoupon=(legs,strategy)=>{
+    if(legs.length!==3||new Set(legs.map(x=>x.fixture)).size!==3)return false;
+    const total=legs.reduce((v,x)=>v*Number(x.odd),1);
+    if(!Number.isFinite(total)||total<=1)return false;
+    const signature=legs.map(x=>`${x.fixture}:${x.market}`).sort().join("|");
+    chosen.push({legs:legs.map(({favoriteOption,qualityScore,...leg})=>leg),total,signature,
+      stake:couponStake,status:"OPEN",strategy,strategyVersion:couponStrategyVersionV10,
+      created:new Date().toISOString()});
+    legs.forEach(x=>remaining.delete(x.fixture));return true;
+  };
+  // Önce bütün maç havuzuna göre dinamik hedef belirle; favoriler sadece gerçekten varsa.
+  const possible=Math.floor(remaining.size/3);
+  const favQuota=possible>=3?Math.floor(possible/3):0;
+  for(let n=0;n<favQuota;n++){
+    const favorites=[...remaining.values()].filter(x=>x.favoriteOption).map(x=>({...x.favoriteOption,fixture:x.fixture})).sort((a,b)=>legQuality(b)-legQuality(a));
+    if(favorites.length<3)break;
+    addCoupon(favorites.slice(0,3),"GÜÇLÜ FAVORİLER");
   }
-  combos.sort((a,b)=>b.score-a.score||b.probability-a.probability);
-  const chosen=[],newUse=new Set();
-  // Kupon sayısı sabit değil; maç tekrarına izin vermeyen kaliteli kombinasyonlar alınır.
-  for(const combo of combos){
-    if(combo.legs.some(l=>newUse.has(Number(l.fixture))))continue;
-    chosen.push({...combo,stake:couponStake,status:"OPEN",strategyVersion:couponStrategyVersion,created:new Date().toISOString()});
-    combo.legs.forEach(l=>newUse.add(Number(l.fixture)));
+  // Geri kalanlar kalite puanına göre dengeli ve fırsat kuponlarıdır; aynı maç tekrarlanmaz.
+  while(remaining.size>=3){
+    const candidates=[...remaining.values()].sort((a,b)=>b.qualityScore-a.qualityScore);
+    const legs=candidates.slice(0,3);
+    if(legs.length<3)break;
+    const strategy=chosen.length%2===0?"DENGELİ SEÇİMLER":"FIRSAT SEÇİMLERİ";
+    if(!addCoupon(legs,strategy))break;
   }
   if(!chosen.length){
-    saveCouponStore(store);renderCoupons(existing);
+    renderCoupons(existing);
     const s=pool.stats||{};
-    document.getElementById("couponState").textContent=`v9.1: ${s.matches||0} maç, ${s.suggestions||0} market incelendi. ${s.eligible||0} maç veri kalitesi, %60+ model olasılığı ve doğrulanmış 1.30+ oran şartlarını geçti. Tekrarsız 3 maçlı, farklı market içeren ve en az %30 temkinli model olasılığına sahip kombinasyon bulunamadı; zorla kupon üretilmedi.`;
+    document.getElementById("couponState").textContent=`${s.matches||0} analiz edilen maçtan ${s.eligible||0} uygun aday var; tekrarsız üçlü kupon için en az 3 kullanılmamış maç gerekli. Tüm fikstürün analizi tamamlanmadan havuz sınırlı kalır.`;
     return;
   }
   store[loadedDate]=[...existing,...chosen];saveCouponStore(store);renderCoupons(store[loadedDate]);
-  const safe=chosen.filter(c=>c.riskKey==="safe").length,balanced=chosen.filter(c=>c.riskKey==="balanced").length,value=chosen.filter(c=>c.riskKey==="value").length;
-  document.getElementById("couponState").textContent=`v9.1: ${chosen.length} sanal kupon oluşturuldu • 🟢 ${safe} göreceli düşük risk • 🟡 ${balanced} orta risk • 🔴 ${value} yüksek risk • toplam ${(chosen.length*couponStake).toLocaleString("tr-TR")} TL sanal bahis • her kupon 3 farklı maç. Olasılıklar kalibre edilmemiş model tahminidir.`;
+  const favorites=chosen.filter(c=>c.strategy==="GÜÇLÜ FAVORİLER").length;
+  document.getElementById("couponState").textContent=`${chosen.length} yeni kupon oluşturuldu • ${favorites} güçlü favori • ${chosen.length-favorites} dengeli/fırsat • ${chosen.length*3} farklı maç • her kupon 3 maç, 1.000 TL sanal tutar. Birlikte olasılık çarpımı kullanılmadı.`;
 }
 
 function legResult(market,h,a,hh=null,ha=null){
@@ -4860,26 +4872,25 @@ function renderCoupons(coupons){
   renderBankroll(store);
   let won=0,lost=0,legWon=0,legLost=0;
   for(const list of Object.values(store))for(const c of list||[]){
-    if(c.strategyVersion!==couponStrategyVersion)continue;
+    if(c.strategyVersion!==couponStrategyVersionV10)continue;
     if(c.status==="WON")won++;if(c.status==="LOST")lost++;
     for(const l of c.legs||[]){if(l.status==="WON")legWon++;if(l.status==="LOST")legLost++;}
   }
   const settled=won+lost,settledLegs=legWon+legLost;
   document.getElementById("couponState").textContent=coupons.length
-    ? `Bugün ${coupons.length} aktif kupon • v5.0 kupon başarısı: ${settled?Math.round(won/settled*100):0}% (${won}/${settled}) • Seçim başarısı: ${settledLegs?Math.round(legWon/settledLegs*100):0}% (${legWon}/${settledLegs})`
-    : "Bu tarih için v5.0 aktif kupon yok. Eski kuponlar performans hesabından ayrı tutuluyor.";
+    ? `Bugün ${coupons.length} aktif kupon • yeni strateji kupon başarısı: ${settled?Math.round(won/settled*100):0}% (${won}/${settled}) • Seçim başarısı: ${settledLegs?Math.round(legWon/settledLegs*100):0}% (${legWon}/${settledLegs})`
+    : "Bu tarih için yeni strateji kuponu yok. Eski kuponlar performans hesabından ayrı tutuluyor.";
   coupons.forEach((c,i)=>{
     const el=document.createElement("div");el.className="coupon";
     const status=c.status||"OPEN",statusText=status==="WON"?"TUTTU":status==="LOST"?"YATMADI":status==="VOID"?"İPTAL":"BEKLİYOR";
     const stake=Number(c.stake||couponStake),total=Number(c.total||1),potential=stake*total;
     const probability=Number(c.probability||0),expectedProfit=Number(c.expectedProfit||0);
-    const risk=couponRisk(probability);
-    const riskHtml=risk.key!=="none"?`<span class="coupon-risk ${risk.key}">${risk.label} • RİSK: ${risk.risk}</span>`:"";
+    const riskHtml=c.strategyVersion===couponStrategyVersionV10?`<span class="coupon-risk ${c.strategy==="GÜÇLÜ FAVORİLER"?"safe":"balanced"}">${esc(c.strategy||"DENGELİ SEÇİMLER")}</span>`:"";
     const couponType=c.legs?.length===2?"2 MAÇ":c.legs?.length===3?"3 MAÇ":c.legs?.length===4?"4 MAÇ":`${c.legs?.length||0} MAÇ`;
     el.innerHTML=`<div class="coupon-title">Kupon ${i+1} • <span class="${status.toLowerCase()}">${statusText}</span></div>`+
-      riskHtml+`<div class="coupon-meta"><b>${couponType}</b> • Birlikte tutma ihtimali <b>%${(probability*100).toFixed(1).replace(".",",")}</b> • Risk <b>${risk.risk}</b></div>`+
+      riskHtml+`<div class="coupon-meta"><b>${couponType}</b> • ${c.strategyVersion===couponStrategyVersionV10?"Tekrarsız maç seçimi • maç bazlı değerlendirme":"Önceki sürüm kuponu"}</div>`+
       c.legs.map(l=>`<div class="coupon-leg"><b>${esc(l.home)} — ${esc(l.away)}</b><br>${esc(l.label)} • ${Number(l.odd||0).toFixed(2)} ${esc(l.bookmaker||"")}<br>Model olasılığı %${(Number(l.modelProbability||0)*100).toFixed(1).replace(".",",")} • Değer +${Number(l.valueEdge||0).toFixed(1).replace(".",",")}%${l.historicalN?` • Market geçmişi %${(Number(l.historicalRate||0)*100).toFixed(0)} (${l.historicalN} analiz)`:""} • <span class="${String(l.status||"OPEN").toLowerCase()}">${l.status==="WON"?"TUTTU":l.status==="LOST"?"YATTI":l.status==="VOID"?"İPTAL":"AÇIK"}</span></div>`).join("")+
-      `<div class="coupon-total">Toplam oran ${total.toFixed(2)} • ${status==="VOID"?`Bahis iptal • Para ve başarı hesabına dahil değil`: `Bahis ${stake.toLocaleString("tr-TR")} TL • ${status==="OPEN"?`Potansiyel dönüş ${potential.toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`:status==="WON"?`Dönüş ${potential.toLocaleString("tr-TR",{maximumFractionDigits:0})} TL • Net +${(potential-stake).toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`:`Net -${stake.toLocaleString("tr-TR")} TL`}`}<br>${probability?`Kuponun birlikte tutma ihtimali %${(probability*100).toFixed(1).replace(".",",")} • Teorik beklenen değer ${expectedProfit>=0?"+":""}${expectedProfit.toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`:`Eski kupon • olasılık kaydı yok`}</div>`+
+      `<div class="coupon-total">Toplam oran ${total.toFixed(2)} • ${status==="VOID"?`Bahis iptal • Para ve başarı hesabına dahil değil`: `Bahis ${stake.toLocaleString("tr-TR")} TL • ${status==="OPEN"?`Potansiyel dönüş ${potential.toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`:status==="WON"?`Dönüş ${potential.toLocaleString("tr-TR",{maximumFractionDigits:0})} TL • Net +${(potential-stake).toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`:`Net -${stake.toLocaleString("tr-TR")} TL`}`}</div>`+
       `<button type="button" class="remove-coupon">Kuponu kaldır</button>`;
     root.appendChild(el);
     el.querySelector(".remove-coupon").onclick=()=>{
