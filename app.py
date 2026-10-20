@@ -3775,10 +3775,50 @@ button:hover:not(:disabled){filter:brightness(1.12);box-shadow:0 5px 18px rgba(3
 :focus-visible{outline:2px solid #5df2d5;outline-offset:3px}
 @media(max-width:760px){.pro-nav{gap:4px;padding:10px}.pro-nav .pro-brand{width:100%;margin-bottom:4px}.pro-nav a{flex:1;text-align:center;padding:9px 5px;font-size:11px}}
 
+
+/* GOL MERKEZI PRO 2.0 — complete layout overhaul, UI only */
+:root{--pro-cyan:#45e7d4;--pro-amber:#f6c778;--pro-border:rgba(95,167,199,.19)}
+html{background:#050c18!important}
+body{padding-left:254px!important;min-height:100vh!important;background:radial-gradient(ellipse 70% 55% at 85% -10%,rgba(23,91,137,.28),transparent 72%),radial-gradient(ellipse 50% 55% at 12% 55%,rgba(4,88,102,.21),transparent 76%),linear-gradient(130deg,#050c18 0%,#09182a 45%,#070f1e 100%) fixed!important;color:#e9f3ff!important}
+body:before{background-size:54px 54px!important;opacity:.36!important}
+.pro-nav{display:none!important}
+.pro-sidebar{position:fixed!important;z-index:10000!important;left:0;top:0;bottom:0;width:254px;display:flex;flex-direction:column;padding:27px 15px 20px;background:linear-gradient(175deg,rgba(13,31,49,.98),rgba(6,16,30,.99));border-right:1px solid rgba(97,169,198,.24);box-shadow:15px 0 60px rgba(0,0,0,.24)}
+.pro-identity{display:flex;align-items:center;gap:11px;color:#f1f8ff!important;text-decoration:none!important;font-size:15px;font-weight:900;letter-spacing:.045em;padding:4px 7px 30px;line-height:1.3}
+.pro-identity strong{display:block;font-size:10px;letter-spacing:.2em;color:var(--pro-cyan);margin-top:4px}
+.pro-logo{width:43px;height:43px;flex:none;display:grid;place-items:center;border-radius:14px;background:linear-gradient(135deg,#125c71,#0a294b);box-shadow:0 0 26px rgba(46,218,199,.18);font-size:23px}
+.pro-section-label{font-size:10px;letter-spacing:.18em;color:#6f93a9;font-weight:800;padding:0 12px 12px}
+.pro-sidebar>a:not(.pro-identity){display:flex;align-items:center;gap:12px;padding:15px 13px;border-radius:12px;margin-bottom:8px;text-decoration:none!important;font-size:13px;font-weight:750;color:#aec6d9;border:1px solid transparent;transition:.2s}
+.pro-sidebar>a:not(.pro-identity):hover{color:#fff;background:rgba(72,180,199,.11)}
+.pro-sidebar>a.active:not(.pro-identity){background:linear-gradient(100deg,rgba(36,198,181,.2),rgba(30,99,130,.12));color:#5df2db;border:1px solid rgba(64,221,197,.27);box-shadow:inset 3px 0 #3be3ca}
+.pro-sidebar-bottom{margin-top:auto;padding:17px 10px 4px;border-top:1px solid var(--pro-border);font-size:10px;letter-spacing:.12em;color:#b2d0df;font-weight:800}
+.pro-sidebar-bottom small{display:block;color:#7290a5;letter-spacing:0;margin-top:8px;font-weight:500}
+.pro-pulse{display:inline-block;width:8px;height:8px;border-radius:50%;background:#42e3a4;box-shadow:0 0 12px #42e3a4;margin-right:6px}
+.wrap{max-width:1600px!important;width:calc(100% - 72px)!important;margin:0 auto!important;padding-top:34px!important}
+header,.header{background:linear-gradient(110deg,rgba(16,42,65,.93),rgba(9,25,44,.91))!important;border:1px solid var(--pro-border)!important;border-radius:20px!important;padding:25px 30px!important;box-shadow:0 24px 65px rgba(0,0,0,.18)!important;margin-bottom:24px!important}
+header h1,.header h1{font-size:clamp(25px,2.6vw,38px)!important;letter-spacing:-.045em!important}
+.toolbar,.coupon-panel,.panel,.card,.match,.coupon{background:linear-gradient(145deg,rgba(17,40,61,.92),rgba(9,22,39,.94))!important;border:1px solid var(--pro-border)!important;border-radius:17px!important;box-shadow:0 16px 45px rgba(0,0,0,.19),inset 0 1px rgba(255,255,255,.035)!important}
+.toolbar{padding:22px!important;gap:15px!important;margin-bottom:16px!important}
+.coupon-panel{padding:25px!important;margin:22px 0 30px!important}
+.coupon-head h2{font-size:21px!important;letter-spacing:-.03em}
+.bankroll{gap:12px!important;margin-top:19px!important}
+.bankroll div{padding:15px!important;background:rgba(5,16,32,.63)!important;border:1px solid rgba(93,151,184,.2)!important;border-radius:13px!important}
+.bankroll b{font-size:22px!important;margin-top:9px!important}
+.grid{gap:17px!important}
+.match{padding:23px!important;transition:transform .18s,border-color .18s!important}
+.match:hover{transform:translateY(-3px);border-color:rgba(57,215,195,.43)!important}
+.teams{font-size:20px!important;letter-spacing:-.03em}
+.coupons{gap:14px!important}.coupon{padding:18px!important}
+button{background:linear-gradient(110deg,#118e7b,#0c6e83)!important;border:1px solid rgba(93,240,210,.35)!important;color:#f2fffc!important;font-weight:800!important;box-shadow:0 5px 16px rgba(3,131,121,.13)}
+button:hover:not(:disabled){box-shadow:0 7px 24px rgba(22,197,178,.27)!important}
+input,select{background:#08192b!important;border:1px solid rgba(110,171,203,.34)!important;color:#eef8ff!important}
+.meta,.hint,.coupon-help{color:#9eb8cb!important}
+@media(max-width:1100px){body{padding-left:215px!important}.pro-sidebar{width:215px}.wrap{width:calc(100% - 36px)!important}.bankroll{grid-template-columns:repeat(3,minmax(0,1fr))!important}}
+@media(max-width:760px){body{padding-left:0!important;padding-top:69px!important}.pro-sidebar{width:100%;height:69px;bottom:auto;flex-direction:row;align-items:center;padding:9px 12px;gap:5px;border-right:0;border-bottom:1px solid var(--pro-border)}.pro-identity{padding:0;margin-right:auto;font-size:11px;gap:6px}.pro-identity strong{font-size:8px}.pro-logo{width:33px;height:33px;font-size:17px}.pro-section-label,.pro-sidebar-bottom{display:none}.pro-sidebar>a:not(.pro-identity){font-size:0;padding:10px 9px;margin:0;gap:0}.pro-sidebar>a:not(.pro-identity) span{display:none}.wrap{width:calc(100% - 22px)!important;padding-top:15px!important}header,.header{padding:20px!important}.coupon-panel{padding:15px!important}.bankroll{grid-template-columns:repeat(2,minmax(0,1fr))!important}.coupons,.grid{grid-template-columns:1fr!important}}
+
 </style>
 </head>
 <body>
-<nav class="pro-nav" aria-label="Gol Merkezi ana menü"><span class="pro-brand">⚽ GOL MERKEZİ <em>PRO</em></span><a href="/" class="NAVLIVE active">● Canlı Merkez</a><a href="/tahmin" class="NAVPRE">◈ Maç Analizi & Kupon</a><a href="/radar" class="NAVRADAR">▥ Piyasa Radarı</a></nav>
+<aside class="pro-sidebar" aria-label="Ana navigasyon"><a class="pro-identity" href="/"><span class="pro-logo">⚽</span><span>GOL MERKEZİ<strong>PRO ANALYTICS</strong></span></a><div class="pro-section-label">KONTROL MERKEZİ</div><a href="/" class="NAVLIVE active">◉ <span>Canlı Gol Merkezi</span></a><a href="/tahmin" class="NAVPRE">▦ <span>Maç Analizi & Kupon</span></a><a href="/radar" class="NAVRADAR">◈ <span>Piyasa Radarı</span></a><div class="pro-sidebar-bottom"><span class="pro-pulse"></span> ANALİZ PLATFORMU <small>Gol Merkezi • Pro Workspace</small></div></aside>
 <div class="wrap">
   <div class="header">
     <div class="brand">
@@ -4367,8 +4407,48 @@ button:hover:not(:disabled){filter:brightness(1.12);box-shadow:0 5px 18px rgba(3
 :focus-visible{outline:2px solid #5df2d5;outline-offset:3px}
 @media(max-width:760px){.pro-nav{gap:4px;padding:10px}.pro-nav .pro-brand{width:100%;margin-bottom:4px}.pro-nav a{flex:1;text-align:center;padding:9px 5px;font-size:11px}}
 
+
+/* GOL MERKEZI PRO 2.0 — complete layout overhaul, UI only */
+:root{--pro-cyan:#45e7d4;--pro-amber:#f6c778;--pro-border:rgba(95,167,199,.19)}
+html{background:#050c18!important}
+body{padding-left:254px!important;min-height:100vh!important;background:radial-gradient(ellipse 70% 55% at 85% -10%,rgba(23,91,137,.28),transparent 72%),radial-gradient(ellipse 50% 55% at 12% 55%,rgba(4,88,102,.21),transparent 76%),linear-gradient(130deg,#050c18 0%,#09182a 45%,#070f1e 100%) fixed!important;color:#e9f3ff!important}
+body:before{background-size:54px 54px!important;opacity:.36!important}
+.pro-nav{display:none!important}
+.pro-sidebar{position:fixed!important;z-index:10000!important;left:0;top:0;bottom:0;width:254px;display:flex;flex-direction:column;padding:27px 15px 20px;background:linear-gradient(175deg,rgba(13,31,49,.98),rgba(6,16,30,.99));border-right:1px solid rgba(97,169,198,.24);box-shadow:15px 0 60px rgba(0,0,0,.24)}
+.pro-identity{display:flex;align-items:center;gap:11px;color:#f1f8ff!important;text-decoration:none!important;font-size:15px;font-weight:900;letter-spacing:.045em;padding:4px 7px 30px;line-height:1.3}
+.pro-identity strong{display:block;font-size:10px;letter-spacing:.2em;color:var(--pro-cyan);margin-top:4px}
+.pro-logo{width:43px;height:43px;flex:none;display:grid;place-items:center;border-radius:14px;background:linear-gradient(135deg,#125c71,#0a294b);box-shadow:0 0 26px rgba(46,218,199,.18);font-size:23px}
+.pro-section-label{font-size:10px;letter-spacing:.18em;color:#6f93a9;font-weight:800;padding:0 12px 12px}
+.pro-sidebar>a:not(.pro-identity){display:flex;align-items:center;gap:12px;padding:15px 13px;border-radius:12px;margin-bottom:8px;text-decoration:none!important;font-size:13px;font-weight:750;color:#aec6d9;border:1px solid transparent;transition:.2s}
+.pro-sidebar>a:not(.pro-identity):hover{color:#fff;background:rgba(72,180,199,.11)}
+.pro-sidebar>a.active:not(.pro-identity){background:linear-gradient(100deg,rgba(36,198,181,.2),rgba(30,99,130,.12));color:#5df2db;border:1px solid rgba(64,221,197,.27);box-shadow:inset 3px 0 #3be3ca}
+.pro-sidebar-bottom{margin-top:auto;padding:17px 10px 4px;border-top:1px solid var(--pro-border);font-size:10px;letter-spacing:.12em;color:#b2d0df;font-weight:800}
+.pro-sidebar-bottom small{display:block;color:#7290a5;letter-spacing:0;margin-top:8px;font-weight:500}
+.pro-pulse{display:inline-block;width:8px;height:8px;border-radius:50%;background:#42e3a4;box-shadow:0 0 12px #42e3a4;margin-right:6px}
+.wrap{max-width:1600px!important;width:calc(100% - 72px)!important;margin:0 auto!important;padding-top:34px!important}
+header,.header{background:linear-gradient(110deg,rgba(16,42,65,.93),rgba(9,25,44,.91))!important;border:1px solid var(--pro-border)!important;border-radius:20px!important;padding:25px 30px!important;box-shadow:0 24px 65px rgba(0,0,0,.18)!important;margin-bottom:24px!important}
+header h1,.header h1{font-size:clamp(25px,2.6vw,38px)!important;letter-spacing:-.045em!important}
+.toolbar,.coupon-panel,.panel,.card,.match,.coupon{background:linear-gradient(145deg,rgba(17,40,61,.92),rgba(9,22,39,.94))!important;border:1px solid var(--pro-border)!important;border-radius:17px!important;box-shadow:0 16px 45px rgba(0,0,0,.19),inset 0 1px rgba(255,255,255,.035)!important}
+.toolbar{padding:22px!important;gap:15px!important;margin-bottom:16px!important}
+.coupon-panel{padding:25px!important;margin:22px 0 30px!important}
+.coupon-head h2{font-size:21px!important;letter-spacing:-.03em}
+.bankroll{gap:12px!important;margin-top:19px!important}
+.bankroll div{padding:15px!important;background:rgba(5,16,32,.63)!important;border:1px solid rgba(93,151,184,.2)!important;border-radius:13px!important}
+.bankroll b{font-size:22px!important;margin-top:9px!important}
+.grid{gap:17px!important}
+.match{padding:23px!important;transition:transform .18s,border-color .18s!important}
+.match:hover{transform:translateY(-3px);border-color:rgba(57,215,195,.43)!important}
+.teams{font-size:20px!important;letter-spacing:-.03em}
+.coupons{gap:14px!important}.coupon{padding:18px!important}
+button{background:linear-gradient(110deg,#118e7b,#0c6e83)!important;border:1px solid rgba(93,240,210,.35)!important;color:#f2fffc!important;font-weight:800!important;box-shadow:0 5px 16px rgba(3,131,121,.13)}
+button:hover:not(:disabled){box-shadow:0 7px 24px rgba(22,197,178,.27)!important}
+input,select{background:#08192b!important;border:1px solid rgba(110,171,203,.34)!important;color:#eef8ff!important}
+.meta,.hint,.coupon-help{color:#9eb8cb!important}
+@media(max-width:1100px){body{padding-left:215px!important}.pro-sidebar{width:215px}.wrap{width:calc(100% - 36px)!important}.bankroll{grid-template-columns:repeat(3,minmax(0,1fr))!important}}
+@media(max-width:760px){body{padding-left:0!important;padding-top:69px!important}.pro-sidebar{width:100%;height:69px;bottom:auto;flex-direction:row;align-items:center;padding:9px 12px;gap:5px;border-right:0;border-bottom:1px solid var(--pro-border)}.pro-identity{padding:0;margin-right:auto;font-size:11px;gap:6px}.pro-identity strong{font-size:8px}.pro-logo{width:33px;height:33px;font-size:17px}.pro-section-label,.pro-sidebar-bottom{display:none}.pro-sidebar>a:not(.pro-identity){font-size:0;padding:10px 9px;margin:0;gap:0}.pro-sidebar>a:not(.pro-identity) span{display:none}.wrap{width:calc(100% - 22px)!important;padding-top:15px!important}header,.header{padding:20px!important}.coupon-panel{padding:15px!important}.bankroll{grid-template-columns:repeat(2,minmax(0,1fr))!important}.coupons,.grid{grid-template-columns:1fr!important}}
+
 </style></head><body>
-<nav class="pro-nav" aria-label="Gol Merkezi ana menü"><span class="pro-brand">⚽ GOL MERKEZİ <em>PRO</em></span><a href="/" class="NAVLIVE">● Canlı Merkez</a><a href="/tahmin" class="NAVPRE active">◈ Maç Analizi & Kupon</a><a href="/radar" class="NAVRADAR">▥ Piyasa Radarı</a></nav><div class="wrap">
+<aside class="pro-sidebar" aria-label="Ana navigasyon"><a class="pro-identity" href="/"><span class="pro-logo">⚽</span><span>GOL MERKEZİ<strong>PRO ANALYTICS</strong></span></a><div class="pro-section-label">KONTROL MERKEZİ</div><a href="/" class="NAVLIVE">◉ <span>Canlı Gol Merkezi</span></a><a href="/tahmin" class="NAVPRE active">▦ <span>Maç Analizi & Kupon</span></a><a href="/radar" class="NAVRADAR">◈ <span>Piyasa Radarı</span></a><div class="pro-sidebar-bottom"><span class="pro-pulse"></span> ANALİZ PLATFORMU <small>Gol Merkezi • Pro Workspace</small></div></aside><div class="wrap">
 <header><div><h1>📅 Maç Önü Analiz Merkezi <span class="version">v7.0</span></h1><p>Maçı araştır, senaryoları karşılaştır, gerçek oranı ayrı değerlendir.</p></div>
 <a href="/">← Canlı Gol Merkezi</a></header>
 <div class="toolbar">
@@ -4765,4 +4845,3 @@ ensure_scanner_started()
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=False)
-
