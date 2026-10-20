@@ -265,11 +265,19 @@ def choose_markets(candidates, quality):
     for c in preferred[1:]:
         if len(selected)>=2: break
         add(c)
+    # ALT marketleri SON ÇARE: önce sonuç, KG ve ÜST senaryoları.
+    # Bu tercih sırası gerçek olasılıkların değiştiği anlamına gelmez.
     if not selected:
-        fallback=sorted(candidates,key=lambda c:c['model_probability'],reverse=True)
-        for c in fallback:
-            if c['market']=='UNDER_3_5' and c['model_probability']<.80: continue
-            if add(c): break
+        non_under=[c for c in candidates if 'UNDER' not in c['market'] and
+                   c['market'] not in ('BTTS_NO',)]
+        non_under.sort(key=lambda c:c['model_probability'],reverse=True)
+        for c in non_under:
+            if c['model_probability']>=.45 and add(c): break
+    if not selected:
+        under=[c for c in candidates if 'UNDER' in c['market']]
+        under.sort(key=lambda c:c['model_probability'],reverse=True)
+        for c in under:
+            if c['model_probability']>=.60 and add(c): break
     for i,c in enumerate(selected):
         c['is_main']=i==0
         c['decision_role']=('ANA MAÇ SENARYOSU · ' if i==0 else 'ALTERNATİF · ')+c['decision_role']
