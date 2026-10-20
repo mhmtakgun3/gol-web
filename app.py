@@ -3815,6 +3815,12 @@ input,select{background:#08192b!important;border:1px solid rgba(110,171,203,.34)
 @media(max-width:1100px){body{padding-left:215px!important}.pro-sidebar{width:215px}.wrap{width:calc(100% - 36px)!important}.bankroll{grid-template-columns:repeat(3,minmax(0,1fr))!important}}
 @media(max-width:760px){body{padding-left:0!important;padding-top:69px!important}.pro-sidebar{width:100%;height:69px;bottom:auto;flex-direction:row;align-items:center;padding:9px 12px;gap:5px;border-right:0;border-bottom:1px solid var(--pro-border)}.pro-identity{padding:0;margin-right:auto;font-size:11px;gap:6px}.pro-identity strong{font-size:8px}.pro-logo{width:33px;height:33px;font-size:17px}.pro-section-label,.pro-sidebar-bottom{display:none}.pro-sidebar>a:not(.pro-identity){font-size:0;padding:10px 9px;margin:0;gap:0}.pro-sidebar>a:not(.pro-identity) span{display:none}.wrap{width:calc(100% - 22px)!important;padding-top:15px!important}header,.header{padding:20px!important}.coupon-panel{padding:15px!important}.bankroll{grid-template-columns:repeat(2,minmax(0,1fr))!important}.coupons,.grid{grid-template-columns:1fr!important}}
 
+
+/* PRO 3.0 visual depth */
+body{background:radial-gradient(ellipse 80% 55% at 72% -12%,rgba(0,194,190,.25),transparent 65%),radial-gradient(ellipse 55% 65% at 14% 76%,rgba(28,84,174,.24),transparent 70%),linear-gradient(130deg,#030916 0%,#071c32 48%,#020713 100%)!important;background-attachment:fixed!important}
+.pro-sidebar{box-shadow:18px 0 65px rgba(0,0,0,.42)!important}
+.wrap,main{position:relative}
+.card,.panel,.coupon-panel{box-shadow:0 20px 50px rgba(0,0,0,.27),inset 0 1px rgba(255,255,255,.035)!important}
 </style>
 </head>
 <body>
@@ -4447,6 +4453,12 @@ input,select{background:#08192b!important;border:1px solid rgba(110,171,203,.34)
 @media(max-width:1100px){body{padding-left:215px!important}.pro-sidebar{width:215px}.wrap{width:calc(100% - 36px)!important}.bankroll{grid-template-columns:repeat(3,minmax(0,1fr))!important}}
 @media(max-width:760px){body{padding-left:0!important;padding-top:69px!important}.pro-sidebar{width:100%;height:69px;bottom:auto;flex-direction:row;align-items:center;padding:9px 12px;gap:5px;border-right:0;border-bottom:1px solid var(--pro-border)}.pro-identity{padding:0;margin-right:auto;font-size:11px;gap:6px}.pro-identity strong{font-size:8px}.pro-logo{width:33px;height:33px;font-size:17px}.pro-section-label,.pro-sidebar-bottom{display:none}.pro-sidebar>a:not(.pro-identity){font-size:0;padding:10px 9px;margin:0;gap:0}.pro-sidebar>a:not(.pro-identity) span{display:none}.wrap{width:calc(100% - 22px)!important;padding-top:15px!important}header,.header{padding:20px!important}.coupon-panel{padding:15px!important}.bankroll{grid-template-columns:repeat(2,minmax(0,1fr))!important}.coupons,.grid{grid-template-columns:1fr!important}}
 
+
+/* PRO 3.0 visual depth */
+body{background:radial-gradient(ellipse 80% 55% at 72% -12%,rgba(0,194,190,.25),transparent 65%),radial-gradient(ellipse 55% 65% at 14% 76%,rgba(28,84,174,.24),transparent 70%),linear-gradient(130deg,#030916 0%,#071c32 48%,#020713 100%)!important;background-attachment:fixed!important}
+.pro-sidebar{box-shadow:18px 0 65px rgba(0,0,0,.42)!important}
+.wrap,main{position:relative}
+.card,.panel,.coupon-panel{box-shadow:0 20px 50px rgba(0,0,0,.27),inset 0 1px rgba(255,255,255,.035)!important}
 </style></head><body>
 <aside class="pro-sidebar" aria-label="Ana navigasyon"><a class="pro-identity" href="/"><span class="pro-logo">⚽</span><span>GOL MERKEZİ<strong>PRO ANALYTICS</strong></span></a><div class="pro-section-label">KONTROL MERKEZİ</div><a href="/" class="NAVLIVE">◉ <span>Canlı Gol Merkezi</span></a><a href="/tahmin" class="NAVPRE active">▦ <span>Maç Analizi & Kupon</span></a><a href="/radar" class="NAVRADAR">◈ <span>Piyasa Radarı</span></a><div class="pro-sidebar-bottom"><span class="pro-pulse"></span> ANALİZ PLATFORMU <small>Gol Merkezi • Pro Workspace</small></div></aside><div class="wrap">
 <header><div><h1>📅 Maç Önü Analiz Merkezi <span class="version">v7.0</span></h1><p>Maçı araştır, senaryoları karşılaştır, gerçek oranı ayrı değerlendir.</p></div>
