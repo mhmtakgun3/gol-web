@@ -3753,9 +3753,32 @@ select{
   select{min-width:0;flex:1}.grid{grid-template-columns:1fr}.title{font-size:22px}
   .card.featured.bot{grid-column:span 1}
 }
+
+/* GOL MERKEZI PRO | shared visual language, presentation-only */
+:root{--pro-ink:#e9f5ff;--pro-teal:#32e6c5;--pro-gold:#f4ca6b;--pro-line:rgba(112,173,210,.22)}
+html{scroll-behavior:smooth}
+body{background:radial-gradient(ellipse 80% 65% at 8% -8%,rgba(20,107,146,.42),transparent 65%),radial-gradient(ellipse 60% 70% at 100% 14%,rgba(23,71,129,.35),transparent 65%),linear-gradient(145deg,#030a14 0%,#08192c 48%,#040b16 100%) fixed!important;color:var(--pro-ink)!important}
+body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;opacity:.3;background-image:linear-gradient(rgba(102,184,219,.045) 1px,transparent 1px),linear-gradient(90deg,rgba(102,184,219,.045) 1px,transparent 1px);background-size:44px 44px;mask-image:linear-gradient(to bottom,#000,transparent 92%)}
+body>*,.wrap{position:relative;z-index:1}
+.pro-nav{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 16px;margin-bottom:18px;border:1px solid var(--pro-line);border-radius:17px;background:linear-gradient(110deg,rgba(15,40,63,.96),rgba(8,21,38,.93));box-shadow:0 18px 55px rgba(0,0,0,.24),inset 0 1px rgba(255,255,255,.055)}
+.pro-nav .pro-brand{font-size:15px;letter-spacing:.1em;font-weight:900;color:#f5f9ff;margin-right:auto;white-space:nowrap}
+.pro-nav .pro-brand em{font-style:normal;color:var(--pro-teal)}
+.pro-nav a{font-size:12px;font-weight:800;letter-spacing:.01em;text-decoration:none;color:#bfd2e5;padding:10px 13px;border:1px solid transparent;border-radius:10px;transition:all .15s}
+.pro-nav a:hover,.pro-nav a.active{color:#071b26;background:linear-gradient(120deg,#5df2d5,#24bdaf);border-color:#7df7dd;box-shadow:0 4px 20px rgba(37,214,186,.2)}
+.header,header,.toolbar,.coupon-panel,.match,.card,.panel,.coupon{backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
+.header,header{border-color:var(--pro-line)!important}
+.coupon-panel,.match,.card,.coupon{border-color:var(--pro-line)!important;box-shadow:0 16px 40px rgba(0,0,0,.23),inset 0 1px rgba(255,255,255,.035)!important}
+.coupon-panel{background:linear-gradient(140deg,rgba(20,43,66,.95),rgba(12,24,44,.96))!important}
+.match,.card,.coupon{background:linear-gradient(145deg,rgba(22,43,66,.95),rgba(11,22,41,.98))!important}
+button{transition:filter .18s,transform .18s,box-shadow .18s}
+button:hover:not(:disabled){filter:brightness(1.12);box-shadow:0 5px 18px rgba(38,201,169,.14)}
+:focus-visible{outline:2px solid #5df2d5;outline-offset:3px}
+@media(max-width:760px){.pro-nav{gap:4px;padding:10px}.pro-nav .pro-brand{width:100%;margin-bottom:4px}.pro-nav a{flex:1;text-align:center;padding:9px 5px;font-size:11px}}
+
 </style>
 </head>
 <body>
+<nav class="pro-nav" aria-label="Gol Merkezi ana menü"><span class="pro-brand">⚽ GOL MERKEZİ <em>PRO</em></span><a href="/" class="NAVLIVE active">● Canlı Merkez</a><a href="/tahmin" class="NAVPRE">◈ Maç Analizi & Kupon</a><a href="/radar" class="NAVRADAR">▥ Piyasa Radarı</a></nav>
 <div class="wrap">
   <div class="header">
     <div class="brand">
@@ -4322,7 +4345,30 @@ input,select{border-radius:10px;min-height:40px}
 .form div,.lineup-box{border-radius:11px}
 .hint,.odds-note{line-height:1.6}
 @media(max-width:700px){.wrap{width:calc(100% - 20px);padding-top:10px}header{padding:16px}.toolbar{padding:12px;flex-wrap:wrap}.toolbar input,.toolbar select{max-width:100%}}
-</style></head><body><div class="wrap">
+
+/* GOL MERKEZI PRO | shared visual language, presentation-only */
+:root{--pro-ink:#e9f5ff;--pro-teal:#32e6c5;--pro-gold:#f4ca6b;--pro-line:rgba(112,173,210,.22)}
+html{scroll-behavior:smooth}
+body{background:radial-gradient(ellipse 80% 65% at 8% -8%,rgba(20,107,146,.42),transparent 65%),radial-gradient(ellipse 60% 70% at 100% 14%,rgba(23,71,129,.35),transparent 65%),linear-gradient(145deg,#030a14 0%,#08192c 48%,#040b16 100%) fixed!important;color:var(--pro-ink)!important}
+body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;opacity:.3;background-image:linear-gradient(rgba(102,184,219,.045) 1px,transparent 1px),linear-gradient(90deg,rgba(102,184,219,.045) 1px,transparent 1px);background-size:44px 44px;mask-image:linear-gradient(to bottom,#000,transparent 92%)}
+body>*,.wrap{position:relative;z-index:1}
+.pro-nav{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 16px;margin-bottom:18px;border:1px solid var(--pro-line);border-radius:17px;background:linear-gradient(110deg,rgba(15,40,63,.96),rgba(8,21,38,.93));box-shadow:0 18px 55px rgba(0,0,0,.24),inset 0 1px rgba(255,255,255,.055)}
+.pro-nav .pro-brand{font-size:15px;letter-spacing:.1em;font-weight:900;color:#f5f9ff;margin-right:auto;white-space:nowrap}
+.pro-nav .pro-brand em{font-style:normal;color:var(--pro-teal)}
+.pro-nav a{font-size:12px;font-weight:800;letter-spacing:.01em;text-decoration:none;color:#bfd2e5;padding:10px 13px;border:1px solid transparent;border-radius:10px;transition:all .15s}
+.pro-nav a:hover,.pro-nav a.active{color:#071b26;background:linear-gradient(120deg,#5df2d5,#24bdaf);border-color:#7df7dd;box-shadow:0 4px 20px rgba(37,214,186,.2)}
+.header,header,.toolbar,.coupon-panel,.match,.card,.panel,.coupon{backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
+.header,header{border-color:var(--pro-line)!important}
+.coupon-panel,.match,.card,.coupon{border-color:var(--pro-line)!important;box-shadow:0 16px 40px rgba(0,0,0,.23),inset 0 1px rgba(255,255,255,.035)!important}
+.coupon-panel{background:linear-gradient(140deg,rgba(20,43,66,.95),rgba(12,24,44,.96))!important}
+.match,.card,.coupon{background:linear-gradient(145deg,rgba(22,43,66,.95),rgba(11,22,41,.98))!important}
+button{transition:filter .18s,transform .18s,box-shadow .18s}
+button:hover:not(:disabled){filter:brightness(1.12);box-shadow:0 5px 18px rgba(38,201,169,.14)}
+:focus-visible{outline:2px solid #5df2d5;outline-offset:3px}
+@media(max-width:760px){.pro-nav{gap:4px;padding:10px}.pro-nav .pro-brand{width:100%;margin-bottom:4px}.pro-nav a{flex:1;text-align:center;padding:9px 5px;font-size:11px}}
+
+</style></head><body>
+<nav class="pro-nav" aria-label="Gol Merkezi ana menü"><span class="pro-brand">⚽ GOL MERKEZİ <em>PRO</em></span><a href="/" class="NAVLIVE">● Canlı Merkez</a><a href="/tahmin" class="NAVPRE active">◈ Maç Analizi & Kupon</a><a href="/radar" class="NAVRADAR">▥ Piyasa Radarı</a></nav><div class="wrap">
 <header><div><h1>📅 Maç Önü Analiz Merkezi <span class="version">v7.0</span></h1><p>Maçı araştır, senaryoları karşılaştır, gerçek oranı ayrı değerlendir.</p></div>
 <a href="/">← Canlı Gol Merkezi</a></header>
 <div class="toolbar">
@@ -4372,7 +4418,7 @@ async function getJson(url){
 const couponStoreKey="golPrematchCouponsV2";
 const pickHistoryKey="golPrematchPickHistoryV4";
 const couponStake=1000;
-const couponStrategyVersion="v9.0-quality-diversity";
+const couponStrategyVersion="v9.1-market-diversity";
 function couponStore(){try{return JSON.parse(localStorage.getItem(couponStoreKey)||"{}")||{}}catch{return {}}}
 function saveCouponStore(store){localStorage.setItem(couponStoreKey,JSON.stringify(store))}
 function pickHistory(){try{return JSON.parse(localStorage.getItem(pickHistoryKey)||"[]")||[]}catch{return []}}
@@ -4424,7 +4470,7 @@ function candidatePool(){
   for(const [fixture,item] of analyzedMatches){
     const picks=item.analysis.all_suggestions||item.analysis.suggestions||[];
     const quality=item.analysis.data_quality||"";
-    let best=null;
+    const options=[];
     for(const pick of picks){
       stats.suggestions++;
       const odd=Number(pick.quote?.odd||0),p=Number(pick.model_probability||0);
@@ -4442,10 +4488,11 @@ function candidatePool(){
         modelProbability:p,baseModelProbability:p,impliedProbability:1/odd,
         valueEdge:edge,historicalRate:null,historicalN:0,
         odd,bookmaker:pick.quote.bookmaker||"",status:"OPEN"};
-      // Bir maç için en yüksek model olasılığına sahip uygun marketi seç.
-      if(!best||p>best.modelProbability||(p===best.modelProbability&&edge>best.valueEdge))best=candidate;
+      options.push(candidate);
     }
-    if(best)pool.push(best);
+    // Bir maçın uygun alternatiflerini sakla; yalnızca en yüksek olasılıklı markete kilitlenme.
+    options.sort((a,b)=>b.modelProbability-a.modelProbability||b.valueEdge-a.valueEdge);
+    if(options.length)pool.push({...options[0],options:options.slice(0,8)});
   }
   pool.sort((a,b)=>b.modelProbability-a.modelProbability||b.valueEdge-a.valueEdge);
   stats.eligible=pool.length;pool.stats=stats;return pool;
@@ -4464,20 +4511,34 @@ function buildCoupons(){
   const usedToday=new Set(activeExisting.flatMap(c=>(c.legs||[]).map(l=>Number(l.fixture))));
   const available=pool.filter(p=>!usedToday.has(Number(p.fixture)));
   const combos=[];
-  // Kuponlar daima 3 farklı maçtan oluşur. Model tahminleri kalibre edilmemiştir.
+  // Her maç için alternatif marketleri karşılaştır; aynı kuponda 3,5 ALT en fazla bir kez.
+  // Farklı market bulunmuyorsa daha riskli bir tercih uydurmak yerine kuponu atla.
+  const under35=x=>String(x.market||"").toUpperCase()==="UNDER_3_5";
   for(let i=0;i<available.length;i++)for(let j=i+1;j<available.length;j++)for(let k=j+1;k<available.length;k++){
-    const legs=[available[i],available[j],available[k]];
-    if(new Set(legs.map(x=>x.fixture)).size!==3)continue;
-    const total=legs.reduce((v,x)=>v*x.odd,1);
-    const probability=legs.reduce((v,x)=>v*x.modelProbability,1)*0.90;
-    if(total>12||probability<0.30)continue;
-    const risk=couponRisk(probability);
-    if(risk.key==="none")continue;
-    const signature=legs.map(x=>`${x.fixture}:${x.market}`).sort().join("|");
-    const expectedReturn=couponStake*total*probability;
-    combos.push({legs,total,probability,expectedReturn,expectedProfit:expectedReturn-couponStake,
-      expectedRoi:(expectedReturn-couponStake)/couponStake,signature,
-      score:probability*1000,riskKey:risk.key,riskLabel:risk.label,riskLevel:risk.risk});
+    const fixtures=[available[i],available[j],available[k]];
+    if(new Set(fixtures.map(x=>x.fixture)).size!==3)continue;
+    let bestCombo=null;
+    for(const a of fixtures[0].options)for(const b of fixtures[1].options)for(const c of fixtures[2].options){
+      const legs=[a,b,c];
+      if(legs.filter(under35).length>1)continue;
+      // Üç farklı market ailesini ödüllendir; aynı marketin üç kez tekrarını engelle.
+      const families=new Set(legs.map(x=>String(x.market||"")));
+      if(families.size<2)continue;
+      const total=legs.reduce((v,x)=>v*x.odd,1);
+      const probability=legs.reduce((v,x)=>v*x.modelProbability,1)*0.90;
+      if(total>12||probability<0.30)continue;
+      const diversityBonus=(families.size-1)*0.015;
+      const score=probability+diversityBonus;
+      if(!bestCombo||score>bestCombo.score){
+        const risk=couponRisk(probability);
+        const signature=legs.map(x=>`${x.fixture}:${x.market}`).sort().join("|");
+        const expectedReturn=couponStake*total*probability;
+        bestCombo={legs,total,probability,expectedReturn,expectedProfit:expectedReturn-couponStake,
+          expectedRoi:(expectedReturn-couponStake)/couponStake,signature,
+          score,riskKey:risk.key,riskLabel:risk.label,riskLevel:risk.risk};
+      }
+    }
+    if(bestCombo)combos.push(bestCombo);
   }
   combos.sort((a,b)=>b.probability-a.probability||a.total-b.total);
   const chosen=[],newUse=new Set();
@@ -4490,12 +4551,12 @@ function buildCoupons(){
   if(!chosen.length){
     saveCouponStore(store);renderCoupons(existing);
     const s=pool.stats||{};
-    document.getElementById("couponState").textContent=`v9.0: ${s.matches||0} maç, ${s.suggestions||0} market incelendi. ${s.eligible||0} maç veri kalitesi, %60+ model olasılığı ve doğrulanmış 1.30+ oran şartlarını geçti. Tekrarsız 3 maçlı, en az %30 temkinli model olasılığına sahip kombinasyon bulunamadı; zorla kupon üretilmedi.`;
+    document.getElementById("couponState").textContent=`v9.1: ${s.matches||0} maç, ${s.suggestions||0} market incelendi. ${s.eligible||0} maç veri kalitesi, %60+ model olasılığı ve doğrulanmış 1.30+ oran şartlarını geçti. Tekrarsız 3 maçlı, farklı market içeren ve en az %30 temkinli model olasılığına sahip kombinasyon bulunamadı; zorla kupon üretilmedi.`;
     return;
   }
   store[loadedDate]=[...existing,...chosen];saveCouponStore(store);renderCoupons(store[loadedDate]);
   const safe=chosen.filter(c=>c.riskKey==="safe").length,balanced=chosen.filter(c=>c.riskKey==="balanced").length,value=chosen.filter(c=>c.riskKey==="value").length;
-  document.getElementById("couponState").textContent=`v9.0: ${chosen.length} sanal kupon oluşturuldu • 🟢 ${safe} göreceli düşük risk • 🟡 ${balanced} orta risk • 🔴 ${value} yüksek risk • toplam ${(chosen.length*couponStake).toLocaleString("tr-TR")} TL sanal bahis • her kupon 3 farklı maç. Olasılıklar kalibre edilmemiş model tahminidir.`;
+  document.getElementById("couponState").textContent=`v9.1: ${chosen.length} sanal kupon oluşturuldu • 🟢 ${safe} göreceli düşük risk • 🟡 ${balanced} orta risk • 🔴 ${value} yüksek risk • toplam ${(chosen.length*couponStake).toLocaleString("tr-TR")} TL sanal bahis • her kupon 3 farklı maç. Olasılıklar kalibre edilmemiş model tahminidir.`;
 }
 
 function legResult(market,h,a,hh=null,ha=null){
@@ -4704,3 +4765,4 @@ ensure_scanner_started()
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=False)
+
