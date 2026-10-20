@@ -772,4 +772,4 @@ def radar_analysis():
 
 @radar_bp.get("/radar")
 def radar_page():
-    return render_template_string(RADAR_HTML)
+    return RADAR_HTML
