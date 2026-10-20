@@ -3885,7 +3885,7 @@ body{background:#041126!important}
 .live-analysis{border:1px solid #145077;background:linear-gradient(120deg,#092c45,#071d37);padding:12px;border-radius:10px;min-height:99px}.live-analysis strong{display:block;font-size:11px;color:#35dfff;margin-bottom:7px}.live-analysis p{font-size:11px;color:#b3c9df;margin:0 0 8px;line-height:1.45}.live-pick{display:inline-block;padding:6px 10px;background:#075547;color:#62f9c5;border-radius:7px;font-size:11px;font-weight:900}
 .live-signal{padding:14px 5px;border:1px solid #91502a;background:linear-gradient(135deg,#442016,#25152b);border-radius:10px;text-align:center}.live-signal strong{display:block;color:#ffb15b;font-size:27px}.live-signal small{font-size:9px;color:#ffc276;font-weight:900}.live-signal.high{background:linear-gradient(135deg,#51182b,#290d24);border-color:#a63251}.live-signal.high strong{color:#ff6179}.live-signal.very{background:linear-gradient(135deg,#073e2b,#092821);border-color:#0b865a}.live-signal.very strong{color:#39ec9c}
 .live-expand{border:1px solid #275c86;background:#0b2a4b;color:#d8edff;border-radius:7px;padding:8px 5px;cursor:pointer;font-size:17px}
-.live-detail{display:none;padding:18px 22px;border-top:1px solid #17466b;background:#06152b}.live-match.open .live-detail{display:grid;grid-template-columns:1fr 1fr;gap:22px}.live-detail h3{margin:0 0 10px;color:#46e4cf;font-size:13px}.live-detail p{font-size:12px;color:#b4cbe0;line-height:1.7;margin:4px 0}.live-detail .live-stat{max-width:440px}
+.live-detail{display:none;padding:18px 22px;border-top:1px solid #17466b;background:#06152b}.live-match.open .live-detail{display:grid;grid-template-columns:1fr 1fr;gap:22px}.live-detail h3{margin:0 0 10px;color:#46e4cf;font-size:13px}.live-detail p{font-size:12px;color:#b4cbe0;line-height:1.7;margin:4px 0}.live-detail .live-stat{max-width:440px}.live-pressure-old{display:flex;align-items:center;gap:7px;margin:12px 0;color:#d6eaff;font-size:13px}
 .live-filterbar{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.live-filter{background:#0a2442;border:1px solid #1a4d74;border-radius:9px;padding:11px 16px;color:#c8e0f5;font-weight:800;cursor:pointer}.live-filter.active{background:#a3ff35;color:#07162b;border-color:#a3ff35}
 @media(max-width:1500px){.live-head,.live-row{grid-template-columns:60px minmax(145px,1.3fr) 85px minmax(160px,1.1fr) minmax(175px,1.1fr) 78px 23px;gap:7px}.live-row{padding:10px}.live-stat{grid-template-columns:65px 1fr 36px}.live-analysis{padding:9px}}
 @media(max-width:1050px){.live-head{display:none}.live-row{grid-template-columns:65px minmax(155px,1fr) 88px 85px 24px}.live-row .live-stats,.live-row .live-analysis{display:none}.live-kpis{grid-template-columns:repeat(2,1fr)}.live-match.open .live-detail{grid-template-columns:1fr}}
@@ -3899,7 +3899,7 @@ body{background:#041126!important}
     <div class="brand">
       <div class="logo">⚽</div>
       <div class="brand-text">
-        <div class="title">Gol Sinyal Merkezi</div>
+        <div class="title">Canlı Maç Merkezi <span style="font-size:10px;color:#a5ff38;vertical-align:middle">YENİ TASARIM 2.1</span></div>
         <div class="subtitle">Canlı istatistiklerle en güçlü gol sinyallerini senin için bulur.</div>
       </div>
     </div>
@@ -4247,6 +4247,9 @@ function renderMatches(){
     const open=expandedLiveIds.has(id);
     const h=homeGoalsOf(m),a=awayGoalsOf(m),minute=Number(m.minute||0);
     const s=m.stats||{},recent=m.momentum_delta_5m||{};
+    const pressure=Math.max(0,Math.min(100,Number(m.momentum_score||0)));
+    const pressureLevel=Math.max(0,Math.min(5,Math.ceil(pressure/20)));
+    const pressureDots=Array.from({length:5},(_,j)=>`<span class="pressure-dot ${j<pressureLevel?'filled':''}"></span>`).join('');
     const stats=[['Şut','shots'],['İsabetli Şut','target'],['Korner','corners'],['Ceza İçi','inside']];
     const bars=stats.map(([label,key])=>{const [x,y]=liveStatPair(s,key);return liveMetric(label,x,y)}).join('');
     const score=Math.max(Number(m.signal||0),Number(m.bot_pick_score||0),Number(m.first_half_signal||0));
@@ -4258,7 +4261,7 @@ function renderMatches(){
     const homeLogo=m.home_logo?`<img src="${esc(m.home_logo)}" alt="" loading="lazy">`:'⚽';
     const awayLogo=m.away_logo?`<img src="${esc(m.away_logo)}" alt="" loading="lazy">`:'⚽';
     const reason=Number(m.momentum_score||0)>=65?'Maçta baskı ve hücum hareketliliği yüksek.':'Canlı maç istatistikleri takip ediliyor.';
-    return `<article class="live-match ${open?'open':''}" data-live-id="${esc(id)}"><div class="live-row"><div class="live-minute"><b>${minute}'</b><small>${m.status==='1H'?'1. Yarı':m.status==='2H'?'2. Yarı':esc(m.status||'Canlı')}</small></div><div><div class="live-league">🏆 ${esc(leagueLabel(m))}</div><div class="live-team">${homeLogo}<span>${esc(m.home_team||m.home||'Ev sahibi')}</span></div><div class="live-team">${awayLogo}<span>${esc(m.away_team||m.away||'Deplasman')}</span></div></div><div class="live-score"><strong>${h} - ${a}</strong><small>⏱️ ${minute}'</small></div><div class="live-stats">${bars}</div><div class="live-analysis"><strong>${esc(cat.text)}</strong><p>${esc(reason)}</p><span class="live-pick">Öneri: ${esc(pick)}</span></div><div class="live-signal ${strength}"><strong>%${Math.round(score)}</strong><small>${label}</small></div><button type="button" class="live-expand" data-toggle-live="${esc(id)}" aria-label="Maç detayını ${open?'kapat':'aç'}" aria-expanded="${open}">${open?'⌃':'⌄'}</button></div><div class="live-detail"><div><h3>⚽ Maç Detayları</h3><p><b>${esc(m.home_team||m.home||'Ev sahibi')} ${h} - ${a} ${esc(m.away_team||m.away||'Deplasman')}</b></p><p>Lig: ${esc(leagueLabel(m))} · Dakika: ${minute}'</p><p>Son 5 dk: Şut ${Number(recent.shots||0)} · İsabet ${Number(recent.target||0)} · Ceza içi ${Number(recent.inside||0)}</p><p>Gol beklentisi sinyali: ${Math.round(Number(m.signal||0))}/100 · Baskı: ${Math.round(Number(m.momentum_score||0))}/100</p></div><div><h3>📊 İstatistikler ve Bot Analizi</h3>${bars}<p><b>Tercih:</b> ${esc(pick)}</p><p>${esc(reason)} Sinyal puanı istatistiksel bir göstergedir; gerçek gol olasılığı değildir.</p>${Number(m.live_odd||0)>0?`<p>Canlı oran: ${Number(m.live_odd).toFixed(2)}</p>`:''}</div></div></article>`;
+    return `<article class="live-match ${open?'open':''}" data-live-id="${esc(id)}"><div class="live-row"><div class="live-minute"><b>${minute}'</b><small>${m.status==='1H'?'1. Yarı':m.status==='2H'?'2. Yarı':esc(m.status||'Canlı')}</small></div><div><div class="live-league">🏆 ${esc(leagueLabel(m))}</div><div class="live-team">${homeLogo}<span>${esc(m.home_team||m.home||'Ev sahibi')}</span></div><div class="live-team">${awayLogo}<span>${esc(m.away_team||m.away||'Deplasman')}</span></div></div><div class="live-score"><strong>${h} - ${a}</strong><small>⏱️ ${minute}'</small></div><div class="live-stats">${bars}</div><div class="live-analysis"><strong>${esc(cat.text)}</strong><p>${esc(reason)}</p><span class="live-pick">Öneri: ${esc(pick)}</span></div><div class="live-signal ${strength}"><strong>%${Math.round(score)}</strong><small>${label}</small></div><button type="button" class="live-expand" data-toggle-live="${esc(id)}" aria-label="Maç detayını ${open?'kapat':'aç'}" aria-expanded="${open}">${open?'⌃':'⌄'}</button></div><div class="live-detail"><div><h3>⚽ Maç Detayları</h3><p><b>${esc(m.home_team||m.home||'Ev sahibi')} ${h} - ${a} ${esc(m.away_team||m.away||'Deplasman')}</b></p><p>Lig: ${esc(leagueLabel(m))} · Dakika: ${minute}'</p><p>Son 5 dk: Şut ${Number(recent.shots||0)} · İsabet ${Number(recent.target||0)} · Ceza içi ${Number(recent.inside||0)}</p><p>Gol beklentisi sinyali: ${Math.round(Number(m.signal||0))}/100</p><div class="live-pressure-old"><b>📌 Baskı:</b> <span class="pressure-dots" aria-label="${pressureLevel}/5 baskı">${pressureDots}</span> <b>${Math.round(pressure)}/100</b></div><p>⏱️ Son 5 dk: Şut ${Number(recent.shots||0)} · İsabet ${Number(recent.target||0)} · Ceza içi ${Number(recent.inside||0)}</p></div><div><h3>📊 İstatistikler ve Bot Analizi</h3>${bars}<p><b>Tercih:</b> ${esc(pick)}</p><p>${esc(reason)} Sinyal puanı istatistiksel bir göstergedir; gerçek gol olasılığı değildir.</p>${Number(m.live_odd||0)>0?`<p>Canlı oran: ${Number(m.live_odd).toFixed(2)}</p>`:''}</div></div></article>`;
   }).join('');
   root.querySelectorAll('[data-toggle-live]').forEach(btn=>btn.onclick=()=>{
     const id=btn.dataset.toggleLive;
@@ -4455,7 +4458,11 @@ setInterval(loadAll,5000);
 
 @app.route("/")
 def index():
-    return render_template_string(PAGE)
+    from flask import make_response
+    response = make_response(render_template_string(PAGE))
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    return response
 
 PREMATCH_PAGE = r"""<!doctype html>
 <html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
