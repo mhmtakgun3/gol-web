@@ -4,6 +4,8 @@ import json
 import re
 import threading
 import fcntl
+import sqlite3
+import html
 from datetime import datetime, timedelta, date
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
@@ -50,6 +52,9 @@ REQUEST_TIMEOUT = 15
 LIVE_SNAPSHOT_FILE = "/tmp/gol_live_snapshot.json"
 SHARED_STATE_FILE = "/tmp/gol_shared_state.json"
 SCANNER_LOCK_FILE = "/tmp/gol_scanner.lock"
+# Kalıcılık için Render disk bağlanırsa GOL_DATA_DIR o diske yönlendirilmeli.
+GOL_DATA_DIR = os.getenv("GOL_DATA_DIR", "/tmp")
+PERFORMANCE_DB = os.path.join(GOL_DATA_DIR, "gol_performance.sqlite3")
 
 # Basit cache süreleri
 LIVE_CACHE_TTL = 10
@@ -267,6 +272,112 @@ scanner_start_lock = threading.Lock()
 
 
 # ============================================================
+# SUNUCU TARAFLI SİNYAL VE TARAMA KAYDI
+# ============================================================
+
+def perf_db():
+    os.makedirs(GOL_DATA_DIR, exist_ok=True)
+    conn = sqlite3.connect(PERFORMANCE_DB, timeout=10)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=10000")
+    conn.execute("""CREATE TABLE IF NOT EXISTS signal_events (
+        id INTEGER PRIMARY KEY, signal_key TEXT NOT NULL UNIQUE,
+        fixture_id INTEGER NOT NULL, home_team TEXT, away_team TEXT,
+        market TEXT NOT NULL, minute INTEGER NOT NULL,
+        home_goals INTEGER NOT NULL, away_goals INTEGER NOT NULL,
+        score INTEGER, reasons TEXT, created_at TEXT NOT NULL,
+        result TEXT DEFAULT 'OPEN', goal_minute INTEGER,
+        goal_at TEXT, checked_minute INTEGER,
+        hit_5 INTEGER DEFAULT 0, hit_10 INTEGER DEFAULT 0, hit_15 INTEGER DEFAULT 0
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS scan_events (
+        id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, live_count INTEGER,
+        eligible_count INTEGER, analyzed_count INTEGER, duration REAL,
+        error TEXT
+    )""")
+    return conn
+
+
+def record_signal(item, market, score, reasons):
+    match = item.get("match") or {}
+    fixture = safe_int(item.get("fixture_id"), 0)
+    minute = safe_int(match.get("minute"), 0)
+    hg = safe_int(match.get("home_goals"), 0)
+    ag = safe_int(match.get("away_goals"), 0)
+    if not fixture or not minute:
+        return
+    # Aynı maç, skor dönemi ve pazar için tekrar tarama yeni sinyal sayılmaz.
+    key = f"{fixture}:{hg}-{ag}:{market}"
+    try:
+        with perf_db() as db:
+            db.execute("""INSERT OR IGNORE INTO signal_events
+                (signal_key,fixture_id,home_team,away_team,market,minute,
+                 home_goals,away_goals,score,reasons,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (key,fixture,match.get("home_team"),match.get("away_team"),
+                 market,minute,hg,ag,safe_int(score),
+                 json.dumps(reasons or [],ensure_ascii=False),datetime.now().isoformat(timespec="seconds")))
+    except Exception as exc:
+        print(f"Performans sinyal kayıt hatası: {exc}",flush=True)
+
+
+def update_signal_outcomes(fixture, minute, hg, ag, finished=False):
+    try:
+        with perf_db() as db:
+            rows = db.execute("SELECT * FROM signal_events WHERE fixture_id=? AND result='OPEN'",(fixture,)).fetchall()
+            for row in rows:
+                start = row["minute"]
+                elapsed = max(0,minute-start)
+                is_fh = row["market"].startswith("İY")
+                goal = (hg+ag) > (row["home_goals"]+row["away_goals"])
+                if row["market"] == "İY 1.5 Üst":
+                    goal = hg+ag >= 2
+                if is_fh and minute > 45:
+                    # İlk yarı bitişinde son skor kesin değilse yanıltıcı sonuç üretme.
+                    finished = True
+                if goal and elapsed <= 15 and (not is_fh or minute <= 45):
+                    db.execute("""UPDATE signal_events SET result='GOAL',goal_minute=?,goal_at=?,
+                        checked_minute=?,hit_5=?,hit_10=?,hit_15=? WHERE id=?""",
+                        (minute,datetime.now().isoformat(timespec="seconds"),minute,
+                         int(elapsed<=5),int(elapsed<=10),int(elapsed<=15),row["id"]))
+                elif elapsed>=15 or finished:
+                    # 15 dakikada gol yok; bitişte gözlem süresi dolmadıysa ayrı işaretle.
+                    result = "NO_GOAL_15" if elapsed>=15 else "INCOMPLETE"
+                    db.execute("UPDATE signal_events SET result=?,checked_minute=? WHERE id=?",
+                               (result,minute,row["id"]))
+    except Exception as exc:
+        print(f"Performans sonuç kayıt hatası: {exc}",flush=True)
+
+
+def record_scan(status):
+    try:
+        with perf_db() as db:
+            db.execute("""INSERT INTO scan_events
+                (created_at,live_count,eligible_count,analyzed_count,duration,error)
+                VALUES (?,?,?,?,?,?)""",
+                (status.get("last_scan_finished"),status.get("api_live_count",0),
+                 status.get("eligible_live_count",0),status.get("analyzed_count",0),
+                 status.get("last_scan_duration"),status.get("last_scan_error")))
+            db.execute("DELETE FROM scan_events WHERE id NOT IN (SELECT id FROM scan_events ORDER BY id DESC LIMIT 1000)")
+    except Exception as exc:
+        print(f"Tarama günlüğü hatası: {exc}",flush=True)
+
+
+def performance_data():
+    with perf_db() as db:
+        signals = [dict(r) for r in db.execute("SELECT * FROM signal_events ORDER BY id DESC LIMIT 200")]
+        scans = [dict(r) for r in db.execute("SELECT * FROM scan_events ORDER BY id DESC LIMIT 80")]
+        summary = [dict(r) for r in db.execute("""SELECT market,COUNT(*) total,
+            SUM(CASE WHEN result='GOAL' THEN 1 ELSE 0 END) goals,
+            SUM(CASE WHEN result='NO_GOAL_15' THEN 1 ELSE 0 END) missed,
+            SUM(CASE WHEN result='OPEN' THEN 1 ELSE 0 END) pending,
+            SUM(hit_5) hit_5,SUM(hit_10) hit_10,SUM(hit_15) hit_15
+            FROM signal_events GROUP BY market ORDER BY market""")]
+    return {"signals":signals,"scans":scans,"summary":summary,
+            "storage":PERFORMANCE_DB,"persistent":not os.path.abspath(PERFORMANCE_DB).startswith("/tmp/")}
+
+
+# ============================================================
 # PROCESS'LER ARASI ORTAK DURUM
 # ============================================================
 
@@ -443,7 +554,7 @@ def api_headers() -> Dict[str, str]:
     }
 
 
-def api_get(path: str, params: Optional[Dict[str, Any]] = None, *, timeout=None) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+def api_get(path: str, params: Optional[Dict[str, Any]] = None) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     if not API_KEY:
         return None, "API_KEY ortam değişkeni tanımlı değil."
 
@@ -454,7 +565,7 @@ def api_get(path: str, params: Optional[Dict[str, Any]] = None, *, timeout=None)
             url,
             headers=api_headers(),
             params=params or {},
-            timeout=REQUEST_TIMEOUT if timeout is None else timeout,
+            timeout=REQUEST_TIMEOUT,
         )
 
         if response.status_code != 200:
@@ -1625,6 +1736,7 @@ def finalize_best_bot_pick() -> None:
             "created_at": datetime.now().isoformat(timespec="seconds"),
         })
 
+        record_signal(best, "BOT PICK", best.get("bot_pick_score",0), best.get("bot_pick_reasons",[]))
         if len(bot_pick_history) > 200:
             del bot_pick_history[:-200]
 
@@ -1906,6 +2018,8 @@ def analyze_match(match: Dict[str, Any]) -> bool:
     with memory_lock:
         existing = match_memory.get(int(fixture_id))
 
+    update_signal_outcomes(int(fixture_id), minute, home_goals, away_goals)
+
     # İlk görülüşte hafızaya al, sinyali ikinci taramadan itibaren üret.
     if existing is None:
         with memory_lock:
@@ -2043,6 +2157,22 @@ def analyze_match(match: Dict[str, Any]) -> bool:
         now_ts,
     )
 
+    # İY yükselen baskı: 5 dakikalık yeni hareket, mevcut temel şartları
+    # sağlayan maçlarda kontrollü ek puan verir. 1Y 1.5'te daha seçici.
+    if first_half_signal > 0 and 10 <= minute <= 35:
+        d5 = momentum.get("delta_5m") or {}
+        fresh_target = float(d5.get("target") or 0)
+        fresh_shots = float(d5.get("shots") or 0)
+        fresh_inside = float(d5.get("inside") or 0)
+        fresh_corners = float(d5.get("corners") or 0)
+        if fresh_target >= 1 and (fresh_shots >= 2 or fresh_inside >= 1):
+            bonus = 7 if home_goals + away_goals == 0 else 4
+            first_half_signal = min(100, first_half_signal + bonus)
+            first_half_reasons.append("Son 5 dakikada isabetli şut ve yükselen baskı")
+        elif fresh_shots >= 3 and fresh_inside >= 2 and fresh_corners >= 1:
+            first_half_signal = min(100, first_half_signal + 4)
+            first_half_reasons.append("Son 5 dakikada ceza sahası ve korner baskısı")
+
     bot_pick_score, bot_pick_text, bot_pick_reasons, scenario_adjustment = calculate_bot_pick(
         evaluation_total,
         normal_signal,
@@ -2128,8 +2258,12 @@ def analyze_match(match: Dict[str, Any]) -> bool:
         first_half_required = (
             FIRST_HALF_LIMIT if home_goals + away_goals == 0 else FIRST_HALF_15_LIMIT
         )
-        if first_half_signal >= first_half_required:
+        if first_half_signal >= first_half_required and 10 <= minute <= 38:
             current["first_half_sent"] = True
+            market = "İY 0.5 Üst" if home_goals + away_goals == 0 else "İY 1.5 Üst"
+            record_signal(current, market, first_half_signal, first_half_reasons)
+        if normal_signal >= SIGNAL_LIMIT:
+            record_signal(current, "Gol Radarı", normal_signal, normal_reasons)
 
     return True
 
@@ -2143,6 +2277,11 @@ def remove_finished_matches(active_fixture_ids: set):
         ]
 
         for fixture_id in stale_ids:
+            old = match_memory.get(fixture_id) or {}
+            old_match = old.get("match") or {}
+            update_signal_outcomes(fixture_id, safe_int(old_match.get("minute")),
+                                   safe_int(old_match.get("home_goals")),
+                                   safe_int(old_match.get("away_goals")), finished=True)
             for pick in bot_pick_history:
                 if pick.get("fixture_id") == fixture_id and pick.get("status") == "OPEN":
                     pick["status"] = "LOST"
@@ -2261,6 +2400,10 @@ def scanner_loop():
                 scanner_status["last_scan_finished"] = datetime.now().isoformat(timespec="seconds")
                 scanner_status["last_scan_duration"] = duration
 
+            # Tarama faaliyetleri site açık olmasa da sunucu tarafından kaydedilir.
+            with status_lock:
+                scan_log = dict(scanner_status)
+            record_scan(scan_log)
             # Tamamlanmış taramanın status + maç verisini tüm worker'lara paylaş.
             write_shared_state()
 
@@ -2298,56 +2441,24 @@ def prematch_day(raw: str) -> Optional[date]:
     return requested if today <= requested <= today + timedelta(days=7) else None
 
 
-# Fikstur/form API sorunlarinda Gunicorn worker'ini bekletmeden cevap ver.
-# Hata durumlari kisa sure saklanir; onceki basarili veri varsa korunur.
-_prematch_failures = {}
-_prematch_inflight = set()
-PREMATCH_ERROR_CACHE_SECONDS = 25
-PREMATCH_API_TIMEOUT = (3, 7)  # connect / read (saniye)
-
-
 def prematch_api_cached(key: str, path: str, params: Dict[str, Any], ttl: int
                         ) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
-    now = time.time()
     with cache_lock:
         cached = prematch_cache.get(key)
-        if cached and now - cached["ts"] < ttl:
+        if cached and time.time() - cached["ts"] < ttl:
             return cached["data"], None
-        failed = _prematch_failures.get(key)
-        if failed and now - failed["ts"] < PREMATCH_ERROR_CACHE_SECONDS:
-            if cached:
-                return cached["data"], None
-            return None, failed["error"]
-        # Birden fazla istemci ayni fiksturu ayni anda sorgulamasin.
-        if key in _prematch_inflight:
-            if cached:
-                return cached["data"], None
-            return None, "Veri su anda yukleniyor. Biraz sonra yeniden deneyin."
-        _prematch_inflight.add(key)
-
-    try:
-        data, error = api_get(path, params, timeout=PREMATCH_API_TIMEOUT)
-        if not error and data is not None:
-            response = data.get("response")
-            if not isinstance(response, list):
-                error = "Beklenmeyen API yaniti."
-            else:
-                with cache_lock:
-                    prematch_cache[key] = {"ts": time.time(), "data": response}
-                    _prematch_failures.pop(key, None)
-                    if len(prematch_cache) > 300:
-                        oldest = min(prematch_cache, key=lambda item: prematch_cache[item]["ts"])
-                        prematch_cache.pop(oldest, None)
-                return response, None
-        error = error or "Veri alinamadi."
-        with cache_lock:
-            _prematch_failures[key] = {"ts": time.time(), "error": error}
-        if cached:
-            return cached["data"], None
-        return None, error
-    finally:
-        with cache_lock:
-            _prematch_inflight.discard(key)
+    data, error = api_get(path, params)
+    if error or data is None:
+        return None, error or "Veri alınamadı."
+    response = data.get("response")
+    if not isinstance(response, list):
+        return None, "Beklenmeyen fikstür yanıtı."
+    with cache_lock:
+        prematch_cache[key] = {"ts": time.time(), "data": response}
+        if len(prematch_cache) > 300:
+            oldest = min(prematch_cache, key=lambda item: prematch_cache[item]["ts"])
+            prematch_cache.pop(oldest, None)
+    return response, None
 
 
 def prematch_fixtures(day: date) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
@@ -3016,8 +3127,6 @@ def api_prematch_fixtures():
             "id": fixture.get("id"), "kickoff": fixture.get("date"),
             "home": (teams.get("home") or {}).get("name"),
             "away": (teams.get("away") or {}).get("name"),
-            "home_logo": (teams.get("home") or {}).get("logo"),
-            "away_logo": (teams.get("away") or {}).get("logo"),
             "league_id": league.get("id"), "league": league.get("name"),
             "country": league.get("country"),
         })
@@ -3245,7 +3354,6 @@ def api_prematch_analyze():
                     value_edge_pct=round(100*(prob-1/odd),1) if odd else None,
                     expected_value=round(ev,4) if ev is not None else None,
                     coupon_eligible=bool(ev is not None and ev >= .04 and prob >= .60 and
-                                         abs(prob - 1/odd) <= .22 and
                                          analysis["data_quality"] == "good"),
                     manual_review=not bool(odd and odd >= 1.30),
                     screening_only=False,
@@ -3445,6 +3553,47 @@ def api_live_ticker():
         "snapshot_age_seconds": (round(max(0.0, time.time() - snapshot_ts), 1)
                                  if snapshot_ts else None),
     })
+
+
+@app.route("/api/performance")
+def api_performance():
+    try:
+        return jsonify({"ok":True,**performance_data()})
+    except Exception as exc:
+        return jsonify({"ok":False,"error":str(exc)}),500
+
+
+@app.route("/performans")
+def performance_page():
+    return render_template_string(r"""<!doctype html><html lang="tr"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Performans • Gol Merkezi</title>
+<style>body{margin:0;background:#071421;color:#e8f5ff;font:14px Arial,sans-serif}
+main{max-width:1200px;margin:auto;padding:25px 16px}a{color:#55dca7;text-decoration:none}
+h1{font-size:26px}.sub{color:#92aabc}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(175px,1fr));gap:12px}
+.card{background:#10273a;border:1px solid #20435b;border-radius:12px;padding:18px;margin:12px 0}
+.value{font-size:27px;font-weight:800;color:#58e2ae}.muted{color:#91aabc}
+table{width:100%;border-collapse:collapse;min-width:690px}th,td{text-align:left;border-bottom:1px solid #234357;padding:10px}
+.scroll{overflow-x:auto}.bad{color:#ff9a9a}.good{color:#58e2ae}</style></head><body><main>
+<a href="/">← Canlı Merkez'e dön</a><h1>📊 Sinyal Performansı ve Arka Plan</h1>
+<p class="sub">Gerçek sunucu kayıtları • Son 200 sinyal ve 80 tarama • 30 saniyede yenilenir</p>
+<div id="notice" class="muted">Veriler yükleniyor…</div><div id="cards" class="grid"></div>
+<section class="card"><h2>Pazar bazında sonuçlar</h2><div class="scroll"><table><thead><tr><th>Pazar</th><th>Toplam</th><th>5 dk gol</th><th>10 dk gol</th><th>15 dk gol</th><th>15 dk golsüz</th><th>Bekleyen</th></tr></thead><tbody id="summary"></tbody></table></div></section>
+<section class="card"><h2>Son sinyaller</h2><div class="scroll"><table><thead><tr><th>Maç</th><th>Tür</th><th>Dakika</th><th>Puan</th><th>Sonuç</th><th>Gol dk</th></tr></thead><tbody id="signals"></tbody></table></div></section>
+<section class="card"><h2>Arka plan tarama günlüğü</h2><div class="scroll"><table><thead><tr><th>Zaman</th><th>API maç</th><th>Uygun maç</th><th>Analiz</th><th>Süre</th><th>Hata</th></tr></thead><tbody id="scans"></tbody></table></div></section>
+</main><script>
+const esc=x=>String(x??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function load(){try{const r=await fetch('/api/performance',{cache:'no-store'});const d=await r.json();if(!d.ok)throw Error(d.error);
+const sum=d.summary||[],all=sum.reduce((n,x)=>n+x.total,0),hit=sum.reduce((n,x)=>n+x.hit_15,0),miss=sum.reduce((n,x)=>n+x.missed,0),pending=sum.reduce((n,x)=>n+x.pending,0);
+const cards=[['Toplam sinyal',all],['15 dk içinde gol',hit],['15 dk golsüz',miss],['Değerlendirilenlerde isabet',hit+miss?((hit/(hit+miss))*100).toFixed(1)+'%':'—'],['Bekleyen',pending],['Kaydedilen tarama',d.scans.length]];
+document.getElementById('cards').innerHTML=cards.map(x=>`<div class="card"><div class="muted">${x[0]}</div><div class="value">${x[1]}</div></div>`).join('');
+document.getElementById('summary').innerHTML=sum.map(x=>`<tr><td>${esc(x.market)}</td><td>${x.total}</td><td>${x.hit_5}</td><td>${x.hit_10}</td><td>${x.hit_15}</td><td>${x.missed}</td><td>${x.pending}</td></tr>`).join('')||'<tr><td colspan="7">Henüz sinyal yok</td></tr>';
+const label={GOAL:'⚽ Gol',NO_GOAL_15:'15 dk golsüz',OPEN:'Takipte',INCOMPLETE:'Eksik gözlem'};
+document.getElementById('signals').innerHTML=d.signals.map(x=>`<tr><td>${esc(x.home_team)} – ${esc(x.away_team)}</td><td>${esc(x.market)}</td><td>${x.minute}'</td><td>${x.score}</td><td>${label[x.result]||esc(x.result)}</td><td>${x.goal_minute??'—'}</td></tr>`).join('')||'<tr><td colspan="6">Henüz sinyal yok</td></tr>';
+document.getElementById('scans').innerHTML=d.scans.map(x=>`<tr><td>${esc(x.created_at)}</td><td>${x.live_count}</td><td>${x.eligible_count}</td><td>${x.analyzed_count}</td><td>${x.duration}s</td><td class="${x.error?'bad':'good'}">${esc(x.error||'Yok')}</td></tr>`).join('')||'<tr><td colspan="6">Henüz tarama kaydı yok</td></tr>';
+document.getElementById('notice').textContent=d.persistent?'Veritabanı yolu: '+d.storage:'⚠️ Veriler /tmp altında: Render yeniden başlatıldığında silinebilir. Kalıcı disk için GOL_DATA_DIR ayarla.';
+}catch(e){document.getElementById('notice').textContent='Veri alınamadı: '+e;}}
+load();setInterval(load,30000);
+</script></body></html>""")
 
 
 @app.route("/api/status")
@@ -3788,123 +3937,21 @@ select{
   select{min-width:0;flex:1}.grid{grid-template-columns:1fr}.title{font-size:22px}
   .card.featured.bot{grid-column:span 1}
 }
-
-/* GOL MERKEZI PRO | shared visual language, presentation-only */
-:root{--pro-ink:#e9f5ff;--pro-teal:#32e6c5;--pro-gold:#f4ca6b;--pro-line:rgba(112,173,210,.22)}
-html{scroll-behavior:smooth}
-body{background:radial-gradient(ellipse 80% 65% at 8% -8%,rgba(20,107,146,.42),transparent 65%),radial-gradient(ellipse 60% 70% at 100% 14%,rgba(23,71,129,.35),transparent 65%),linear-gradient(145deg,#030a14 0%,#08192c 48%,#040b16 100%) fixed!important;color:var(--pro-ink)!important}
-body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;opacity:.3;background-image:linear-gradient(rgba(102,184,219,.045) 1px,transparent 1px),linear-gradient(90deg,rgba(102,184,219,.045) 1px,transparent 1px);background-size:44px 44px;mask-image:linear-gradient(to bottom,#000,transparent 92%)}
-body>*,.wrap{position:relative;z-index:1}
-.pro-nav{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 16px;margin-bottom:18px;border:1px solid var(--pro-line);border-radius:17px;background:linear-gradient(110deg,rgba(15,40,63,.96),rgba(8,21,38,.93));box-shadow:0 18px 55px rgba(0,0,0,.24),inset 0 1px rgba(255,255,255,.055)}
-.pro-nav .pro-brand{font-size:15px;letter-spacing:.1em;font-weight:900;color:#f5f9ff;margin-right:auto;white-space:nowrap}
-.pro-nav .pro-brand em{font-style:normal;color:var(--pro-teal)}
-.pro-nav a{font-size:12px;font-weight:800;letter-spacing:.01em;text-decoration:none;color:#bfd2e5;padding:10px 13px;border:1px solid transparent;border-radius:10px;transition:all .15s}
-.pro-nav a:hover,.pro-nav a.active{color:#071b26;background:linear-gradient(120deg,#5df2d5,#24bdaf);border-color:#7df7dd;box-shadow:0 4px 20px rgba(37,214,186,.2)}
-.header,header,.toolbar,.coupon-panel,.match,.card,.panel,.coupon{backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
-.header,header{border-color:var(--pro-line)!important}
-.coupon-panel,.match,.card,.coupon{border-color:var(--pro-line)!important;box-shadow:0 16px 40px rgba(0,0,0,.23),inset 0 1px rgba(255,255,255,.035)!important}
-.coupon-panel{background:linear-gradient(140deg,rgba(20,43,66,.95),rgba(12,24,44,.96))!important}
-.match,.card,.coupon{background:linear-gradient(145deg,rgba(22,43,66,.95),rgba(11,22,41,.98))!important}
-button{transition:filter .18s,transform .18s,box-shadow .18s}
-button:hover:not(:disabled){filter:brightness(1.12);box-shadow:0 5px 18px rgba(38,201,169,.14)}
-:focus-visible{outline:2px solid #5df2d5;outline-offset:3px}
-@media(max-width:760px){.pro-nav{gap:4px;padding:10px}.pro-nav .pro-brand{width:100%;margin-bottom:4px}.pro-nav a{flex:1;text-align:center;padding:9px 5px;font-size:11px}}
-
-
-/* GOL MERKEZI PRO 2.0 — complete layout overhaul, UI only */
-:root{--pro-cyan:#45e7d4;--pro-amber:#f6c778;--pro-border:rgba(95,167,199,.19)}
-html{background:#050c18!important}
-body{padding-left:254px!important;min-height:100vh!important;background:radial-gradient(ellipse 70% 55% at 85% -10%,rgba(23,91,137,.28),transparent 72%),radial-gradient(ellipse 50% 55% at 12% 55%,rgba(4,88,102,.21),transparent 76%),linear-gradient(130deg,#050c18 0%,#09182a 45%,#070f1e 100%) fixed!important;color:#e9f3ff!important}
-body:before{background-size:54px 54px!important;opacity:.36!important}
-.pro-nav{display:none!important}
-.pro-sidebar{position:fixed!important;z-index:10000!important;left:0;top:0;bottom:0;width:254px;display:flex;flex-direction:column;padding:27px 15px 20px;background:linear-gradient(175deg,rgba(13,31,49,.98),rgba(6,16,30,.99));border-right:1px solid rgba(97,169,198,.24);box-shadow:15px 0 60px rgba(0,0,0,.24)}
-.pro-identity{display:flex;align-items:center;gap:11px;color:#f1f8ff!important;text-decoration:none!important;font-size:15px;font-weight:900;letter-spacing:.045em;padding:4px 7px 30px;line-height:1.3}
-.pro-identity strong{display:block;font-size:10px;letter-spacing:.2em;color:var(--pro-cyan);margin-top:4px}
-.pro-logo{width:43px;height:43px;flex:none;display:grid;place-items:center;border-radius:14px;background:linear-gradient(135deg,#125c71,#0a294b);box-shadow:0 0 26px rgba(46,218,199,.18);font-size:23px}
-.pro-section-label{font-size:10px;letter-spacing:.18em;color:#6f93a9;font-weight:800;padding:0 12px 12px}
-.pro-sidebar>a:not(.pro-identity){display:flex;align-items:center;gap:12px;padding:15px 13px;border-radius:12px;margin-bottom:8px;text-decoration:none!important;font-size:13px;font-weight:750;color:#aec6d9;border:1px solid transparent;transition:.2s}
-.pro-sidebar>a:not(.pro-identity):hover{color:#fff;background:rgba(72,180,199,.11)}
-.pro-sidebar>a.active:not(.pro-identity){background:linear-gradient(100deg,rgba(36,198,181,.2),rgba(30,99,130,.12));color:#5df2db;border:1px solid rgba(64,221,197,.27);box-shadow:inset 3px 0 #3be3ca}
-.pro-sidebar-bottom{margin-top:auto;padding:17px 10px 4px;border-top:1px solid var(--pro-border);font-size:10px;letter-spacing:.12em;color:#b2d0df;font-weight:800}
-.pro-sidebar-bottom small{display:block;color:#7290a5;letter-spacing:0;margin-top:8px;font-weight:500}
-.pro-pulse{display:inline-block;width:8px;height:8px;border-radius:50%;background:#42e3a4;box-shadow:0 0 12px #42e3a4;margin-right:6px}
-.wrap{max-width:1600px!important;width:calc(100% - 72px)!important;margin:0 auto!important;padding-top:34px!important}
-header,.header{background:linear-gradient(110deg,rgba(16,42,65,.93),rgba(9,25,44,.91))!important;border:1px solid var(--pro-border)!important;border-radius:20px!important;padding:25px 30px!important;box-shadow:0 24px 65px rgba(0,0,0,.18)!important;margin-bottom:24px!important}
-header h1,.header h1{font-size:clamp(25px,2.6vw,38px)!important;letter-spacing:-.045em!important}
-.toolbar,.coupon-panel,.panel,.card,.match,.coupon{background:linear-gradient(145deg,rgba(17,40,61,.92),rgba(9,22,39,.94))!important;border:1px solid var(--pro-border)!important;border-radius:17px!important;box-shadow:0 16px 45px rgba(0,0,0,.19),inset 0 1px rgba(255,255,255,.035)!important}
-.toolbar{padding:22px!important;gap:15px!important;margin-bottom:16px!important}
-.coupon-panel{padding:25px!important;margin:22px 0 30px!important}
-.coupon-head h2{font-size:21px!important;letter-spacing:-.03em}
-.bankroll{gap:12px!important;margin-top:19px!important}
-.bankroll div{padding:15px!important;background:rgba(5,16,32,.63)!important;border:1px solid rgba(93,151,184,.2)!important;border-radius:13px!important}
-.bankroll b{font-size:22px!important;margin-top:9px!important}
-.grid{gap:17px!important}
-.match{padding:23px!important;transition:transform .18s,border-color .18s!important}
-.match:hover{transform:translateY(-3px);border-color:rgba(57,215,195,.43)!important}
-.teams{font-size:20px!important;letter-spacing:-.03em}
-.coupons{gap:14px!important}.coupon{padding:18px!important}
-button{background:linear-gradient(110deg,#118e7b,#0c6e83)!important;border:1px solid rgba(93,240,210,.35)!important;color:#f2fffc!important;font-weight:800!important;box-shadow:0 5px 16px rgba(3,131,121,.13)}
-button:hover:not(:disabled){box-shadow:0 7px 24px rgba(22,197,178,.27)!important}
-input,select{background:#08192b!important;border:1px solid rgba(110,171,203,.34)!important;color:#eef8ff!important}
-.meta,.hint,.coupon-help{color:#9eb8cb!important}
-@media(max-width:1100px){body{padding-left:215px!important}.pro-sidebar{width:215px}.wrap{width:calc(100% - 36px)!important}.bankroll{grid-template-columns:repeat(3,minmax(0,1fr))!important}}
-@media(max-width:760px){body{padding-left:0!important;padding-top:69px!important}.pro-sidebar{width:100%;height:69px;bottom:auto;flex-direction:row;align-items:center;padding:9px 12px;gap:5px;border-right:0;border-bottom:1px solid var(--pro-border)}.pro-identity{padding:0;margin-right:auto;font-size:11px;gap:6px}.pro-identity strong{font-size:8px}.pro-logo{width:33px;height:33px;font-size:17px}.pro-section-label,.pro-sidebar-bottom{display:none}.pro-sidebar>a:not(.pro-identity){font-size:0;padding:10px 9px;margin:0;gap:0}.pro-sidebar>a:not(.pro-identity) span{display:none}.wrap{width:calc(100% - 22px)!important;padding-top:15px!important}header,.header{padding:20px!important}.coupon-panel{padding:15px!important}.bankroll{grid-template-columns:repeat(2,minmax(0,1fr))!important}.coupons,.grid{grid-template-columns:1fr!important}}
-
-
-/* PRO 3.0 visual depth */
-body{background:radial-gradient(ellipse 80% 55% at 72% -12%,rgba(0,194,190,.25),transparent 65%),radial-gradient(ellipse 55% 65% at 14% 76%,rgba(28,84,174,.24),transparent 70%),linear-gradient(130deg,#030916 0%,#071c32 48%,#020713 100%)!important;background-attachment:fixed!important}
-.pro-sidebar{box-shadow:18px 0 65px rgba(0,0,0,.42)!important}
-.wrap,main{position:relative}
-.card,.panel,.coupon-panel{box-shadow:0 20px 50px rgba(0,0,0,.27),inset 0 1px rgba(255,255,255,.035)!important}
-
-/* LIVE MATCH CENTER - compact stacked layout, UI-only */
-body{background:#041126!important}
-.pro-sidebar{background:#041226!important}
-.wrap{max-width:1900px!important;width:calc(100% - 42px)!important}
-.header{background:transparent!important;border:0!important;box-shadow:none!important}
-.title{font-size:29px!important}
-.toolbar{background:#071b34!important;border:1px solid #17446b!important;border-radius:14px!important;padding:12px!important}
-#leagueTabs{max-height:45px;overflow:auto;flex-wrap:nowrap!important;scrollbar-width:thin}
-#leagueTabs .tab{white-space:nowrap}
-#matches.live-stack{display:flex!important;flex-direction:column!important;gap:7px!important}
-.live-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:15px 0}
-.live-kpi{padding:15px 18px;border:1px solid #16446d;border-radius:12px;background:linear-gradient(135deg,#0b2444,#07172f);min-height:95px}
-.live-kpi small{display:block;color:#a4bdd7;font-size:11px;font-weight:850;letter-spacing:.05em}
-.live-kpi b{display:block;color:#f1f8ff;font-size:27px;margin-top:9px}
-.live-kpi:nth-child(3) b{color:#9cff38}.live-kpi:nth-child(4) b{color:#4be9d3}
-.live-head,.live-row{display:grid;grid-template-columns:75px minmax(180px,1.5fr) 95px minmax(195px,1.3fr) minmax(210px,1.35fr) 92px 25px;gap:11px;align-items:center}
-.live-head{padding:12px 16px;border:1px solid #16456d;border-radius:11px;background:#0b2546;color:#9bb7d3;font-size:10px;font-weight:900;letter-spacing:.05em;margin:14px 0 8px}
-.live-match{background:#061a33;border:1px solid #12436a;border-radius:13px;overflow:hidden;box-shadow:0 7px 24px #0002}
-.live-match.open{border-color:#267e9b}
-.live-row{padding:14px 16px;min-height:124px}
-.live-minute{text-align:center}.live-minute b{display:block;border:1px solid #167e56;background:#06472e;color:#54f7a4;border-radius:9px;padding:10px 4px;font-size:23px}.live-minute small{display:block;color:#5debb8;margin-top:6px;font-size:11px;font-weight:800}
-.live-league{font-size:10px;color:#a2b7d4;margin-bottom:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.live-team{display:flex;gap:9px;align-items:center;margin:7px 0;font-size:12px;font-weight:850}.live-team img{width:26px;height:26px;object-fit:contain}.live-team span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.live-score{text-align:center}.live-score strong{display:block;border:1px solid #195077;background:#04162b;border-radius:9px;padding:9px 3px;font-size:25px;white-space:nowrap}.live-score small{display:block;color:#91aac8;margin-top:7px;font-size:10px}
-.live-stat{display:grid;grid-template-columns:73px 1fr 43px;align-items:center;gap:5px;margin:7px 0;font-size:10px;color:#b8cce2}.live-stat .bar{display:flex;height:8px;border-radius:4px;overflow:hidden;background:#173351}.live-stat .bar i{background:#ff5074}.live-stat .bar em{background:#168dff}.live-stat strong{text-align:right;font-size:10px;color:#e6f2ff}
-.live-analysis{border:1px solid #145077;background:linear-gradient(120deg,#092c45,#071d37);padding:12px;border-radius:10px;min-height:99px}.live-analysis strong{display:block;font-size:11px;color:#35dfff;margin-bottom:7px}.live-analysis p{font-size:11px;color:#b3c9df;margin:0 0 8px;line-height:1.45}.live-pick{display:inline-block;padding:6px 10px;background:#075547;color:#62f9c5;border-radius:7px;font-size:11px;font-weight:900}
-.live-signal{padding:14px 5px;border:1px solid #91502a;background:linear-gradient(135deg,#442016,#25152b);border-radius:10px;text-align:center}.live-signal strong{display:block;color:#ffb15b;font-size:27px}.live-signal small{font-size:9px;color:#ffc276;font-weight:900}.live-signal.high{background:linear-gradient(135deg,#51182b,#290d24);border-color:#a63251}.live-signal.high strong{color:#ff6179}.live-signal.very{background:linear-gradient(135deg,#073e2b,#092821);border-color:#0b865a}.live-signal.very strong{color:#39ec9c}
-.live-expand{border:1px solid #275c86;background:#0b2a4b;color:#d8edff;border-radius:7px;padding:8px 5px;cursor:pointer;font-size:17px}
-.live-detail{display:none;padding:18px 22px;border-top:1px solid #17466b;background:#06152b}.live-match.open .live-detail{display:grid;grid-template-columns:1fr 1fr;gap:22px}.live-detail h3{margin:0 0 10px;color:#46e4cf;font-size:13px}.live-detail p{font-size:12px;color:#b4cbe0;line-height:1.7;margin:4px 0}.live-detail .live-stat{max-width:440px}.live-pressure-old{display:flex;align-items:center;gap:7px;margin:12px 0;color:#d6eaff;font-size:13px}
-.live-filterbar{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.live-filter{background:#0a2442;border:1px solid #1a4d74;border-radius:9px;padding:11px 16px;color:#c8e0f5;font-weight:800;cursor:pointer}.live-filter.active{background:#a3ff35;color:#07162b;border-color:#a3ff35}
-@media(max-width:1500px){.live-head,.live-row{grid-template-columns:60px minmax(145px,1.3fr) 85px minmax(160px,1.1fr) minmax(175px,1.1fr) 78px 23px;gap:7px}.live-row{padding:10px}.live-stat{grid-template-columns:65px 1fr 36px}.live-analysis{padding:9px}}
-@media(max-width:1050px){.live-head{display:none}.live-row{grid-template-columns:65px minmax(155px,1fr) 88px 85px 24px}.live-row .live-stats,.live-row .live-analysis{display:none}.live-kpis{grid-template-columns:repeat(2,1fr)}.live-match.open .live-detail{grid-template-columns:1fr}}
-@media(max-width:600px){.wrap{width:calc(100% - 16px)!important}.live-row{grid-template-columns:47px minmax(100px,1fr) 65px 62px 20px;gap:5px}.live-minute b{font-size:15px}.live-team{font-size:10px}.live-score strong{font-size:16px}.live-signal strong{font-size:17px}.live-kpi{padding:10px}.live-kpi b{font-size:21px}}
 </style>
 </head>
 <body>
-<aside class="pro-sidebar" aria-label="Ana navigasyon"><a class="pro-identity" href="/"><span class="pro-logo">⚽</span><span>GOL MERKEZİ<strong>PRO ANALYTICS</strong></span></a><div class="pro-section-label">KONTROL MERKEZİ</div><a href="/" class="NAVLIVE active">◉ <span>Canlı Gol Merkezi</span></a><a href="/tahmin" class="NAVPRE">▦ <span>Maç Analizi & Kupon</span></a><a href="/radar" class="NAVRADAR">◈ <span>Piyasa Radarı</span></a><div class="pro-sidebar-bottom"><span class="pro-pulse"></span> ANALİZ PLATFORMU <small>Gol Merkezi • Pro Workspace</small></div></aside>
 <div class="wrap">
   <div class="header">
     <div class="brand">
       <div class="logo">⚽</div>
       <div class="brand-text">
-        <div class="title">Canlı Maç Merkezi <span style="font-size:10px;color:#a5ff38;vertical-align:middle">YENİ TASARIM 2.1</span></div>
+        <div class="title">Gol Sinyal Merkezi</div>
         <div class="subtitle">Canlı istatistiklerle en güçlü gol sinyallerini senin için bulur.</div>
       </div>
     </div>
 
     <div class="header-right">
+      <a class="info-pill" href="/performans" style="text-decoration:none;color:inherit">📊 Performans</a>
       <a class="info-pill" href="/tahmin" style="text-decoration:none;color:inherit">📅 Maç Önü Tahminleri</a>
       <div class="status-pill" id="systemState">● Sistem Aktif</div>
       <div class="info-pill" id="lastScan">Son güncelleme: -</div>
@@ -3915,7 +3962,7 @@ body{background:#041126!important}
 
   <div id="errorBox"></div>
 
-  <div class="live-kpis" id="liveKpis"><div class="live-kpi"><small>⚽ CANLI MAÇ</small><b>—</b></div><div class="live-kpi"><small>🎯 ANALİZ EDİLEN</small><b>—</b></div><div class="live-kpi"><small>🔥 GOL SİNYALİ</small><b>—</b></div><div class="live-kpi"><small>⭐ ÇOK GÜÇLÜ</small><b>—</b></div></div><div class="live-filterbar" id="liveFilterBar"><button class="live-filter active" data-live-filter="all">Tüm Maçlar</button><button class="live-filter" data-live-filter="signal">🔥 Gol Sinyali</button><button class="live-filter" data-live-filter="first">⏱️ 1. Yarı</button><button class="live-filter" data-live-filter="second">⏱️ 2. Yarı</button><button class="live-filter" data-live-filter="very">⭐ Çok Güçlü</button></div><div class="toolbar">
+  <div class="toolbar">
     <div class="tabs" id="leagueTabs">
       <button class="tab active" data-league="ALL">Tümü</button>
     </div>
@@ -3930,7 +3977,7 @@ body{background:#041126!important}
     </div>
   </div>
 
-  <div class="live-head"><span>DAKİKA</span><span>MAÇ</span><span>SKOR</span><span>İSTATİSTİKLER</span><span>BOT ANALİZİ</span><span>SİNYAL</span><span>DETAY</span></div><div class="live-stack" id="matches"></div>
+  <div class="grid" id="matches"></div>
 
   <div class="footer">
     <div class="legend">
@@ -4211,70 +4258,6 @@ function renderMatches(){
   root.innerHTML=html;
 }
 
-
-// Live Center 2.0: rendering only; existing scanner, notifications and ticker stay intact.
-let liveFilter="all";
-const expandedLiveIds=new Set();
-function liveMetric(label,a,b){
-  a=Math.max(0,Number(a||0));b=Math.max(0,Number(b||0));
-  const total=a+b;const share=total?Math.round(a/total*100):50;
-  return `<div class="live-stat"><span>${esc(label)}</span><div class="bar"><i style="width:${share}%"></i><em style="width:${100-share}%"></em></div><strong>${a} | ${b}</strong></div>`;
-}
-function liveStatPair(s,key){
-  const val=s?.[key];
-  if(s?.home && s?.away && (key in s.home || key in s.away))return [Number(s.home[key]||0),Number(s.away[key]||0)];
-  if(Array.isArray(val))return [Number(val[0]||0),Number(val[1]||0)];
-  if(val&&typeof val==='object')return [Number(val.home??val.h??0),Number(val.away??val.a??0)];
-  return [Number(val||0),0];
-}
-function renderMatches(){
-  const root=document.getElementById('matches');
-  const all=currentMatches||[];
-  const strong=m=>Math.max(Number(m.signal||0),Number(m.bot_pick_score||0),Number(m.first_half_signal||0));
-  const signalCount=all.filter(m=>strong(m)>=65).length;
-  const veryCount=all.filter(m=>strong(m)>=80).length;
-  const k=document.getElementById('liveKpis');
-  if(k)k.innerHTML=`<div class="live-kpi"><small>⚽ CANLI MAÇ</small><b>${all.length}</b></div><div class="live-kpi"><small>🎯 ANALİZ EDİLEN</small><b>${all.length}</b></div><div class="live-kpi"><small>🔥 GOL SİNYALİ</small><b>${signalCount}</b></div><div class="live-kpi"><small>⭐ ÇOK GÜÇLÜ</small><b>${veryCount}</b></div>`;
-  let list=all.filter(m=>currentLeague==='ALL'||leagueLabel(m)===currentLeague);
-  if(liveFilter==='signal')list=list.filter(m=>strong(m)>=65);
-  if(liveFilter==='very')list=list.filter(m=>strong(m)>=80);
-  if(liveFilter==='first')list=list.filter(m=>m.status==='1H');
-  if(liveFilter==='second')list=list.filter(m=>m.status==='2H');
-  list=sortMatches(list);
-  if(!list.length){root.innerHTML='<div class="empty">Bu filtrede gösterilecek canlı maç bulunmuyor.</div>';return;}
-  root.innerHTML=list.map((m,i)=>{
-    const id=String(m.fixture_id??('row'+i));
-    const open=expandedLiveIds.has(id);
-    const h=homeGoalsOf(m),a=awayGoalsOf(m),minute=Number(m.minute||0);
-    const s=m.stats||{},recent=m.momentum_delta_5m||{};
-    const pressure=Math.max(0,Math.min(100,Number(m.momentum_score||0)));
-    const pressureLevel=Math.max(0,Math.min(5,Math.ceil(pressure/20)));
-    const pressureDots=Array.from({length:5},(_,j)=>`<span class="pressure-dot ${j<pressureLevel?'filled':''}"></span>`).join('');
-    const stats=[['Şut','shots'],['İsabetli Şut','target'],['Korner','corners'],['Ceza İçi','inside']];
-    const bars=stats.map(([label,key])=>{const [x,y]=liveStatPair(s,key);return liveMetric(label,x,y)}).join('');
-    const score=Math.max(Number(m.signal||0),Number(m.bot_pick_score||0),Number(m.first_half_signal||0));
-    const cat=categoryFor(m);
-    const fh=firstHalfMarket(m);
-    const pick=m.bot_pick_best&&m.bot_pick_text?String(m.bot_pick_text):fh&&Number(m.first_half_signal||0)>=Number(m.first_half_limit||65)?`İY ${fh} ÜST`:Number(m.btts_signal||0)>=70&&!bttsDoneOf(m)?'KG VAR':score>=65?`${(h+a+.5).toFixed(1).replace('.',',')} ÜST`:'Takip ediliyor';
-    const strength=score>=80?'very':score>=70?'high':'';
-    const label=score>=80?'ÇOK GÜÇLÜ':score>=65?'GOL SİNYALİ':'TAKİP';
-    const homeLogo=m.home_logo?`<img src="${esc(m.home_logo)}" alt="" loading="lazy">`:'⚽';
-    const awayLogo=m.away_logo?`<img src="${esc(m.away_logo)}" alt="" loading="lazy">`:'⚽';
-    const reason=Number(m.momentum_score||0)>=65?'Maçta baskı ve hücum hareketliliği yüksek.':'Canlı maç istatistikleri takip ediliyor.';
-    return `<article class="live-match ${open?'open':''}" data-live-id="${esc(id)}"><div class="live-row"><div class="live-minute"><b>${minute}'</b><small>${m.status==='1H'?'1. Yarı':m.status==='2H'?'2. Yarı':esc(m.status||'Canlı')}</small></div><div><div class="live-league">🏆 ${esc(leagueLabel(m))}</div><div class="live-team">${homeLogo}<span>${esc(m.home_team||m.home||'Ev sahibi')}</span></div><div class="live-team">${awayLogo}<span>${esc(m.away_team||m.away||'Deplasman')}</span></div></div><div class="live-score"><strong>${h} - ${a}</strong><small>⏱️ ${minute}'</small></div><div class="live-stats">${bars}</div><div class="live-analysis"><strong>${esc(cat.text)}</strong><p>${esc(reason)}</p><span class="live-pick">Öneri: ${esc(pick)}</span></div><div class="live-signal ${strength}"><strong>%${Math.round(score)}</strong><small>${label}</small></div><button type="button" class="live-expand" data-toggle-live="${esc(id)}" aria-label="Maç detayını ${open?'kapat':'aç'}" aria-expanded="${open}">${open?'⌃':'⌄'}</button></div><div class="live-detail"><div><h3>⚽ Maç Detayları</h3><p><b>${esc(m.home_team||m.home||'Ev sahibi')} ${h} - ${a} ${esc(m.away_team||m.away||'Deplasman')}</b></p><p>Lig: ${esc(leagueLabel(m))} · Dakika: ${minute}'</p><p>Son 5 dk: Şut ${Number(recent.shots||0)} · İsabet ${Number(recent.target||0)} · Ceza içi ${Number(recent.inside||0)}</p><p>Gol beklentisi sinyali: ${Math.round(Number(m.signal||0))}/100</p><div class="live-pressure-old"><b>📌 Baskı:</b> <span class="pressure-dots" aria-label="${pressureLevel}/5 baskı">${pressureDots}</span> <b>${Math.round(pressure)}/100</b></div><p>⏱️ Son 5 dk: Şut ${Number(recent.shots||0)} · İsabet ${Number(recent.target||0)} · Ceza içi ${Number(recent.inside||0)}</p></div><div><h3>📊 İstatistikler ve Bot Analizi</h3>${bars}<p><b>Tercih:</b> ${esc(pick)}</p><p>${esc(reason)} Sinyal puanı istatistiksel bir göstergedir; gerçek gol olasılığı değildir.</p>${Number(m.live_odd||0)>0?`<p>Canlı oran: ${Number(m.live_odd).toFixed(2)}</p>`:''}</div></div></article>`;
-  }).join('');
-  root.querySelectorAll('[data-toggle-live]').forEach(btn=>btn.onclick=()=>{
-    const id=btn.dataset.toggleLive;
-    if(expandedLiveIds.has(id))expandedLiveIds.delete(id);else expandedLiveIds.add(id);
-    renderMatches();
-  });
-}
-document.querySelectorAll('[data-live-filter]').forEach(btn=>btn.addEventListener('click',()=>{
-  liveFilter=btn.dataset.liveFilter;
-  document.querySelectorAll('[data-live-filter]').forEach(b=>b.classList.toggle('active',b===btn));
-  renderMatches();
-}));
-
 function goalMinuteText(goal,fallback){
   if(!goal) return `${Number(fallback||0)}'`;
   const minute=Number(goal.minute||fallback||0),extra=Number(goal.extra||0);
@@ -4458,11 +4441,7 @@ setInterval(loadAll,5000);
 
 @app.route("/")
 def index():
-    from flask import make_response
-    response = make_response(render_template_string(PAGE))
-    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-    response.headers["Pragma"] = "no-cache"
-    return response
+    return render_template_string(PAGE)
 
 PREMATCH_PAGE = r"""<!doctype html>
 <html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -4528,154 +4507,25 @@ input,select{border-radius:10px;min-height:40px}
 .form div,.lineup-box{border-radius:11px}
 .hint,.odds-note{line-height:1.6}
 @media(max-width:700px){.wrap{width:calc(100% - 20px);padding-top:10px}header{padding:16px}.toolbar{padding:12px;flex-wrap:wrap}.toolbar input,.toolbar select{max-width:100%}}
-
-/* GOL MERKEZI PRO | shared visual language, presentation-only */
-:root{--pro-ink:#e9f5ff;--pro-teal:#32e6c5;--pro-gold:#f4ca6b;--pro-line:rgba(112,173,210,.22)}
-html{scroll-behavior:smooth}
-body{background:radial-gradient(ellipse 80% 65% at 8% -8%,rgba(20,107,146,.42),transparent 65%),radial-gradient(ellipse 60% 70% at 100% 14%,rgba(23,71,129,.35),transparent 65%),linear-gradient(145deg,#030a14 0%,#08192c 48%,#040b16 100%) fixed!important;color:var(--pro-ink)!important}
-body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;opacity:.3;background-image:linear-gradient(rgba(102,184,219,.045) 1px,transparent 1px),linear-gradient(90deg,rgba(102,184,219,.045) 1px,transparent 1px);background-size:44px 44px;mask-image:linear-gradient(to bottom,#000,transparent 92%)}
-body>*,.wrap{position:relative;z-index:1}
-.pro-nav{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 16px;margin-bottom:18px;border:1px solid var(--pro-line);border-radius:17px;background:linear-gradient(110deg,rgba(15,40,63,.96),rgba(8,21,38,.93));box-shadow:0 18px 55px rgba(0,0,0,.24),inset 0 1px rgba(255,255,255,.055)}
-.pro-nav .pro-brand{font-size:15px;letter-spacing:.1em;font-weight:900;color:#f5f9ff;margin-right:auto;white-space:nowrap}
-.pro-nav .pro-brand em{font-style:normal;color:var(--pro-teal)}
-.pro-nav a{font-size:12px;font-weight:800;letter-spacing:.01em;text-decoration:none;color:#bfd2e5;padding:10px 13px;border:1px solid transparent;border-radius:10px;transition:all .15s}
-.pro-nav a:hover,.pro-nav a.active{color:#071b26;background:linear-gradient(120deg,#5df2d5,#24bdaf);border-color:#7df7dd;box-shadow:0 4px 20px rgba(37,214,186,.2)}
-.header,header,.toolbar,.coupon-panel,.match,.card,.panel,.coupon{backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
-.header,header{border-color:var(--pro-line)!important}
-.coupon-panel,.match,.card,.coupon{border-color:var(--pro-line)!important;box-shadow:0 16px 40px rgba(0,0,0,.23),inset 0 1px rgba(255,255,255,.035)!important}
-.coupon-panel{background:linear-gradient(140deg,rgba(20,43,66,.95),rgba(12,24,44,.96))!important}
-.match,.card,.coupon{background:linear-gradient(145deg,rgba(22,43,66,.95),rgba(11,22,41,.98))!important}
-button{transition:filter .18s,transform .18s,box-shadow .18s}
-button:hover:not(:disabled){filter:brightness(1.12);box-shadow:0 5px 18px rgba(38,201,169,.14)}
-:focus-visible{outline:2px solid #5df2d5;outline-offset:3px}
-@media(max-width:760px){.pro-nav{gap:4px;padding:10px}.pro-nav .pro-brand{width:100%;margin-bottom:4px}.pro-nav a{flex:1;text-align:center;padding:9px 5px;font-size:11px}}
-
-
-/* GOL MERKEZI PRO 2.0 — complete layout overhaul, UI only */
-:root{--pro-cyan:#45e7d4;--pro-amber:#f6c778;--pro-border:rgba(95,167,199,.19)}
-html{background:#050c18!important}
-body{padding-left:254px!important;min-height:100vh!important;background:radial-gradient(ellipse 70% 55% at 85% -10%,rgba(23,91,137,.28),transparent 72%),radial-gradient(ellipse 50% 55% at 12% 55%,rgba(4,88,102,.21),transparent 76%),linear-gradient(130deg,#050c18 0%,#09182a 45%,#070f1e 100%) fixed!important;color:#e9f3ff!important}
-body:before{background-size:54px 54px!important;opacity:.36!important}
-.pro-nav{display:none!important}
-.pro-sidebar{position:fixed!important;z-index:10000!important;left:0;top:0;bottom:0;width:254px;display:flex;flex-direction:column;padding:27px 15px 20px;background:linear-gradient(175deg,rgba(13,31,49,.98),rgba(6,16,30,.99));border-right:1px solid rgba(97,169,198,.24);box-shadow:15px 0 60px rgba(0,0,0,.24)}
-.pro-identity{display:flex;align-items:center;gap:11px;color:#f1f8ff!important;text-decoration:none!important;font-size:15px;font-weight:900;letter-spacing:.045em;padding:4px 7px 30px;line-height:1.3}
-.pro-identity strong{display:block;font-size:10px;letter-spacing:.2em;color:var(--pro-cyan);margin-top:4px}
-.pro-logo{width:43px;height:43px;flex:none;display:grid;place-items:center;border-radius:14px;background:linear-gradient(135deg,#125c71,#0a294b);box-shadow:0 0 26px rgba(46,218,199,.18);font-size:23px}
-.pro-section-label{font-size:10px;letter-spacing:.18em;color:#6f93a9;font-weight:800;padding:0 12px 12px}
-.pro-sidebar>a:not(.pro-identity){display:flex;align-items:center;gap:12px;padding:15px 13px;border-radius:12px;margin-bottom:8px;text-decoration:none!important;font-size:13px;font-weight:750;color:#aec6d9;border:1px solid transparent;transition:.2s}
-.pro-sidebar>a:not(.pro-identity):hover{color:#fff;background:rgba(72,180,199,.11)}
-.pro-sidebar>a.active:not(.pro-identity){background:linear-gradient(100deg,rgba(36,198,181,.2),rgba(30,99,130,.12));color:#5df2db;border:1px solid rgba(64,221,197,.27);box-shadow:inset 3px 0 #3be3ca}
-.pro-sidebar-bottom{margin-top:auto;padding:17px 10px 4px;border-top:1px solid var(--pro-border);font-size:10px;letter-spacing:.12em;color:#b2d0df;font-weight:800}
-.pro-sidebar-bottom small{display:block;color:#7290a5;letter-spacing:0;margin-top:8px;font-weight:500}
-.pro-pulse{display:inline-block;width:8px;height:8px;border-radius:50%;background:#42e3a4;box-shadow:0 0 12px #42e3a4;margin-right:6px}
-.wrap{max-width:1600px!important;width:calc(100% - 72px)!important;margin:0 auto!important;padding-top:34px!important}
-header,.header{background:linear-gradient(110deg,rgba(16,42,65,.93),rgba(9,25,44,.91))!important;border:1px solid var(--pro-border)!important;border-radius:20px!important;padding:25px 30px!important;box-shadow:0 24px 65px rgba(0,0,0,.18)!important;margin-bottom:24px!important}
-header h1,.header h1{font-size:clamp(25px,2.6vw,38px)!important;letter-spacing:-.045em!important}
-.toolbar,.coupon-panel,.panel,.card,.match,.coupon{background:linear-gradient(145deg,rgba(17,40,61,.92),rgba(9,22,39,.94))!important;border:1px solid var(--pro-border)!important;border-radius:17px!important;box-shadow:0 16px 45px rgba(0,0,0,.19),inset 0 1px rgba(255,255,255,.035)!important}
-.toolbar{padding:22px!important;gap:15px!important;margin-bottom:16px!important}
-.coupon-panel{padding:25px!important;margin:22px 0 30px!important}
-.coupon-head h2{font-size:21px!important;letter-spacing:-.03em}
-.bankroll{gap:12px!important;margin-top:19px!important}
-.bankroll div{padding:15px!important;background:rgba(5,16,32,.63)!important;border:1px solid rgba(93,151,184,.2)!important;border-radius:13px!important}
-.bankroll b{font-size:22px!important;margin-top:9px!important}
-.grid{gap:17px!important}
-.match{padding:23px!important;transition:transform .18s,border-color .18s!important}
-.match:hover{transform:translateY(-3px);border-color:rgba(57,215,195,.43)!important}
-.teams{font-size:20px!important;letter-spacing:-.03em}
-.coupons{gap:14px!important}.coupon{padding:18px!important}
-button{background:linear-gradient(110deg,#118e7b,#0c6e83)!important;border:1px solid rgba(93,240,210,.35)!important;color:#f2fffc!important;font-weight:800!important;box-shadow:0 5px 16px rgba(3,131,121,.13)}
-button:hover:not(:disabled){box-shadow:0 7px 24px rgba(22,197,178,.27)!important}
-input,select{background:#08192b!important;border:1px solid rgba(110,171,203,.34)!important;color:#eef8ff!important}
-.meta,.hint,.coupon-help{color:#9eb8cb!important}
-@media(max-width:1100px){body{padding-left:215px!important}.pro-sidebar{width:215px}.wrap{width:calc(100% - 36px)!important}.bankroll{grid-template-columns:repeat(3,minmax(0,1fr))!important}}
-@media(max-width:760px){body{padding-left:0!important;padding-top:69px!important}.pro-sidebar{width:100%;height:69px;bottom:auto;flex-direction:row;align-items:center;padding:9px 12px;gap:5px;border-right:0;border-bottom:1px solid var(--pro-border)}.pro-identity{padding:0;margin-right:auto;font-size:11px;gap:6px}.pro-identity strong{font-size:8px}.pro-logo{width:33px;height:33px;font-size:17px}.pro-section-label,.pro-sidebar-bottom{display:none}.pro-sidebar>a:not(.pro-identity){font-size:0;padding:10px 9px;margin:0;gap:0}.pro-sidebar>a:not(.pro-identity) span{display:none}.wrap{width:calc(100% - 22px)!important;padding-top:15px!important}header,.header{padding:20px!important}.coupon-panel{padding:15px!important}.bankroll{grid-template-columns:repeat(2,minmax(0,1fr))!important}.coupons,.grid{grid-template-columns:1fr!important}}
-
-
-/* PRO 3.0 visual depth */
-body{background:radial-gradient(ellipse 80% 55% at 72% -12%,rgba(0,194,190,.25),transparent 65%),radial-gradient(ellipse 55% 65% at 14% 76%,rgba(28,84,174,.24),transparent 70%),linear-gradient(130deg,#030916 0%,#071c32 48%,#020713 100%)!important;background-attachment:fixed!important}
-.pro-sidebar{box-shadow:18px 0 65px rgba(0,0,0,.42)!important}
-.wrap,main{position:relative}
-.card,.panel,.coupon-panel{box-shadow:0 20px 50px rgba(0,0,0,.27),inset 0 1px rgba(255,255,255,.035)!important}
-
-/* GOL MERKEZI PRO / Prematch Workspace 4.0 — structural redesign */
-:root{--ws-mint:#50efd4;--ws-blue:#4ca8f5;--ws-gold:#f4c66e;--ws-muted:#9bb6c9}
-body{background:radial-gradient(ellipse 60% 43% at 76% 4%,rgba(16,157,170,.22),transparent 75%),radial-gradient(ellipse 45% 55% at 25% 75%,rgba(27,73,166,.23),transparent 78%),linear-gradient(125deg,#030a15,#081a2d 51%,#030a16)!important;background-attachment:fixed!important}
-.wrap{max-width:1740px!important;width:calc(100% - 68px)!important;padding:26px 0 100px!important}
-.ws-hero{position:relative;overflow:hidden;display:grid;grid-template-columns:minmax(0,1.3fr) minmax(290px,.7fr);align-items:center;gap:25px;min-height:235px;padding:36px 40px!important;background:radial-gradient(circle at 83% 47%,rgba(39,228,202,.15),transparent 32%),linear-gradient(112deg,#112d48 0%,#0a2036 48%,#061322 100%)!important;border:1px solid rgba(92,202,221,.29)!important}
-.ws-hero:after{content:'';position:absolute;right:7%;top:-90px;width:390px;height:390px;border:1px solid rgba(73,232,216,.17);border-radius:50%;box-shadow:0 0 0 42px rgba(54,213,220,.035),0 0 0 95px rgba(54,213,220,.025);pointer-events:none}
-.ws-kicker{color:var(--ws-mint);font-size:11px;letter-spacing:.24em;font-weight:900;margin-bottom:15px}.ws-hero h1{font-size:clamp(32px,3.2vw,51px)!important;line-height:1.08;max-width:750px;margin-bottom:16px!important}.ws-hero p{font-size:15px;max-width:590px}.ws-hero .version{font-size:11px;letter-spacing:0;vertical-align:middle}
-.ws-hero-art{position:relative;z-index:1;display:flex;justify-content:center;align-items:center;min-height:175px}.ws-orb{display:grid;place-items:center;width:175px;height:175px;border-radius:50%;background:radial-gradient(circle at 30% 25%,#37dbc3,#126c86 45%,#0a2540 73%);box-shadow:0 0 70px #25d4ce44,inset -18px -18px 45px #04172a;transform:rotate(-14deg);font-size:75px;border:1px solid #66eadc77}.ws-art-caption{position:absolute;bottom:0;right:0;padding:10px 15px;background:#061b2bcf;border:1px solid #48d9c455;border-radius:11px;font-size:11px;letter-spacing:.1em;color:#b8fff0;font-weight:800}
-.ws-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin:18px 0 24px}.ws-metric{border:1px solid rgba(96,181,210,.2);border-radius:17px;padding:19px 20px;background:linear-gradient(145deg,rgba(18,46,69,.95),rgba(6,21,39,.98));box-shadow:0 12px 30px #0003}.ws-metric small{display:block;color:#9dbbcd;font-size:11px;font-weight:750;letter-spacing:.08em;text-transform:uppercase}.ws-metric strong{display:block;font-size:29px;letter-spacing:-.05em;margin:8px 0 4px}.ws-metric span{font-size:11px;color:#7e9eaf}.ws-metric:nth-child(2) strong{color:var(--ws-mint)}.ws-metric:nth-child(4) strong{color:var(--ws-gold)}
-.ws-section-head{display:flex;align-items:center;justify-content:space-between;gap:15px;flex-wrap:wrap;margin:27px 0 14px}.ws-section-head h2{margin:0;font-size:23px;letter-spacing:-.04em}.ws-section-head p{font-size:12px;margin-top:5px}.ws-section-tag{font-size:10px;letter-spacing:.12em;color:#50efd4;border:1px solid #39d2bf55;border-radius:100px;padding:8px 12px;background:#0a3a3a55;font-weight:850}
-.ws-filter-panel{border:1px solid rgba(95,167,199,.25);background:linear-gradient(145deg,rgba(13,34,55,.95),rgba(7,20,38,.97));padding:23px;border-radius:20px;box-shadow:0 15px 35px #0003}.ws-filter-panel .toolbar{margin:0!important;background:transparent!important;border:0!important;box-shadow:none!important;padding:0!important}.ws-filter-panel label{font-size:12px;font-weight:800;color:#a9c8d8}.ws-filter-panel input,.ws-filter-panel select{min-height:46px!important}.ws-filter-panel button{min-height:46px!important}.ws-search{width:min(330px,100%);flex:1;min-width:170px}.ws-filter-panel .hint{margin:13px 0 0!important}
-.ws-workspace{display:grid;grid-template-columns:minmax(0,1fr) minmax(300px,360px);gap:20px;align-items:start;margin-top:23px}.ws-fixtures-panel{min-width:0}.ws-fixtures-panel .grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:14px!important}.ws-fixtures-panel .match{position:relative;overflow:hidden;padding:22px!important;min-height:185px;border:1px solid #34536a66!important;background:linear-gradient(145deg,#122e45,#08182b)!important}.ws-fixtures-panel .match:before{content:'';position:absolute;top:0;left:0;width:4px;height:100%;background:linear-gradient(#48efd0,#3486bd)}.ws-fixtures-panel .match .meta{color:#7fb4ce!important;font-weight:700;letter-spacing:.02em;line-height:1.6}.ws-fixtures-panel .teams{font-size:20px!important;margin:14px 0 20px!important;line-height:1.3}.ws-fixtures-panel .match button{font-size:12px;padding:11px 15px}.ws-fixtures-panel .match:has(.analysis:not([hidden])){grid-column:1/-1}.ws-fixtures-panel .match .analysis{overflow-wrap:anywhere}
-.ws-lab{position:sticky;top:22px;min-width:0}.ws-lab .coupon-panel{margin:0!important;padding:24px!important;border:1px solid rgba(79,225,201,.24)!important;background:radial-gradient(circle at 95% 0%,#1c726b33,transparent 43%),linear-gradient(145deg,#112e40,#081628)!important}.ws-lab .coupon-head{display:block}.ws-lab .coupon-head h2{font-size:22px!important}.ws-lab .coupon-help{line-height:1.65;margin:11px 0}.ws-lab #makeCoupons{width:100%;margin-top:16px;min-height:49px!important}.ws-lab .bankroll{grid-template-columns:repeat(2,minmax(0,1fr))!important}.ws-lab .bankroll div{padding:13px!important}.ws-lab .bankroll b{font-size:19px!important}.ws-lab .bankroll div:last-child{grid-column:1/-1}.ws-lab .coupons{grid-template-columns:1fr!important}.ws-lab .learning-stats{max-height:160px;overflow:auto}.ws-lab .coupon{padding:14px!important}.ws-lab #couponState{font-size:11px}
-.ws-fixture-status{padding:10px 0 12px!important;font-size:13px!important;color:#accbdc!important}
-@media(max-width:1250px){.ws-workspace{grid-template-columns:1fr}.ws-lab{position:static;grid-row:1}.ws-lab .bankroll{grid-template-columns:repeat(5,minmax(0,1fr))!important}.ws-lab .bankroll div:last-child{grid-column:auto}.ws-lab .coupons{grid-template-columns:repeat(2,minmax(0,1fr))!important}}
-@media(max-width:950px){.ws-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.ws-hero{grid-template-columns:1fr}.ws-hero-art{display:none}.ws-lab .bankroll{grid-template-columns:repeat(2,minmax(0,1fr))!important}.ws-lab .bankroll div:last-child{grid-column:1/-1}}
-@media(max-width:760px){.wrap{width:calc(100% - 22px)!important}.ws-hero{padding:26px 22px!important;min-height:0}.ws-hero h1{font-size:31px!important}.ws-fixtures-panel .grid{grid-template-columns:1fr!important}.ws-lab .coupons{grid-template-columns:1fr!important}.ws-metric{padding:15px}.ws-metric strong{font-size:24px}.ws-filter-panel{padding:16px}.ws-filter-panel .toolbar{align-items:stretch!important}.ws-search{width:100%;flex:auto}.ws-section-head h2{font-size:20px}}
-
-/* GOL MERKEZI PRO / dashboard 5.0 — rebuilt structure, not a recolor */
-:root{--gm-bg:#090e24;--gm-panel:#131a39;--gm-line:#28335e;--gm-lime:#a5ff38;--gm-txt:#f3f5ff;--gm-muted:#8f9abc}
-body{background:radial-gradient(ellipse 65% 70% at 65% 0%,#182a55 0%,transparent 70%),linear-gradient(120deg,#090d22,#0b1230 68%,#080d20)!important;color:var(--gm-txt)!important;font-family:Inter,system-ui,-apple-system,'Segoe UI',sans-serif!important}
-.pro-sidebar{width:222px!important;background:#090d22!important;border-right:1px solid #222c51!important;box-shadow:none!important}
-.pro-sidebar>a.active:not(.pro-identity){background:#1a2350!important;color:var(--gm-lime)!important;box-shadow:inset 3px 0 var(--gm-lime)!important;border-color:#29365d!important}
-body{padding-left:222px!important}.wrap{max-width:1900px!important;width:calc(100% - 52px)!important;padding-top:23px!important}
-.gm-topbar{display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:22px;padding:5px 0 3px}.gm-eyebrow{font-size:10px;letter-spacing:.18em;color:#a1ff4d;font-weight:900}.gm-eyebrow b{color:#7c89b5}.gm-topbar h1{font-size:clamp(25px,2.5vw,35px);margin:7px 0 5px;letter-spacing:-.04em}.gm-topbar p{color:var(--gm-muted);font-size:12px}.gm-live-dot{display:inline-block;width:8px;height:8px;background:var(--gm-lime);border-radius:50%;box-shadow:0 0 12px #a5ff38}.gm-top-actions{display:flex;align-items:center;gap:12px}.gm-top-actions span{font-size:10px;letter-spacing:.14em;color:#8795b9}.gm-top-actions a{background:#a5ff38;color:#08131e;padding:12px 16px;border-radius:9px;text-decoration:none;font-size:12px;font-weight:900}
-.gm-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:13px;margin-bottom:17px}.gm-kpi{min-height:139px;background:linear-gradient(130deg,#1b2652,#121a3c)!important;border:1px solid #303b70;border-radius:16px;position:relative;overflow:hidden;padding:18px 19px}.gm-kpi-label{font-size:10px;color:#a9b6d6;font-weight:800;letter-spacing:.075em}.gm-kpi-label span{float:right;color:var(--gm-lime)}.gm-kpi strong{font-size:clamp(25px,2.4vw,36px);display:block;margin:14px 0 4px;letter-spacing:-.05em}.gm-kpi-footer{font-size:10px;color:#8291b5}.gm-kpi svg{position:absolute;bottom:13px;right:12px;width:38%;height:35px;opacity:.9;filter:drop-shadow(0 0 4px #8cff3d35)}
-.gm-dashboard-grid{display:grid;grid-template-columns:minmax(0,1fr) 335px;gap:16px;align-items:start}.gm-main-col,.gm-right-col{display:flex;flex-direction:column;gap:16px;min-width:0}.gm-card{background:linear-gradient(145deg,#151d41,#101735)!important;border:1px solid #29345d!important;border-radius:17px;padding:20px!important;box-shadow:0 15px 36px #0002!important}.gm-section-title{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:16px}.gm-section-title h2{font-size:18px;margin:5px 0 0;letter-spacing:-.03em}.gm-status,.gm-chip{font-size:9px;letter-spacing:.05em;color:#9dadce;border:1px solid #35426d;background:#111934;border-radius:6px;padding:7px 9px;font-weight:800;white-space:nowrap}.gm-status i{display:inline-block;width:6px;height:6px;border-radius:50%;background:#a5ff38;margin-right:5px}.gm-filters{display:flex;gap:10px;flex-wrap:wrap;align-items:end}.gm-filters label{font-size:10px;color:#a7b3d4;font-weight:700;display:flex;flex-direction:column;gap:7px}.gm-filters input,.gm-filters select{height:40px!important;background:#0c1430!important;border:1px solid #35416c!important;color:#eaf0ff!important;border-radius:8px;padding:0 10px;max-width:230px}.gm-filters button,.gm-create{background:var(--gm-lime)!important;color:#101629!important;border:0!important;border-radius:9px!important;font-size:12px!important;min-height:40px!important;padding:10px 15px!important;font-weight:900!important;box-shadow:none!important}.gm-search-label{flex:1}.gm-search-label input{width:100%;max-width:none}.gm-match-panel .grid{display:grid!important;grid-template-columns:1fr!important;gap:0!important}.gm-match-panel .match{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px 15px;align-items:center;min-height:0!important;padding:15px 5px!important;background:transparent!important;border:0!important;border-radius:0!important;border-bottom:1px solid #2a365c!important;box-shadow:none!important;transform:none!important}.gm-match-panel .match:before{display:none!important}.gm-match-panel .match .meta{grid-column:1/-1;color:#8292b8!important;font-size:10px!important}.gm-match-panel .teams{font-size:15px!important;margin:0!important;font-weight:800;letter-spacing:-.02em}.gm-match-panel .match button{padding:9px 12px!important;font-size:11px!important;border-radius:7px!important;min-width:105px}.gm-match-panel .match .analysis{grid-column:1/-1;max-width:100%;margin-top:9px}.gm-match-panel .match:has(.analysis:not([hidden])){background:#101934!important;padding:15px!important;border-radius:12px!important}.gm-match-panel .match:hover{background:#1b264a!important}.gm-match-panel .ws-fixture-status{color:#899abc!important;font-size:11px!important}.gm-league-bars{display:flex;flex-direction:column;gap:13px}.gm-bar-line{display:flex;justify-content:space-between;font-size:11px;color:#bdc7e1;margin-bottom:6px}.gm-bar-line strong{color:#dbe4ff}.gm-bar-track{height:7px;background:#0b1230;border-radius:20px;overflow:hidden}.gm-bar-fill{height:100%;background:linear-gradient(90deg,#3a7ff0,#a5ff38);border-radius:20px}.gm-empty{font-size:12px;color:#8291b5;padding:18px 0}.gm-coupon-explain{font-size:11px;line-height:1.6;color:#96a4c6}.gm-create{width:100%;margin:14px 0}.gm-coupon-card .bankroll{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:9px!important}.gm-coupon-card .bankroll div{padding:12px!important;background:#0b1430!important;border:1px solid #29365f!important}.gm-coupon-card .bankroll b{font-size:17px!important}.gm-coupon-card .bankroll div:last-child{grid-column:1/-1}.gm-coupon-card .coupons{grid-template-columns:1fr!important}.gm-coupon-card .coupon{padding:13px!important}.gm-coupon-card .learning-stats{max-height:115px;overflow:auto}.gm-coupon-card #couponState{font-size:10px;line-height:1.5}.gm-coupon-card .coupon-leg{font-size:11px}.gm-coupon-card .coupon-total{font-size:11px}
-@media(max-width:1280px){.gm-dashboard-grid{grid-template-columns:minmax(0,1fr) 290px}.gm-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(max-width:980px){.gm-dashboard-grid{grid-template-columns:1fr}.gm-right-col{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(max-width:760px){body{padding-left:0!important}.pro-sidebar{width:100%!important}.wrap{width:calc(100% - 22px)!important}.gm-topbar{flex-direction:column;align-items:flex-start}.gm-top-actions{width:100%;justify-content:space-between}.gm-right-col{grid-template-columns:1fr}.gm-kpis{gap:8px}.gm-kpi{padding:13px;min-height:120px}.gm-kpi strong{font-size:25px}.gm-card{padding:14px!important}.gm-match-panel .teams{font-size:13px!important}.gm-filters label{flex:1;min-width:125px}.gm-filters input,.gm-filters select{max-width:none;width:100%}}
-
-/* Reference-inspired integrated dashboard */
-.gm-nav .pro-section-label{margin-top:20px!important;margin-bottom:8px!important;color:#7e8fb5!important;font-size:10px!important;letter-spacing:.16em!important}.gm-nav>a:not(.pro-identity){padding:11px 10px!important;margin-bottom:3px!important;font-size:12px!important}.gm-nav>a.active:not(.pro-identity){color:#a5ff38!important}.gm-nav .pro-sidebar-bottom{margin-top:auto!important}
-.gm-table-head{display:grid;grid-template-columns:105px minmax(200px,1fr) 120px 60px 110px;gap:12px;align-items:center;padding:12px;background:#1b2853;border-radius:8px;color:#91a5d0;font-size:10px;font-weight:900}.gm-match-panel .match{display:grid!important;grid-template-columns:105px minmax(200px,1fr) 120px 60px 110px!important;gap:12px!important;align-items:center!important;padding:14px 12px!important;min-height:68px!important}.gm-match-time{display:flex;flex-direction:column;gap:5px;color:#e8eeff;font-size:12px}.gm-match-time small{font-size:10px;color:#8497c0;overflow:hidden;text-overflow:ellipsis;max-width:100px;white-space:nowrap}.gm-teams{display:flex;gap:9px;align-items:center;min-width:0;flex-wrap:wrap}.gm-team{display:flex;gap:7px;align-items:center;min-width:0}.gm-team b{font-size:12px;color:#f0f4ff;font-weight:750}.gm-vs{font-size:10px;color:#7c89b1}.gm-team-logo{height:27px;width:27px;object-fit:contain;flex-shrink:0;filter:drop-shadow(0 2px 2px #0005)}.gm-team-placeholder{display:inline-flex;align-items:center;justify-content:center;height:27px;width:27px;border-radius:50%;background:#243660;font-size:13px}.gm-market{font-size:11px;font-weight:800;color:#5ce7c5;background:#083a3a;border-radius:6px;padding:8px;text-align:center}.gm-price{font-weight:900;font-size:13px;color:#fff;text-align:center}.gm-match-panel .match button.analyze-btn{background:#243d7a!important;color:#e8f2ff!important;border:1px solid #3d5e9e!important;min-width:0!important;font-size:11px!important}.gm-match-panel .match .analysis{grid-column:1/-1!important;border:1px solid #2c3d6e;border-radius:11px;padding:12px;background:#0b1533}.gm-coupon-card .learning-stats{display:none!important}.gm-kpi:nth-child(3) strong{color:#a5ff38}
-@media(max-width:1450px){.gm-table-head,.gm-match-panel .match{grid-template-columns:90px minmax(170px,1fr) 100px 45px 85px!important;gap:8px!important}.gm-team b{font-size:11px}}@media(max-width:1200px){.gm-table-head{display:none}.gm-match-panel .match{grid-template-columns:85px minmax(170px,1fr) 90px!important}.gm-match-panel .gm-market,.gm-match-panel .gm-price{display:none}}@media(max-width:760px){.gm-nav .pro-section-label,.gm-nav .pro-sidebar-bottom{display:none!important}.gm-match-panel .match{grid-template-columns:1fr auto!important}.gm-match-time{grid-column:1/-1}.gm-teams{grid-column:1}.gm-match-panel .match button.analyze-btn{grid-column:2}}
-
-/* Premium compact dashboard — reference aligned */
-.gm-topbar{padding:4px 0 10px!important;margin-bottom:8px!important}.gm-topbar h1{font-size:23px!important;margin:3px 0!important}.gm-topbar p{font-size:11px!important}
-.gm-kpis{grid-template-columns:repeat(5,minmax(0,1fr))!important;gap:10px!important;margin-bottom:12px!important}.gm-kpi{min-height:107px!important;padding:13px!important;border-radius:13px!important;background:linear-gradient(125deg,#071733,#101c42)!important}.gm-kpi strong{font-size:28px!important;margin:8px 0 3px!important}.gm-kpi-footer{font-size:9px!important}.gm-kpi:after{content:"";position:absolute;bottom:14px;right:12px;width:66px;height:30px;opacity:.75;background:linear-gradient(135deg,transparent 35%,#1ce4a9 36% 39%,transparent 40% 52%,#8fff37 53% 56%,transparent 57%)}
-.gm-dashboard-grid{grid-template-columns:minmax(0,1fr) 325px!important;gap:12px!important}.gm-main-col,.gm-right-col{gap:12px!important}.gm-card{padding:14px!important;border-radius:13px!important;background:linear-gradient(150deg,#0b1a39,#09132e)!important}.gm-controls .gm-section-title{display:none!important}.gm-filters{gap:8px!important;align-items:center!important}.gm-filters label{font-size:9px!important;gap:3px!important}.gm-filters input,.gm-filters select{height:35px!important}.gm-filters button{min-height:35px!important;padding:8px 12px!important}.gm-section-title{margin-bottom:9px!important}.gm-section-title h2{font-size:15px!important}.gm-eyebrow{font-size:9px!important}
-.gm-table-head,.gm-match-panel .match{grid-template-columns:85px minmax(180px,1fr) 95px 42px 52px 75px!important;gap:7px!important}.gm-table-head{font-size:9px!important;padding:9px!important}.gm-match-panel .match{padding:9px!important;min-height:57px!important}.gm-team-logo{width:26px!important;height:26px!important}.gm-team b{font-size:11px!important}.gm-match-panel .match button.analyze-btn{font-size:10px!important;min-width:0!important;padding:8px 5px!important}.gm-confidence{color:#a5ff38;font-size:11px;font-weight:800;text-align:center}.gm-market{font-size:10px!important;padding:6px 4px!important}.gm-price{font-size:11px!important}
-.gm-league-card{display:none!important}.gm-coupon-card .gm-coupon-explain{display:none!important}.gm-coupon-card .bankroll{display:none!important}.gm-coupon-card #couponState{max-height:45px;overflow:hidden}.gm-coupon-card .coupons{max-height:260px;overflow:auto}.gm-perf-mini{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}.gm-perf-mini>div{background:#07152f;border:1px solid #223866;border-radius:8px;padding:10px 7px;text-align:center}.gm-perf-mini small{display:block;color:#9daed0;font-size:9px}.gm-perf-mini strong{display:block;color:#a5ff38;font-size:19px;margin-top:5px}.gm-perf-note{font-size:9px;color:#91a4c8;margin-top:8px}
-.gm-donut-layout{display:flex;align-items:center;gap:14px}.gm-donut{width:114px;height:114px;border-radius:50%;display:grid;place-items:center;flex-shrink:0;background:#24375e;position:relative}.gm-donut:before{content:"";position:absolute;inset:23px;border-radius:50%;background:#0c1938}.gm-donut>span{position:relative;z-index:1;font-size:24px;font-weight:900;text-align:center}.gm-donut small{display:block;font-size:10px;font-weight:400;color:#9eadd0}.gm-donut-legend{flex:1;min-width:0}.gm-donut-legend>div{display:flex;align-items:center;gap:6px;font-size:10px;margin:7px 0;color:#b6c4e0}.gm-donut-legend i{width:8px;height:8px;border-radius:50%;flex-shrink:0}.gm-donut-legend span{overflow:hidden;white-space:nowrap;text-overflow:ellipsis;flex:1}.gm-donut-legend b{font-size:10px}.gm-live-card{margin-top:12px!important}.gm-live-card a{font-size:11px;color:#a5ff38;text-decoration:none}.gm-live-scores{display:flex;gap:8px;overflow-x:auto}.gm-live-tile{background:#081936;border:1px solid #213760;border-radius:9px;padding:10px;min-width:172px;max-width:190px;flex-shrink:0}.gm-live-tile small{font-size:9px;color:#a9bad7}.gm-live-pulse{color:#ff4666}.gm-live-tile>div{display:flex;align-items:center;justify-content:space-between;gap:5px;margin-top:9px}.gm-live-tile span{font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.gm-live-tile b{font-size:15px;color:white;white-space:nowrap}
-@media(max-width:1450px){.gm-dashboard-grid{grid-template-columns:minmax(0,1fr) 290px!important}.gm-table-head,.gm-match-panel .match{grid-template-columns:75px minmax(170px,1fr) 90px 40px 42px 65px!important;gap:5px!important}.gm-team b{font-size:10px!important}}@media(max-width:1180px){.gm-kpis{grid-template-columns:repeat(3,1fr)!important}.gm-dashboard-grid{grid-template-columns:1fr!important}.gm-right-col{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))}.gm-donut-card{grid-column:1/-1}}@media(max-width:760px){.gm-kpis{grid-template-columns:repeat(2,1fr)!important}.gm-right-col{grid-template-columns:1fr!important}.gm-table-head{display:none!important}.gm-match-panel .match{grid-template-columns:1fr auto!important}.gm-match-panel .gm-market,.gm-match-panel .gm-price,.gm-match-panel .gm-confidence{display:none!important}}
-
-/* Gol Merkezi PRO reference visual 2026-10: unified compact neon dashboard */
-:root{--gm-lime:#9eff32!important}
-body{background:radial-gradient(ellipse at 58% -22%,#122a58 0,transparent 48%),linear-gradient(180deg,#041025 0%,#020b1c 100%)!important;color:#eaf3ff!important}
-.pro-sidebar{background:linear-gradient(180deg,#04162d,#020b1b)!important;border-right:1px solid #16365b!important}
-.gm-topbar{margin:0 0 12px!important;padding:5px 0 9px!important}.gm-topbar h1{font-size:24px!important}.gm-topbar p{font-size:11px!important}
-.gm-kpis{display:grid!important;grid-template-columns:repeat(5,minmax(0,1fr))!important;gap:9px!important;margin-bottom:11px!important}
-.gm-kpi{min-height:112px!important;padding:12px 13px!important;background:linear-gradient(135deg,#051a37,#07132d)!important;border:1px solid #1c416a!important;border-radius:11px!important;box-shadow:inset 0 1px #14355b,0 5px 20px #0003!important}
-.gm-kpi-label{font-size:10px!important;color:#b6c7e9!important}.gm-kpi strong{font-size:28px!important;margin:7px 0 4px!important}.gm-kpi:nth-child(3) strong{color:#a5ff38!important}
-.gm-kpi:after{content:none!important}.gm-kpi:before{content:"";position:absolute;right:12px;bottom:12px;width:75px;height:42px;opacity:.8;background:linear-gradient(130deg,transparent 0 48%,#0ed1ae 49% 51%,transparent 52%),repeating-linear-gradient(90deg,transparent 0 8px,#0bc8ad 9px 13px,transparent 14px 17px);clip-path:polygon(0 85%,16% 75%,31% 88%,48% 52%,64% 67%,80% 25%,100% 3%,100% 100%,0 100%);filter:drop-shadow(0 0 7px #00d8b444)}
-.gm-kpi:nth-child(2):before{filter:hue-rotate(95deg)}.gm-kpi:nth-child(3):before{filter:hue-rotate(40deg)}.gm-kpi:nth-child(5):before{filter:hue-rotate(175deg)}
-.gm-dashboard-grid{grid-template-columns:minmax(0,1fr) 315px!important;gap:10px!important}.gm-main-col,.gm-right-col{gap:10px!important}
-.gm-card{background:linear-gradient(150deg,#061932,#08152e)!important;border:1px solid #17375b!important;border-radius:12px!important;padding:12px!important;box-shadow:0 6px 24px #0002!important}
-.gm-controls{padding:9px 11px!important}.gm-filters{gap:8px!important}.gm-filters label{font-size:9px!important}.gm-filters input,.gm-filters select{height:35px!important}.gm-filters button{min-height:35px!important}
-.gm-match-panel{padding:9px!important}.gm-match-panel .gm-section-title{display:none!important}.gm-match-panel #state{display:none!important}
-.gm-table-head,.gm-match-panel .match{grid-template-columns:79px minmax(190px,1fr) 91px 44px 61px 57px 55px 76px!important;gap:5px!important}
-.gm-table-head{background:#0b2546!important;border:1px solid #17395f!important;padding:10px 7px!important;font-size:9px!important;color:#adc2df!important}
-.gm-match-panel .match{padding:9px 7px!important;min-height:57px!important;border-bottom:1px solid #173050!important}
-.gm-match-panel .match:nth-child(even){background:#071b37!important}.gm-match-panel .match:hover{background:#0c2b4f!important}
-.gm-team-logo{width:25px!important;height:25px!important}.gm-team b{font-size:10px!important}.gm-teams{gap:5px!important}.gm-market{background:#053b3e!important;color:#56edc6!important;font-size:10px!important;padding:7px 3px!important}.gm-confidence{color:#b8ff47!important}
-.gm-risk{font-size:10px;color:#ffc456;text-align:center;border:1px solid #67542a;border-radius:6px;padding:5px 2px}.gm-form{text-align:center;font-size:10px;color:#8398bd}
-.gm-match-panel .match button.analyze-btn{background:#0e396e!important;border:1px solid #285b95!important;color:#eaf2ff!important;padding:8px 4px!important;font-size:10px!important}
-.gm-coupon-card{padding:12px!important}.gm-coupon-tabs{display:grid;grid-template-columns:1fr 1fr;gap:4px;margin:10px 0}.gm-tab{background:#08162d;color:#9eb3d0;border:1px solid #20436a;border-radius:6px;padding:10px 4px;font-size:10px;font-weight:700;cursor:pointer}.gm-tab.active{background:#083b53;color:#e5ffff;border-color:#00d9e2}
-.gm-coupon-controls{display:grid;gap:8px;margin:12px 0}.gm-coupon-controls label{display:flex;align-items:center;justify-content:space-between;color:#aabdd7;font-size:11px}.gm-coupon-controls input{width:64px;text-align:center;background:#0b2544;color:white;border:1px solid #21436b;border-radius:6px;padding:7px}.gm-coupon-controls span{background:#0b2544;border:1px solid #21436b;padding:8px;border-radius:6px}
-.gm-coupon-card .gm-create{background:#a5ff38!important;color:#051329!important}.gm-performance-card,.gm-donut-card{padding:12px!important}.gm-perf-mini>div{background:#092346!important}.gm-live-card{margin-top:10px!important}.gm-live-tile{background:#08264b!important}
-.gm-league-card{display:none!important}.gm-coupon-card .learning-stats{display:none!important}.gm-coupon-card .bankroll{display:none!important}
-@media(max-width:1450px){.gm-dashboard-grid{grid-template-columns:minmax(0,1fr) 280px!important}.gm-table-head,.gm-match-panel .match{grid-template-columns:68px minmax(165px,1fr) 83px 39px 45px 43px 35px 62px!important;gap:3px!important}.gm-team b{font-size:9px!important}}
-@media(max-width:1180px){.gm-kpis{grid-template-columns:repeat(3,minmax(0,1fr))!important}.gm-dashboard-grid{grid-template-columns:1fr!important}.gm-right-col{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))}.gm-donut-card{grid-column:1/-1}}
-@media(max-width:760px){.gm-kpis{grid-template-columns:repeat(2,minmax(0,1fr))!important}.gm-right-col{grid-template-columns:1fr!important}.gm-table-head{display:none!important}.gm-match-panel .match{grid-template-columns:1fr auto!important}.gm-match-panel .gm-market,.gm-match-panel .gm-price,.gm-match-panel .gm-confidence,.gm-match-panel .gm-risk,.gm-match-panel .gm-form{display:none!important}}
-</style></head><body>
-<aside class="pro-sidebar gm-nav" aria-label="Ana navigasyon"><a class="pro-identity" href="/"><span class="pro-logo">⚽</span><span>GOL MERKEZİ<strong>PRO ANALYTICS</strong></span></a><div class="pro-section-label">KONTROL MERKEZİ</div><a href="/">◉ <span>Canlı Gol Merkezi</span></a><a href="/tahmin" class="active">▦ <span>Maç Analizi &amp; Kupon</span></a><a href="/radar">◈ <span>Piyasa Radarı</span></a><div class="pro-section-label">İSTATİSTİKLER</div><a href="#gm-performance">▥ <span>Performans</span></a><a href="#gm-coupon">▤ <span>Kupon Geçmişi</span></a><a href="#gm-coupon">◫ <span>Sanal Bakiye</span></a><div class="pro-section-label">ARAÇLAR</div><a href="#gm-fixtures">☆ <span>Fikstür</span></a><a href="#gm-leagues">▤ <span>Lig Dağılımı</span></a><a href="/radar">⚙ <span>Piyasa Araçları</span></a><div class="pro-sidebar-bottom"><span class="pro-pulse"></span> ANALİZ PLATFORMU<small>Gol Merkezi • Pro Workspace</small></div></aside><div class="wrap">
-<div class="gm-topbar"><div><span class="gm-eyebrow">GOL MERKEZİ <b> / ANALYTICS DASHBOARD</b></span><h1>Analiz Kontrol Merkezi <span class="gm-live-dot"></span></h1><p>Fikstür, futbol analizi ve sanal kupon performansı · Gerçek veriler, şeffaf sonuçlar</p></div><div class="gm-top-actions"><span id="gmToday">PRO ANALYTICS</span><a href="/radar">◈ Piyasa Radarı ↗</a></div></div>
-<div class="gm-kpis" id="gm-performance"><div class="gm-kpi"><div class="gm-kpi-label">🏆 TOPLAM MAÇ <span>↗</span></div><strong id="wsMatchCount">—</strong><div class="gm-kpi-footer">Seçili tarihteki maç sayısı</div></div><div class="gm-kpi"><div class="gm-kpi-label">🎯 ANALİZ EDİLEN <span>↗</span></div><strong id="wsAnalyzedCount">0</strong><div class="gm-kpi-footer">Bu oturumda incelenen maçlar</div></div><div class="gm-kpi"><div class="gm-kpi-label">📈 ANALİZ KAPSAMI</div><strong id="gmCoverage">—</strong><div class="gm-kpi-footer">Günlük analiz oranı</div></div><div class="gm-kpi"><div class="gm-kpi-label">💰 SANAL KÂR / ZARAR <span>↗</span></div><strong id="gmNet">—</strong><div class="gm-kpi-footer" id="gmRoi">Sonuçlanmış kuponlar üzerinden</div></div><div class="gm-kpi"><div class="gm-kpi-label">🌍 KAPSANAN ÜLKE <span>↗</span></div><strong id="wsCountryCount">—</strong><div class="gm-kpi-footer">Günlük fikstür dağılımı</div></div></div>
-<div class="gm-dashboard-grid"><section class="gm-main-col"><div class="gm-card gm-controls"><div class="gm-section-title"><div><span class="gm-eyebrow">MATCH CENTER</span><h2>Günlük Fikstür</h2></div><span class="gm-status"><i></i> VERİ KAYNAĞI: API</span></div><div class="gm-filters"><label>Maç günü <input id="day" type="date" min="{{today}}" max="{{last_day}}" value="{{initial_day}}"></label><button id="load">↻ Fikstürü getir</button><label>Ülke <select id="league" disabled><option value="ALL">Tüm ülkeler</option></select></label><label class="gm-search-label">Ara <input id="wsSearch" type="search" placeholder="Takım veya lig adı…"></label></div></div><div class="gm-card gm-match-panel" id="gm-fixtures"><div class="gm-section-title"><div><span class="gm-eyebrow">FIXTURE EXPLORER</span><h2>Karşılaşmalar</h2></div><span class="gm-chip" id="gmFixtureCount">Fikstür yükleniyor</span></div><p id="state" class="ws-fixture-status">Fikstür yükleniyor…</p><div class="gm-table-head"><span>SAAT / LİG</span><span>KARŞILAŞMA</span><span>BOT TERCİHİ</span><span>ORAN</span><span>GÜVEN</span><span>RİSK</span><span>FORM</span><span>ANALİZ</span></div><div class="grid" id="fixtures"></div></div></section><aside class="gm-right-col"><section class="gm-card gm-league-card" id="gm-leagues"><div class="gm-section-title"><div><span class="gm-eyebrow">MATCH DISTRIBUTION</span><h2>Lig Dağılımı</h2></div><span class="gm-chip">GÜNLÜK</span></div><div id="gmLeagueBars" class="gm-league-bars"><div class="gm-empty">Fikstür yüklendiğinde gösterilecek.</div></div></section><section class="gm-card gm-coupon-card" id="gm-coupon"><div class="gm-section-title"><div><span class="gm-eyebrow">VIRTUAL PORTFOLIO</span><h2>Kupon Laboratuvarı</h2></div><span class="gm-chip">3+ MAÇ</span></div><p class="gm-coupon-explain">Sanal kuponlar ve sonuçlanmış performans. Oranlar doğrulanmadan kupona alınmaz.</p><div class="gm-coupon-tabs"><button type="button" class="gm-tab active" id="gmAutoTab">Otomatik Kupon</button><button type="button" class="gm-tab" id="gmManualTab">Manuel Seçim</button></div><div class="gm-coupon-controls"><label>Kupon sayısı <span>Otomatik · uygun maç sayısına göre</span></label><label>Her kupon tutarı <span>1.000 TL</span></label></div><button id="makeCoupons" type="button" class="gm-create">+ Kupon adaylarını oluştur</button><div id="bankroll" class="bankroll"></div><div id="learningStats" class="learning-stats"></div><div id="couponState" class="coupon-help">Henüz kupon oluşturulmadı.</div><div id="coupons" class="coupons"></div></section><section class="gm-card gm-performance-card"><div class="gm-section-title"><div><span class="gm-eyebrow">PERFORMANCE</span><h2>Günlük Performans</h2></div><span class="gm-chip">Sanal kayıtlar</span></div><div id="gmPerfMini" class="gm-perf-mini"><div><small>Kupon</small><strong>—</strong></div><div><small>Kazanan</small><strong>—</strong></div><div><small>Başarı</small><strong>—</strong></div></div><div class="gm-perf-note">Yalnızca sonuçlanan kuponlar değerlendirilir.</div></section><section class="gm-card gm-donut-card"><div class="gm-section-title"><div><span class="gm-eyebrow">LEAGUE BREAKDOWN</span><h2>Lig Dağılımı</h2></div></div><div class="gm-donut-layout"><div class="gm-donut" id="gmDonut"><span id="gmDonutTotal">—<small>Maç</small></span></div><div id="gmDonutLegend" class="gm-donut-legend"></div></div></section></aside></div><section class="gm-card gm-live-card"><div class="gm-section-title"><div><span class="gm-eyebrow">● LIVE</span><h2>Canlı Skorlar</h2></div><a href="/">Tüm Canlı Maçlar ↗</a></div><div id="gmLiveScores" class="gm-live-scores"><div class="gm-empty">Canlı skorlar yükleniyor…</div></div></section>
-<script>
+</style></head><body><div class="wrap">
+<header><div><h1>📅 Maç Önü Analiz Merkezi <span class="version">v7.0</span></h1><p>Maçı araştır, senaryoları karşılaştır, gerçek oranı ayrı değerlendir.</p></div>
+<a href="/">← Canlı Gol Merkezi</a></header>
+<div class="toolbar">
+  <label for="day">Maç günü</label>
+  <input id="day" type="date" min="{{today}}" max="{{last_day}}" value="{{initial_day}}">
+  <button id="load">Fikstürü getir</button>
+  <label for="league">Ülke</label>
+  <select id="league" disabled><option value="ALL">Tüm ülkeler</option></select>
+</div>
+<div class="hint">Bir ülke seçildiğinde o ülkenin uygun tüm alt ligleri birlikte gösterilir • Saatler Türkiye saatidir • Analiz, açtığın maç için yapılır.</div>
+<section class="coupon-panel">
+  <div class="coupon-head"><div><h2>🎟️ Botun Sanal Bahis Defteri</h2><div class="coupon-help">Bot yalnızca doğrulanmış fiyatı olan en az 3 farklı maçtan kupon oluşturur. Her kupon 1.000 TL'dir; kupon sayısı sabit değildir. Aynı maç aktif kuponlarda en fazla 2 kez kullanılabilir.</div></div>
+  <button id="makeCoupons" type="button">Botun oynayacağı kuponları oluştur</button></div>
+  <div id="bankroll" class="bankroll"></div><div id="learningStats" class="learning-stats"></div><div id="couponState" class="coupon-help">Henüz kupon oluşturulmadı.</div><div id="coupons" class="coupons"></div>
+</section>
+<p id="state">Fikstür yükleniyor…</p>
+<div class="grid" id="fixtures"></div>
+</div><script>
 const esc=v=>String(v??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;");
 const day=document.getElementById("day"),state=document.getElementById("state"),root=document.getElementById("fixtures"),leagueSelect=document.getElementById("league");
 let loadedMatches=[],loadedDate="",analyzedMatches=new Map();
@@ -4707,7 +4557,7 @@ async function getJson(url){
 const couponStoreKey="golPrematchCouponsV2";
 const pickHistoryKey="golPrematchPickHistoryV4";
 const couponStake=1000;
-const couponStrategyVersion="v9.1-market-diversity"; // eski kuponları okumak için korunur
+const couponStrategyVersion="v7.0";
 function couponStore(){try{return JSON.parse(localStorage.getItem(couponStoreKey)||"{}")||{}}catch{return {}}}
 function saveCouponStore(store){localStorage.setItem(couponStoreKey,JSON.stringify(store))}
 function pickHistory(){try{return JSON.parse(localStorage.getItem(pickHistoryKey)||"[]")||[]}catch{return []}}
@@ -4754,144 +4604,120 @@ function historyQuality(pick){
   const adjusted=p*(1-reliability)+h.rate*reliability;
   return {n:h.n,won:h.won,rate:h.rate,adjusted};
 }
-// Tek başına yüksek olasılık değil, doğrulanmış fiyatın beklenen değeri belirleyici.
-// Ortak karar politikası: tablo ve kuponlar aynı elemeden geçer.
-// Poisson olasılıkları kalibre edilmediğinden ham EV'yi kesin avantaj sayma.
-const GM_MIN_PROB=.60,GM_MIN_ODD=1.30,GM_MIN_EV=.04;
-function decisionMetrics(p,quality){
-  const odd=Number(p?.quote?.odd||p?.odd||0);
-  const prob=Number(p?.model_probability??p?.modelProbability??NaN);
-  if(quality!=="good"||!Number.isFinite(prob)||prob<=0||prob>=1||!Number.isFinite(odd)||odd<GM_MIN_ODD)return null;
-  const implied=1/odd;
-  // Yalnızca bir güvenlik kontrolü: tahmin ile fiyat çok ayrışırsa otomatik önerme.
-  // Bu değer kalibre edilmiş olasılık değildir.
-  if(Math.abs(prob-implied)>.22)return null;
-  const ev=prob*odd-1;
-  if(prob<GM_MIN_PROB||ev<GM_MIN_EV)return null;
-  return {odd,prob,ev,implied,score:ev + .08*prob};
-}
-function marketValueScore(p,quality="good"){
-  return decisionMetrics(p,quality)?.score??-Infinity;
-}
-function bestPricedMarket(picks,quality){
-  const eligible=(picks||[]).filter(p=>decisionMetrics(p,quality));
-  // ALT, yalnızca başka uygun market yoksa değerlendirilir.
-  const primary=eligible.filter(p=>!String(p.market||"").includes("UNDER") && p.market!=="BTTS_NO");
-  const choices=primary.length?primary:eligible;
-  choices.sort((a,b)=>marketValueScore(b,quality)-marketValueScore(a,quality));
-  return choices[0]||null;
-}
 function candidatePool(){
-  // Tek otorite analiz motorudur: kupon motoru kendi marketini uyduramaz.
-  const pool=[],stats={matches:analyzedMatches.size,eligible:0,unpriced:0,rejected:0};
+  const pool=[],stats={matches:analyzedMatches.size,suggestions:0,priced:0,lowProbability:0,lowOdd:0,lowValue:0,weakHistory:0,eligible:0};
   for(const [fixture,item] of analyzedMatches){
-    const a=item.analysis||{},quality=a.data_quality||"poor";
-    const picks=Array.isArray(a.suggestions)?a.suggestions:[];
-    const main=picks.find(p=>p?.is_main)||picks[0];
-    if(!main||quality!=="good"){stats.rejected++;continue;}
-    // Analiz PAS dediyse veya ana tahminin doğrulanmış fiyatı yoksa PAS.
-    // Alternatif markete geçip 3,5 ALT kuponu üretme.
-    const odd=Number(main.quote?.odd||0);
-    if(!main.coupon_eligible||!main.price_verified||!Number.isFinite(odd)||odd<GM_MIN_ODD){
-      if(!Number.isFinite(odd)||odd<GM_MIN_ODD)stats.unpriced++;
-      else stats.rejected++;
-      continue;
+    // Ekranda görünen 2 seçime değil, analiz edilen TÜM marketlere bak.
+    const picks=item.analysis.all_suggestions||item.analysis.suggestions||[];
+    let best=null;
+    for(const pick of picks){
+      stats.suggestions++;
+      const odd=Number(pick.quote?.odd||0),baseP=Number(pick.model_probability||0);
+      if(!Number.isFinite(baseP)||baseP<=0||baseP>=1)continue;
+      if(!Number.isFinite(odd)||odd<1.30){stats.lowOdd++;continue;}
+      stats.priced++;
+      const hist=historyQuality(pick);
+      // Geçmişte 12+ sonuç yokken yapay güven artışı uygulanmaz.
+      const p=hist.n>=12?Math.min(baseP,Number(hist.adjusted)):baseP;
+      if(p<0.52){stats.lowProbability++;continue;}
+      const ev=p*odd-1,edge=(p-1/odd)*100;
+      if(ev<0.02){stats.lowValue++;continue;}
+      if(hist.n>=20&&hist.rate<0.48){stats.weakHistory++;continue;}
+      const candidate={fixture:Number(fixture),home:item.match.home,away:item.match.away,
+        kickoff:item.match.kickoff,country:item.match.country,league:item.match.league,
+        market:pick.market,label:pick.label,confidence:pick.confidence||"",
+        modelProbability:p,baseModelProbability:baseP,impliedProbability:1/odd,
+        valueEdge:edge,historicalRate:hist.rate,historicalN:hist.n,
+        odd,bookmaker:pick.quote.bookmaker||"",status:"OPEN"};
+      // Bir maçtan yalnızca tek seçim: kuponlarda aynı maçın riskini çoğaltma.
+      if(!best||candidate.modelProbability*candidate.odd-1 >
+          best.modelProbability*best.odd-1)best=candidate;
     }
-    const prob=Number(main.model_probability);
-    if(!Number.isFinite(prob)||prob<=0||prob>=1){stats.rejected++;continue;}
-    const leg={fixture:Number(fixture),home:item.match.home,away:item.match.away,
-      kickoff:item.match.kickoff,country:item.match.country,league:item.match.league,
-      market:main.market,label:main.label,confidence:quality,
-      modelProbability:prob,baseModelProbability:prob,odd,
-      bookmaker:main.quote?.bookmaker||"",explanation:main.explanation||main.reason||"",
-      valueEdge:Number(main.value_edge_pct||0),status:"OPEN"};
-    pool.push({...leg,options:[leg]});
+    if(best)pool.push(best);
   }
+  pool.sort((a,b)=>(b.modelProbability*b.odd-1)-(a.modelProbability*a.odd-1));
   stats.eligible=pool.length;pool.stats=stats;return pool;
 }
-// v10: Dinamik kupon portföyü. Kupon düzeyinde olasılık çarpımı veya sabit sayı yok.
-const couponStrategyVersionV10="v11-main-pick-only";
+function marketFamily(m){
+  if(["HOME","AWAY","DC_1X","DC_X2"].includes(m))return "RESULT";
+  if(["BTTS_YES","BTTS_NO"].includes(m))return "BTTS";
+  if(m.includes("OVER")||m.includes("UNDER"))return m.startsWith("HT_")?"HT_GOALS":"GOALS";
+  return "OTHER";
+}
+function marketCompatible(a,b){ return true; }
 function couponRisk(probability){
   const p=Number(probability||0);
-  if(p>=.70)return {key:"safe",label:"GÜÇLÜ ADAY",risk:"GÖRECELİ DÜŞÜK"};
-  if(p>=.60)return {key:"balanced",label:"DEĞER ADAYI",risk:"ORTA"};
-  return {key:"value",label:"FIRSAT ADAYI",risk:"YÜKSEK"};
-}
-function couponFamily(p){
-  const m=String(p.market||"").toUpperCase();
-  if(["HOME","AWAY","DC_1X","DC_X2"].includes(m))return "result";
-  if(m.includes("OVER")||m.includes("UNDER"))return "goals";
-  if(m.includes("BTTS")||m.includes("KG"))return "btts";
-  return "other";
-}
-function isFavoritePick(p){
-  const m=String(p.market||"").toUpperCase();
-  return ["HOME","AWAY","BB_HOME_OVER15","BB_AWAY_OVER15"].includes(m)&&Number(p.modelProbability)>=.52;
-}
-function legQuality(p){
-  const prob=Number(p.modelProbability||0),odd=Number(p.odd||0);
-  // Analiz sırası esastır; oranı olmayan tahmin de değerlendirilir.
-  return prob*.65+(p.confidence==="good"?.12:0)+(String(p.market).startsWith("BB_")?.025:0);
+  if(p>=0.50)return {key:"safe",label:"🟢 GÖRECELİ DÜŞÜK RİSK",risk:"DÜŞÜK"};
+  if(p>=0.35)return {key:"balanced",label:"🟡 DENGELİ",risk:"ORTA"};
+  if(p>=0.25)return {key:"value",label:"🔴 DEĞER",risk:"YÜKSEK"};
+  return {key:"none",label:"❌ NO BET",risk:"ÇOK YÜKSEK"};
 }
 function buildCoupons(){
   const store=couponStore(),existing=store[loadedDate]||[],pool=candidatePool();
-  const usedToday=new Set(existing.filter(c=>c.status!=="VOID").flatMap(c=>(c.legs||[]).map(l=>Number(l.fixture))));
-  const available=pool.filter(p=>!usedToday.has(Number(p.fixture)));
-  // Her maç için bir tercih. Aynı maçı farklı marketle ikinci kez kullanmak da yasak.
-  const selections=available.map(p=>{
-    const options=(p.options||[p]).filter(x=>Number.isFinite(legQuality(x))&&Number(x.odd)>=GM_MIN_ODD);
-    const favorite=options.filter(isFavoritePick).sort((a,b)=>legQuality(b)-legQuality(a))[0];
-    const best=options.sort((a,b)=>legQuality(b)-legQuality(a))[0];
-    return best?{...best,fixture:Number(p.fixture),favoriteOption:favorite||null,qualityScore:legQuality(best)}:null;
-  }).filter(Boolean).sort((a,b)=>b.qualityScore-a.qualityScore);
-  const chosen=[],remaining=new Map(selections.map(x=>[x.fixture,x]));
-  const addCoupon=(legs,strategy)=>{
-    if(legs.length!==3||new Set(legs.map(x=>x.fixture)).size!==3)return false;
-    const total=legs.reduce((v,x)=>v*Number(x.odd||1),1);
-    const allPriced=legs.every(x=>Number.isFinite(Number(x.odd))&&Number(x.odd)>=GM_MIN_ODD);
-    if(!allPriced)return false;
+  const activeExisting=existing.filter(c=>c.status!=="VOID"&&c.strategyVersion===couponStrategyVersion);
+  const existingSignatures=new Set(activeExisting.map(c=>c.signature||c.legs.map(x=>`${x.fixture}:${x.market}`).sort().join("|")));
+  const usedToday=new Map();
+  for(const c of activeExisting)for(const l of c.legs||[]){const id=Number(l.fixture);usedToday.set(id,(usedToday.get(id)||0)+1)}
+  const combos=[],rejected={sameMatch:0,repeatLimit:0,duplicate:0,totalOdd:0,probability:0,roi:0,correlation:0};
+  function consider(legs){
+    if(legs.length<3||legs.length>3)return;
+    if(new Set(legs.map(x=>x.fixture)).size!==legs.length){rejected.sameMatch++;return;}
+    if(legs.some(x=>(usedToday.get(Number(x.fixture))||0)>=2)){rejected.repeatLimit++;return;}
+    for(let i=0;i<legs.length;i++)for(let j=i+1;j<legs.length;j++)if(!marketCompatible(legs[i],legs[j])){rejected.correlation++;return;}
+    // Farklı maçlarda aynı market ailesi otomatik ret nedeni değildir.
     const signature=legs.map(x=>`${x.fixture}:${x.market}`).sort().join("|");
-    chosen.push({legs:legs.map(({favoriteOption,qualityScore,...leg})=>leg),total:allPriced?total:null,priced:allPriced,signature,
-      stake:couponStake,status:"OPEN",strategy,strategyVersion:couponStrategyVersionV10,
-      created:new Date().toISOString()});
-    legs.forEach(x=>remaining.delete(x.fixture));return true;
-  };
-  // Önce bütün maç havuzuna göre dinamik hedef belirle; favoriler sadece gerçekten varsa.
-  const possible=Math.floor(remaining.size/3);
-  const favQuota=possible>=3?Math.floor(possible/3):0;
-  for(let n=0;n<favQuota;n++){
-    const favorites=[...remaining.values()].filter(x=>x.favoriteOption).map(x=>({...x.favoriteOption,fixture:x.fixture})).sort((a,b)=>legQuality(b)-legQuality(a));
-    if(favorites.length<3)break;
-    addCoupon(favorites.slice(0,3),"GÜÇLÜ FAVORİLER");
+    if(existingSignatures.has(signature)){rejected.duplicate++;return;}
+    const total=legs.reduce((s,x)=>s*x.odd,1);
+    const rawProbability=legs.reduce((p,x)=>p*x.modelProbability,1);
+    const probability=rawProbability*0.90; // Temkinli iskonto; kalibrasyon yerine geçmez.
+    const expectedReturn=couponStake*total*probability;
+    const expectedProfit=expectedReturn-couponStake;
+    const expectedRoi=expectedProfit/couponStake;
+    const minProbability=legs.length===2?.40:legs.length===3?.32:.27;
+    const minEdge=Math.min(...legs.map(x=>x.valueEdge));
+    const avgP=legs.reduce((s,x)=>s+x.modelProbability,0)/legs.length;
+    if(total<1.70||total>12.00){rejected.totalOdd++;return;}
+    if(probability<.16||avgP<.52||minEdge<2.0){rejected.probability++;return;}
+    if(expectedRoi<.02){rejected.roi++;return;}
+    const risk=couponRisk(probability);
+    if(risk.key==="none")return;
+    const historicalBonus=legs.reduce((s,x)=>s+Math.min(5,Math.max(0,(x.historicalRate-.60)*20)),0);
+    const sizeBonus=legs.length===2?3:legs.length===3?2:1;
+    const score=minEdge*30+probability*1000+expectedRoi*900+historicalBonus*10+sizeBonus;
+    combos.push({legs,total,probability,expectedReturn,expectedProfit,expectedRoi,signature,score,riskKey:risk.key,riskLabel:risk.label,riskLevel:risk.risk});
   }
-  // Geri kalanlar kalite puanına göre dengeli ve fırsat kuponlarıdır; aynı maç tekrarlanmaz.
-  while(remaining.size>=3){
-    const candidates=[...remaining.values()].sort((a,b)=>b.qualityScore-a.qualityScore);
-    const legs=candidates.slice(0,3);
-    if(legs.length<3)break;
-    const strategy=chosen.length%2===0?"DENGELİ SEÇİMLER":"FIRSAT SEÇİMLERİ";
-    if(!addCoupon(legs,strategy))break;
+  // Yalnızca 3 maçlı kuponlar; NO BET mümkündür.
+  // 2 maçlı kupon üretilmez.
+  for(let i=0;i<pool.length;i++)for(let j=i+1;j<pool.length;j++)for(let k=j+1;k<pool.length;k++)consider([pool[i],pool[j],pool[k]]);
+  // 4 maçlı yüksek riskli kupon üretilmez.
+  combos.sort((a,b)=>b.score-a.score);
+  const chosen=[],newUse=new Map();
+  // Sabit kupon adedi yok. Kalite filtresini geçen ve çeşitlendirme kuralına uyan tüm kombinasyonlar değerlendirilir.
+  for(const combo of combos){
+    const fixtures=combo.legs.map(x=>Number(x.fixture));
+    if(fixtures.some(id=>(newUse.get(id)||0)+(usedToday.get(id)||0)>=2))continue;
+    if(chosen.some(c=>{
+      const overlap=c.legs.filter(l=>fixtures.includes(Number(l.fixture))).length;
+      return overlap>=2;
+    }))continue;
+    chosen.push({...combo,stake:couponStake,status:"OPEN",strategyVersion:couponStrategyVersion,created:new Date().toISOString()});
+    fixtures.forEach(id=>newUse.set(id,(newUse.get(id)||0)+1));
   }
   if(!chosen.length){
-    renderCoupons(existing);
+    saveCouponStore(store);renderCoupons(existing);
     const s=pool.stats||{};
-    document.getElementById("couponState").textContent=`${s.matches||0} analiz edilen maçtan ${s.eligible||0} uygun aday var; tekrarsız üçlü kupon için en az 3 kullanılmamış maç gerekli. ${s.unpriced||0} maçta ana tercih için doğrulanmış oran yok, ${s.rejected||0} maç PAS/uygunsuz. Tüm fikstürün analizi tamamlanmadan havuz sınırlı kalır.`;
+    document.getElementById("couponState").textContent=`v7.0: ${s.matches||0} maçta ${s.suggestions||0} market incelendi. ${s.priced||0} markette 1.30+ doğrulanmış oran var; ${s.eligible||0} farklı maç kupona aday. 3 uygun farklı maç ve kabul edilebilir fiyat/değer birleşimi oluşmadı. Oransız BetBuilder otomatik kupona eklenmez.`;
     return;
   }
   store[loadedDate]=[...existing,...chosen];saveCouponStore(store);renderCoupons(store[loadedDate]);
-  const favorites=chosen.filter(c=>c.strategy==="GÜÇLÜ FAVORİLER").length;
-  document.getElementById("couponState").textContent=`${chosen.length} yeni kupon oluşturuldu • ${favorites} güçlü favori • ${chosen.length-favorites} dengeli/fırsat • ${chosen.length*3} farklı maç • her kupon 3 maç, 1.000 TL sanal tutar. Birlikte olasılık çarpımı kullanılmadı.`;
+  const safe=chosen.filter(c=>c.riskKey==="safe").length,balanced=chosen.filter(c=>c.riskKey==="balanced").length,value=chosen.filter(c=>c.riskKey==="value").length;
+  document.getElementById("couponState").textContent=`v7.0: ${chosen.length} sanal kupon oluşturuldu • 🟢 ${safe} güvenli • 🟡 ${balanced} dengeli • 🔴 ${value} değer • toplam ${chosen.length*couponStake.toLocaleString("tr-TR")} TL sanal bahis • kupon boyutu 3 maç.`;
 }
 
 function legResult(market,h,a,hh=null,ha=null){
   const total=h+a;
   const htTotal=(hh===null||ha===null)?null:hh+ha;
   if(market==="HOME")return h>a;if(market==="AWAY")return a>h;
-  if(market==="BB_HOME_OVER15")return h>a&&total>=2;
-  if(market==="BB_AWAY_OVER15")return a>h&&total>=2;
-  if(market==="BB_BTTS_OVER25")return h>0&&a>0&&total>=3;
-  if(market==="BB_HOME_TEAM15")return h>a&&h>=2;
-  if(market==="BB_AWAY_TEAM15")return a>h&&a>=2;
   if(market==="DC_1X")return h>=a;if(market==="DC_X2")return a>=h;
   if(market==="HOME_OVER_1_5")return h>=2;if(market==="AWAY_OVER_1_5")return a>=2;
   if(market==="BTTS_YES")return h>0&&a>0;if(market==="BTTS_NO")return h===0||a===0;
@@ -4924,8 +4750,8 @@ async function settleCoupons(){
     coupon.status=coupon.legs.some(x=>x.status==="LOST")?"LOST":coupon.legs.every(x=>x.status==="WON")?"WON":"OPEN";
     const stake=Number(coupon.stake||couponStake),total=Number(coupon.total||1);
     coupon.stake=stake;
-    coupon.payout=coupon.status==="WON"&&coupon.priced!==false?stake*total:0;
-    coupon.profit=coupon.priced===false?0:coupon.status==="WON"?coupon.payout-stake:coupon.status==="LOST"?-stake:0;
+    coupon.payout=coupon.status==="WON"?stake*total:coupon.status==="LOST"?0:0;
+    coupon.profit=coupon.status==="WON"?coupon.payout-stake:coupon.status==="LOST"?-stake:0;
   }
   saveCouponStore(store);
   renderCoupons(store[loadedDate]||[]);
@@ -4933,7 +4759,7 @@ async function settleCoupons(){
 function bankrollStats(store){
   const stored=Object.values(store).flatMap(x=>Array.isArray(x)?x:[]),voided=stored.filter(c=>c.status==="VOID");
   // Eski kuponları silmeden v4.12 performansını ayrı ölç.
-  const all=stored.filter(c=>c.status!=="VOID"&&c.priced!==false&&(c.strategyVersion===couponStrategyVersion||c.strategyVersion===couponStrategyVersionV10));
+  const all=stored.filter(c=>c.status!=="VOID"&&c.strategyVersion===couponStrategyVersion);
   const won=all.filter(c=>c.status==="WON"),lost=all.filter(c=>c.status==="LOST"),open=all.filter(c=>(c.status||"OPEN")==="OPEN");
   const settled=[...won,...lost],stakeOf=c=>Number(c.stake||couponStake);
   const totalStaked=all.reduce((s,c)=>s+stakeOf(c),0);
@@ -4958,17 +4784,12 @@ function renderLearningStats(){
 
 function renderBankroll(store){
   const s=bankrollStats(store),netClass=s.net>=0?"profit":"loss",money=n=>`${Number(n||0).toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`;
-  document.getElementById("gmNet").textContent=(s.net>=0?"+":"")+money(s.net);
-  document.getElementById("gmNet").style.color=s.net>=0?"#a5ff38":"#ff7c88";
-  const settledStakes=s.totalStaked-s.open*couponStake;
-  document.getElementById("gmRoi").textContent=settledStakes>0?`ROI %${(100*s.net/settledStakes).toFixed(1)} · ${s.won+s.lost} sonuçlanan kupon`:"Henüz sonuçlanmış kupon yok";
   document.getElementById("bankroll").innerHTML=
     `<div>Toplam kupon<b>${s.total}</b></div>`+
     `<div>Tutan / Yatan<b><span class="won">${s.won}</span> / <span class="lost">${s.lost}</span></b></div>`+
     `<div>Botun toplam başarısı<b>%${s.success.toFixed(1).replace(".",",")}</b></div>`+
     `<div>Toplam sanal bahis<b>${money(s.totalStaked)}</b></div>`+
     `<div>Gerçekleşen net kâr/zarar<b class="${netClass}">${s.net>=0?"+":""}${money(s.net)}</b></div>`;
-  const mini=document.getElementById("gmPerfMini");if(mini)mini.innerHTML=`<div><small>Kupon</small><strong>${s.total}</strong></div><div><small>Kazanan</small><strong>${s.won}</strong></div><div><small>Başarı</small><strong>%${s.success.toFixed(0)}</strong></div>`;
   renderLearningStats();
 }
 function renderCoupons(coupons){
@@ -4977,25 +4798,26 @@ function renderCoupons(coupons){
   renderBankroll(store);
   let won=0,lost=0,legWon=0,legLost=0;
   for(const list of Object.values(store))for(const c of list||[]){
-    if(c.strategyVersion!==couponStrategyVersionV10)continue;
+    if(c.strategyVersion!==couponStrategyVersion)continue;
     if(c.status==="WON")won++;if(c.status==="LOST")lost++;
     for(const l of c.legs||[]){if(l.status==="WON")legWon++;if(l.status==="LOST")legLost++;}
   }
   const settled=won+lost,settledLegs=legWon+legLost;
   document.getElementById("couponState").textContent=coupons.length
-    ? `Bugün ${coupons.length} aktif kupon • yeni strateji kupon başarısı: ${settled?Math.round(won/settled*100):0}% (${won}/${settled}) • Seçim başarısı: ${settledLegs?Math.round(legWon/settledLegs*100):0}% (${legWon}/${settledLegs})`
-    : "Bu tarih için yeni strateji kuponu yok. Eski kuponlar performans hesabından ayrı tutuluyor.";
+    ? `Bugün ${coupons.length} aktif kupon • v5.0 kupon başarısı: ${settled?Math.round(won/settled*100):0}% (${won}/${settled}) • Seçim başarısı: ${settledLegs?Math.round(legWon/settledLegs*100):0}% (${legWon}/${settledLegs})`
+    : "Bu tarih için v5.0 aktif kupon yok. Eski kuponlar performans hesabından ayrı tutuluyor.";
   coupons.forEach((c,i)=>{
     const el=document.createElement("div");el.className="coupon";
     const status=c.status||"OPEN",statusText=status==="WON"?"TUTTU":status==="LOST"?"YATMADI":status==="VOID"?"İPTAL":"BEKLİYOR";
     const stake=Number(c.stake||couponStake),total=Number(c.total||1),potential=stake*total;
     const probability=Number(c.probability||0),expectedProfit=Number(c.expectedProfit||0);
-    const riskHtml=c.strategyVersion===couponStrategyVersionV10?`<span class="coupon-risk ${c.strategy==="GÜÇLÜ FAVORİLER"?"safe":"balanced"}">${esc(c.strategy||"DENGELİ SEÇİMLER")}</span>`:"";
+    const risk=couponRisk(probability);
+    const riskHtml=risk.key!=="none"?`<span class="coupon-risk ${risk.key}">${risk.label} • RİSK: ${risk.risk}</span>`:"";
     const couponType=c.legs?.length===2?"2 MAÇ":c.legs?.length===3?"3 MAÇ":c.legs?.length===4?"4 MAÇ":`${c.legs?.length||0} MAÇ`;
     el.innerHTML=`<div class="coupon-title">Kupon ${i+1} • <span class="${status.toLowerCase()}">${statusText}</span></div>`+
-      riskHtml+`<div class="coupon-meta"><b>${couponType}</b> • ${c.strategyVersion===couponStrategyVersionV10?"Tekrarsız maç seçimi • maç bazlı değerlendirme":"Önceki sürüm kuponu"}</div>`+
-      c.legs.map(l=>`<div class="coupon-leg"><b>${esc(l.home)} — ${esc(l.away)}</b><br>${esc(l.label)} • ${l.odd?Number(l.odd).toFixed(2)+" "+esc(l.bookmaker||""):"ORAN YOK · SADECE TAHMİN"}<br>Model olasılığı %${(Number(l.modelProbability||0)*100).toFixed(1).replace(".",",")} • Değer +${Number(l.valueEdge||0).toFixed(1).replace(".",",")}%${l.historicalN?` • Market geçmişi %${(Number(l.historicalRate||0)*100).toFixed(0)} (${l.historicalN} analiz)`:""} • <span class="${String(l.status||"OPEN").toLowerCase()}">${l.status==="WON"?"TUTTU":l.status==="LOST"?"YATTI":l.status==="VOID"?"İPTAL":"AÇIK"}</span></div>`).join("")+
-      `<div class="coupon-total">${c.priced===false?"Oran doğrulanmadı · sanal ödeme hesabı yok":"Toplam oran "+total.toFixed(2)} • ${status==="VOID"?`Bahis iptal • Para ve başarı hesabına dahil değil`: `Bahis ${stake.toLocaleString("tr-TR")} TL • ${status==="OPEN"?`Potansiyel dönüş ${potential.toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`:status==="WON"?`Dönüş ${potential.toLocaleString("tr-TR",{maximumFractionDigits:0})} TL • Net +${(potential-stake).toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`:`Net -${stake.toLocaleString("tr-TR")} TL`}`}</div>`+
+      riskHtml+`<div class="coupon-meta"><b>${couponType}</b> • Birlikte tutma ihtimali <b>%${(probability*100).toFixed(1).replace(".",",")}</b> • Risk <b>${risk.risk}</b></div>`+
+      c.legs.map(l=>`<div class="coupon-leg"><b>${esc(l.home)} — ${esc(l.away)}</b><br>${esc(l.label)} • ${Number(l.odd||0).toFixed(2)} ${esc(l.bookmaker||"")}<br>Model olasılığı %${(Number(l.modelProbability||0)*100).toFixed(1).replace(".",",")} • Değer +${Number(l.valueEdge||0).toFixed(1).replace(".",",")}%${l.historicalN?` • Market geçmişi %${(Number(l.historicalRate||0)*100).toFixed(0)} (${l.historicalN} analiz)`:""} • <span class="${String(l.status||"OPEN").toLowerCase()}">${l.status==="WON"?"TUTTU":l.status==="LOST"?"YATTI":l.status==="VOID"?"İPTAL":"AÇIK"}</span></div>`).join("")+
+      `<div class="coupon-total">Toplam oran ${total.toFixed(2)} • ${status==="VOID"?`Bahis iptal • Para ve başarı hesabına dahil değil`: `Bahis ${stake.toLocaleString("tr-TR")} TL • ${status==="OPEN"?`Potansiyel dönüş ${potential.toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`:status==="WON"?`Dönüş ${potential.toLocaleString("tr-TR",{maximumFractionDigits:0})} TL • Net +${(potential-stake).toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`:`Net -${stake.toLocaleString("tr-TR")} TL`}`}<br>${probability?`Kuponun birlikte tutma ihtimali %${(probability*100).toFixed(1).replace(".",",")} • Teorik beklenen değer ${expectedProfit>=0?"+":""}${expectedProfit.toLocaleString("tr-TR",{maximumFractionDigits:0})} TL`:`Eski kupon • olasılık kaydı yok`}</div>`+
       `<button type="button" class="remove-coupon">Kuponu kaldır</button>`;
     root.appendChild(el);
     el.querySelector(".remove-coupon").onclick=()=>{
@@ -5011,53 +4833,40 @@ function renderCoupons(coupons){
     };
   });
 }
-async function refreshProLive(){const host=document.getElementById("gmLiveScores");if(!host)return;try{const r=await fetch("/api/matches",{cache:"no-store",signal:AbortSignal.timeout(7000)});if(!r.ok)throw Error("Live API");const data=await r.json();const ms=Array.isArray(data.matches)?data.matches:[];host.innerHTML=ms.length?ms.slice(0,7).map(m=>`<div class="gm-live-tile"><small><span class="gm-live-pulse">●</span> ${esc(m.minute??"CANLI")}' · ${esc(m.league||"")}</small><div><span>${esc(m.home||"Ev sahibi")}</span><b>${esc(m.home_goals??0)} : ${esc(m.away_goals??0)}</b><span>${esc(m.away||"Deplasman")}</span></div></div>`).join(""):'<div class="gm-empty">Şu anda taranan canlı karşılaşma bulunmuyor.</div>';}catch{host.innerHTML='<div class="gm-empty">Canlı skor verisine ulaşılamadı.</div>';}}
-refreshProLive();setInterval(refreshProLive,60000);
-document.getElementById("gmManualTab").addEventListener("click",()=>{document.getElementById("gmManualTab").classList.add("active");document.getElementById("gmAutoTab").classList.remove("active");document.getElementById("gm-fixtures").scrollIntoView({behavior:"smooth"});});
-document.getElementById("gmAutoTab").addEventListener("click",()=>{document.getElementById("gmAutoTab").classList.add("active");document.getElementById("gmManualTab").classList.remove("active");});
-function updateCoverage(){const n=loadedMatches.length;document.getElementById("gmCoverage").textContent=n?`%${(100*analyzedMatches.size/n).toFixed(0)}`:"—";}
 function renderFixtures(){
   const selected=loadedDate;
-  const countryFiltered=leagueSelect.value==="ALL" ? loadedMatches
+  const filtered=leagueSelect.value==="ALL" ? loadedMatches
     : loadedMatches.filter(m=>String(m.country||"Diğer")===leagueSelect.value);
-  const term=(document.getElementById("wsSearch")?.value||"").trim().toLocaleLowerCase("tr-TR");
-  const filtered=term?countryFiltered.filter(m=>[m.home,m.away,m.country,m.league].some(x=>String(x||"").toLocaleLowerCase("tr-TR").includes(term))):countryFiltered;
-  document.getElementById("gmFixtureCount").textContent=filtered.length+" MAÇ";
   state.textContent=filtered.length
     ? `${filtered.length} maç gösteriliyor. Analiz için bir maç seç.`
     : "Seçilen ligde başlamamış maç bulunamadı.";
   root.innerHTML="";
   for(const m of filtered){
       const card=document.createElement("article");card.className="match";
-      const logo=(u,n)=>typeof u==="string"&&/^https:\/\/[a-z0-9.-]+\//i.test(u)?`<img class="gm-team-logo" src="${esc(u)}" alt="${esc(n)} logosu" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display='none'">`:`<span class="gm-team-placeholder">⚽</span>`;
-      card.innerHTML=`<div class="gm-match-time"><b>${esc(shownTime(m.kickoff))}</b><small>${esc(m.league||m.country||"")}</small></div><div class="gm-teams"><span class="gm-team">${logo(m.home_logo,m.home)}<b>${esc(m.home)}</b></span><span class="gm-vs">—</span><span class="gm-team">${logo(m.away_logo,m.away)}<b>${esc(m.away)}</b></span></div><span class="gm-market" data-market>Analiz bekliyor</span><span class="gm-price" data-price>—</span><span class="gm-confidence" data-confidence>—</span><span class="gm-risk" data-risk>—</span><span class="gm-form" data-form>—</span><button type="button" class="analyze-btn">Analiz et →</button><div class="analysis" hidden></div>`;
+      card.innerHTML=`<div class="meta">🏆 ${esc(m.country)} • ${esc(m.league)} &nbsp; ⏰ ${esc(shownTime(m.kickoff))}</div>
+        <div class="teams">${esc(m.home)} — ${esc(m.away)}</div>
+        <button type="button" class="analyze-btn">Bu maçı analiz et</button><div class="analysis" hidden></div>`;
       const button=card.querySelector(".analyze-btn"),box=card.querySelector(".analysis");
       button.onclick=async()=>{
-        button.disabled=true;button.textContent="Analiz ediliyor…";box.hidden=true;box.textContent="";
+        button.disabled=true;box.hidden=false;box.textContent="Son maçlar inceleniyor…";
         try{
           const a=await getJson("/api/prematch/analyze?date="+encodeURIComponent(selected)+"&fixture="+encodeURIComponent(m.id));
           analyzedMatches.set(Number(m.id),{match:m,analysis:a});
-          document.getElementById("wsAnalyzedCount").textContent=analyzedMatches.size;updateCoverage();
           registerPickHistory(m,a);
-          const choices=Array.isArray(a.suggestions)?a.suggestions:[];
-          const ranked=choices.filter(p=>p?.quote&&Number(p.quote.odd)>=1.30);
-          const primary=choices.find(p=>p.is_main)||choices[0]||null;
-          // Risk etiketi sadece model olasılığını ifade eder; garanti değildir.
-          card.querySelector("[data-market]").textContent=primary?.label||"Değerli seçim yok";
-          card.querySelector("[data-price]").textContent=primary?.quote&&Number(primary.quote.odd)>=1.30?Number(primary.quote.odd).toFixed(2):"—";
-          const prob=primary?Number(primary.model_probability):NaN;card.querySelector("[data-confidence]").textContent=Number.isFinite(prob)?`${(prob<=1?prob*100:prob).toFixed(0)}%`:"—";
-          const risk=Number.isFinite(prob)?(prob<=1?prob*100:prob):NaN;card.querySelector("[data-risk]").textContent=Number.isFinite(risk)?(risk>=75?"Düşük":risk>=60?"Orta":"Yüksek"):"Pas";
-          box.hidden=true; // Sonuç tabloda kalır, detay ekranı kendiliğinden açılmaz.
-          button.textContent="Yeniden analiz et";
-          box.innerHTML=`<div class="gm-decision"><div class="gm-decision-label">BOT ANALİZİ</div><div class="gm-decision-top"><strong>${esc(primary?.label||"Uygun tercih bulunamadı")}</strong><span class="gm-odd">${primary?.quote&&Number(primary.quote.odd)>=1.30?Number(primary.quote.odd).toFixed(2)+" ORAN":"ORAN DOĞRULANMADI"}</span></div><div class="gm-decision-meta"><span>${esc(primary?.decision_role||"Model değerlendirmesi")}</span><span>${esc(primary?.quote?.bookmaker||"Fiyat kaynağı yok")}</span></div><p>Maç istatistikleri ve piyasa fiyatları arka planda değerlendirildi. Model tahminleri kesin sonuç değildir.</p><button type="button" class="close-analysis">✕ Kapat</button></div>`;
+          const picks=a.suggestions.length
+            ? a.suggestions.map(p=>`<div class="pick" style="border:2px solid ${p.risk_level==="green"?"#19ba72":p.risk_level==="yellow"?"#e8b93e":"#e35353"};background:${p.risk_level==="green"?"#0e352a":p.risk_level==="yellow"?"#40341a":"#3d1d26"}"><b>${esc(p.label)}</b><div class="quote">${esc(p.decision_role||"ANALİZ")} · Oran ${p.quote&&Number(p.quote.odd)>=1.30?`${Number(p.quote.odd).toFixed(2)} · ${esc(p.quote.bookmaker)}`:"Doğrulanmadı · Manuel değerlendir"}</div><div class="reason">${esc(p.quote?.market_name||"Model senaryosu / oran yok")}: ${esc(p.quote?.selection||"Tahmini tercih")}${quoteTime(p.quote?.updated)?` · Güncelleme: ${esc(quoteTime(p.quote.updated))}`:""}</div><div class="pick-why"><b>Neden bu tercih?</b><br>${esc(p.explanation || p.reason)}</div><div class="reason">Tahmini olasılık ${p.model_probability!=null?`${(Number(p.model_probability)*100).toFixed(1).replace(".",",")}%`:"-"} · Oranın ima ettiği ${p.implied_probability!=null?`${(Number(p.implied_probability)*100).toFixed(1).replace(".",",")}%`:"-"} · Değer farkı ${p.value_edge_pct!=null?`${Number(p.value_edge_pct)>=0?"+":""}${Number(p.value_edge_pct).toFixed(1).replace(".",",")}%`:"-"}</div><div class="reason">${esc(p.probability_basis||"Market özelinde form verileri kullanıldı.")}</div></div>`).join("")
+            : `<div class="pas">Analiz için yeterli veri bulunamadı</div>`;
+          box.innerHTML=`<div style="display:flex;justify-content:flex-end;margin-bottom:8px"><button type="button" class="close-analysis">✕ Analizi kapat</button></div><div class="form"><div><b>${esc(a.home)}</b><br>${esc(formText(a.home_form,"home"))}</div>
+            <div><b>${esc(a.away)}</b><br>${esc(formText(a.away_form,"away"))}</div></div>
+            ${h2hHtml(a)}${lineupHtml(a)}<div class="lineup-box"><b>🌐 İnternet araştırması</b><div>${esc(a.web_research?.note||"Kaynak bilgisi yok")}</div>${(a.web_research?.sources||[]).map(x=>`<div><a href="${esc(x.url)}" target="_blank" rel="noopener noreferrer">${esc(x.title)}</a> <small>${esc(x.published||"")}</small></div>`).join("")}</div>${picks}${(a.joint_notes||[]).map(n=>`<div class="joint-note"><b>Birlikte gerçekleşme ihtimali</b><br>${esc(n)}</div>`).join("")}<div class="odds-note">${esc(a.odds_note)}</div><div class="hint">${esc(a.note)}</div>`;
           box.querySelector(".close-analysis").onclick=()=>{
-            // Analizi gizlemek sonuçları ve kupon adaylarını silmez.
+            analyzedMatches.delete(Number(m.id));
             box.hidden=true;
             box.innerHTML="";
             button.disabled=false;
             button.textContent="Bu maçı tekrar analiz et";
           };
-        }catch(e){box.hidden=false;box.innerHTML='<span class="error">'+esc(e.message)+'</span>'}
+        }catch(e){box.innerHTML='<span class="error">'+esc(e.message)+'</span>'}
         finally{button.disabled=false}
       };
       root.appendChild(card);
@@ -5070,14 +4879,6 @@ async function load(){
   try{
     const data=await getJson("/api/prematch/fixtures?date="+encodeURIComponent(selected));
     loadedDate=selected;loadedMatches=data.matches;
-    document.getElementById("wsMatchCount").textContent=loadedMatches.length.toLocaleString("tr-TR");
-    document.getElementById("wsCountryCount").textContent=new Set(loadedMatches.map(m=>String(m.country||"Diğer"))).size;
-    const leagueCounts=new Map();for(const m of loadedMatches){const k=String(m.league||"Diğer");leagueCounts.set(k,(leagueCounts.get(k)||0)+1)}
-    const leagueTop=[...leagueCounts.entries()].sort((a,b)=>b[1]-a[1]).slice(0,6);
-    const leagueMax=Math.max(1,...leagueTop.map(x=>x[1]));
-    const total=loadedMatches.length;const colors=["#287fff","#0bd6e7","#a5ff38","#f9c84d","#fa666b","#8391ad"];let offset=0;const slices=leagueTop.map(([name,count],i)=>({name,count,color:colors[i]}));const stops=slices.map(x=>{const start=offset;offset+=total?100*x.count/total:0;return `${x.color} ${start}% ${offset}%`});if(offset<100)stops.push(`#24375e ${offset}% 100%`);document.getElementById("gmDonut").style.background=`conic-gradient(${stops.join(",")||"#24375e 0% 100%"})`;document.getElementById("gmDonutTotal").innerHTML=`${total}<small>Maç</small>`;document.getElementById("gmDonutLegend").innerHTML=slices.map(x=>`<div><i style="background:${x.color}"></i><span>${esc(x.name)}</span><b>${x.count}</b></div>`).join("");
-    document.getElementById("gmLeagueBars").innerHTML=leagueTop.length?leagueTop.map(([name,count])=>`<div><div class="gm-bar-line"><span>${esc(name)}</span><strong>${count} maç</strong></div><div class="gm-bar-track"><div class="gm-bar-fill" style="width:${100*count/leagueMax}%"></div></div></div>`).join(""):'<div class="gm-empty">Fikstür bulunamadı.</div>';
-    document.getElementById("wsAnalyzedCount").textContent="0";updateCoverage();
     const countries=new Map();
     for(const m of loadedMatches){
       const country=String(m.country||"Diğer");
@@ -5093,7 +4894,6 @@ async function load(){
   }catch(e){state.innerHTML='<span class="error">'+esc(e.message)+'</span>'}
 }
 leagueSelect.onchange=renderFixtures;
-document.getElementById("wsSearch").addEventListener("input",renderFixtures);
 document.getElementById("makeCoupons").onclick=buildCoupons;
 document.getElementById("load").onclick=load;load();
 </script></body></html>"""
