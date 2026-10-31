@@ -3689,7 +3689,7 @@ PAGE = r"""<!doctype html>
   --purple:#c84cff;
 }
 *{box-sizing:border-box}
-html,body{margin:0;min-height:100%;background:linear-gradient(180deg,#04101b 0%,#061522 100%);color:var(--text);font-family:Inter,Segoe UI,Arial,sans-serif}
+html,body{margin:0;min-height:100%;background:radial-gradient(ellipse at 14% 8%,rgba(22,91,151,.33) 0%,transparent 48%),radial-gradient(ellipse at 85% 45%,rgba(11,85,113,.24) 0%,transparent 52%),linear-gradient(145deg,#071a2d 0%,#061421 58%,#081c2b 100%);background-attachment:fixed;color:var(--text);font-family:Inter,Segoe UI,Arial,sans-serif}
 body{overflow-x:hidden;padding-bottom:42px}
 .wrap{width:min(1880px,calc(100% - 26px));margin:0 auto;padding:16px 0 22px}
 
