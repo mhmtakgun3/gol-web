@@ -3689,7 +3689,7 @@ PAGE = r"""<!doctype html>
   --purple:#c84cff;
 }
 *{box-sizing:border-box}
-html,body{margin:0;min-height:100%;background:radial-gradient(ellipse at 14% 8%,rgba(22,91,151,.33) 0%,transparent 48%),radial-gradient(ellipse at 85% 45%,rgba(11,85,113,.24) 0%,transparent 52%),linear-gradient(145deg,#071a2d 0%,#061421 58%,#081c2b 100%);background-attachment:fixed;color:var(--text);font-family:Inter,Segoe UI,Arial,sans-serif}
+html,body{margin:0;min-height:100%;background:linear-gradient(180deg,#04101b 0%,#061522 100%);color:var(--text);font-family:Inter,Segoe UI,Arial,sans-serif}
 body{overflow-x:hidden;padding-bottom:42px}
 .wrap{width:min(1880px,calc(100% - 26px));margin:0 auto;padding:16px 0 22px}
 
@@ -3937,6 +3937,22 @@ select{
   select{min-width:0;flex:1}.grid{grid-template-columns:1fr}.title{font-size:22px}
   .card.featured.bot{grid-column:span 1}
 }
+
+/* GOL MERKEZI PRO — REFERANS YATAY MAC GORUNUMU */
+#matches.grid{display:flex;flex-direction:column;gap:12px}
+.hcard{background:linear-gradient(115deg,#06162c,#071b30);border:1px solid #145575;border-radius:15px;overflow:hidden;color:#eaf6ff;box-shadow:0 4px 16px #0003}
+.hmain{display:grid;grid-template-columns:84px minmax(160px,1.2fr) 105px minmax(235px,1fr) minmax(240px,.95fr) 102px 34px;align-items:center;gap:12px;padding:16px 18px;min-height:128px}
+.hminute{text-align:center}.hminute strong{display:block;background:#06482f;border:1px solid #087e50;color:#47e9a5;border-radius:10px;font-size:25px;padding:14px 4px}.hminute span{display:block;color:#55e7a6;font-size:12px;font-weight:800;margin-top:7px}
+.hleague{color:#9bb2c8;font-size:11px;margin-bottom:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.hteam{display:flex;align-items:center;gap:9px;margin:5px 0;font-size:13px}.hteam b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.hlogo{width:26px;height:26px;object-fit:contain}.hball{font-size:20px}
+.hscore{text-align:center}.hscore strong{display:block;font-size:25px;background:#08192b;border:1px solid #145575;border-radius:10px;padding:12px 4px}.hscore span{display:block;color:#a8b6ce;font-size:10px;margin-top:7px}
+.hbars{display:grid;gap:9px}.hstat{display:grid;grid-template-columns:80px minmax(65px,1fr) 44px;gap:8px;align-items:center;font-size:10px;color:#c8d7e7}.hstat strong{text-align:right;font-size:11px;color:#eef5fc}.htrack{display:flex;height:9px;border-radius:12px;overflow:hidden;background:#213b57}.htrack i{background:#ff4f81;display:block}.htrack b{background:#258dff;display:block}
+.hprediction{background:linear-gradient(115deg,#082c42,#082037);border:1px solid #175576;border-radius:11px;padding:13px;min-height:100px}.hprediction>b{display:block;color:#49d6f4;font-size:13px}.hprediction p{font-size:11px;color:#c7d9e6;line-height:1.4;margin:8px 0}.hprediction span{display:inline-block;background:#075b48;color:#67f0b8;padding:7px 10px;border-radius:6px;font-weight:850;font-size:11px}.hprediction small{display:block;color:#a6c3d8;margin-top:6px}
+.hsignal{background:linear-gradient(135deg,#60182f,#310f29);border:1px solid #a3315d;border-radius:12px;min-height:94px;display:flex;flex-direction:column;justify-content:center;align-items:center}.hsignal strong{font-size:29px;color:#ff688b}.hsignal span{font-size:9px;color:#ffd1df;font-weight:900;margin-top:7px}
+.hexpand{background:#087b80;border:1px solid #12a7a4;color:white;border-radius:9px;padding:12px 8px;cursor:pointer;font-size:18px}
+.hdetails{border-top:1px solid #17415d}.hdetails>summary{cursor:pointer;display:flex;justify-content:space-between;padding:13px 22px;color:#50d8d0;font-size:12px;font-weight:850;list-style:none}.hdetails>summary::-webkit-details-marker{display:none}.hdetails>summary span{margin-right:26%;color:#50d8d0}.hdetailgrid{display:grid;grid-template-columns:1fr 1fr;gap:28px;padding:10px 24px 23px;font-size:12px;color:#b9cddd}.hdetailgrid b{color:#e9f5ff}.hdetailgrid p{line-height:1.5}.hbars.detail{margin:12px 0}.hdots{display:inline-flex;gap:5px}.hdots i{width:12px;height:12px;background:#425269;border-radius:50%}.hdots i.on{background:#f38048}.hperflink{color:#53e3ad;text-decoration:none;font-weight:800}
+@media(max-width:1380px){.hmain{grid-template-columns:75px minmax(150px,1fr) 92px minmax(200px,1fr) minmax(210px,1fr) 88px 30px;gap:8px;padding:12px}.hstat{grid-template-columns:65px minmax(55px,1fr) 38px;gap:5px}}
+@media(max-width:1050px){.hmain{grid-template-columns:72px minmax(160px,1fr) 90px 1fr 86px 30px}.hbars:not(.detail){grid-column:2/5;grid-row:2}.hprediction{grid-column:4;grid-row:1}.hdetailgrid{gap:16px}}
+@media(max-width:690px){.hmain{grid-template-columns:62px minmax(100px,1fr) 85px 60px 30px;gap:7px}.hminute strong{font-size:19px;padding:11px 3px}.hscore strong{font-size:20px}.hteams{min-width:0}.hteam{font-size:11px}.hbars:not(.detail){grid-column:1/-1;grid-row:auto}.hprediction{grid-column:1/-1;grid-row:auto;min-height:0}.hsignal{min-height:70px}.hsignal strong{font-size:21px}.hsignal span{font-size:8px}.hdetailgrid{grid-template-columns:1fr}.hdetails>summary span{margin-right:0}}
 </style>
 </head>
 <body>
@@ -3977,6 +3993,7 @@ select{
     </div>
   </div>
 
+  <div id="performancePulse" class="info-pill" style="margin:10px 0 14px;display:block;border-color:#13556b">📊 Sinyal performansı yükleniyor…</div>
   <div class="grid" id="matches"></div>
 
   <div class="footer">
@@ -4121,141 +4138,66 @@ function sortMatches(list){
   });
 }
 
+function statPair(m,key){
+  const s=m.stats||{};
+  const h=s.home||{}, a=s.away||{};
+  return [Number(h[key]||0),Number(a[key]||0)];
+}
+function statBar(m,key,label){
+  const [h,a]=statPair(m,key), total=Math.max(1,h+a);
+  const hp=h+a?100*h/total:50;
+  return `<div class="hstat"><span>${label}</span><div class="htrack"><i style="width:${hp}%"></i><b style="width:${100-hp}%"></b></div><strong>${h} | ${a}</strong></div>`;
+}
 function renderMatches(){
   const root=document.getElementById("matches");
-  let list=currentLeague==="ALL"
-    ? currentMatches
-    : currentMatches.filter(m=>leagueLabel(m)===currentLeague);
-
+  let list=currentLeague==="ALL"?currentMatches:currentMatches.filter(m=>leagueLabel(m)===currentLeague);
   list=sortMatches(list);
-
-  if(!list.length){
-    root.innerHTML='<div class="empty">Şu anda gösterilecek canlı maç yok.</div>';
-    return;
-  }
-
-  let html="";
-
+  if(!list.length){root.innerHTML='<div class="empty">Şu anda gösterilecek canlı maç yok.</div>';return;}
+  const openIds=new Set([...root.querySelectorAll('details.hdetails[open]')].map(e=>e.dataset.fixture));
+  let html='';
   for(const m of list){
-    const home=m.home_team||"";
-    const away=m.away_team||"";
-    const hg=homeGoalsOf(m);
-    const ag=awayGoalsOf(m);
-    const minute=Number(m.minute||0);
-    const goal=Number(m.signal||0);
-    const pressure=Number(m.momentum_score||0);
-    const bot=Number(m.bot_pick_score||0);
-    const homeGoal=Number(m.home_goal_signal||0);
-    const awayGoal=Number(m.away_goal_signal||0);
-    const btts=Number(m.btts_signal||0);
-    const firstHalf=Number(m.first_half_signal||0);
-    const s=m.stats||{};
-    const cat=categoryFor(m);
-    const league=leagueLabel(m);
-
-    const expected=m.match_expected_team||m.expected_team||"";
-    const firstHalfLimit=Number(m.first_half_limit||65);
-    const firstHalfLine=firstHalfMarket(m);
-    const firstHalfPick=Boolean(firstHalfLine && firstHalf>=firstHalfLimit);
-
-    // Dinamik ÜST önerisi:
-    // Mevcut toplam gole göre bir sonraki çizgi hesaplanır.
-    // Örn. 2-3 => 5 gol => 5,5 ÜST = 1 gol daha.
-    // Güçlü sinyal varsa daha ileri çizgi de söylenebilir:
-    // Örn. 1-1 ve çok güçlü devam sinyali => 3,5 ÜST = 2 gol daha.
-    const totalGoals=hg+ag;
-    let expectedMoreGoals=1;
-
-    // Çok güçlü devam baskısında 2 gol daha beklentisi.
-    // BOT 78+ veya hem GOL hem BASKI güçlü ise.
-    if(bot>=78 || (goal>=65 && pressure>=65)){
-      expectedMoreGoals=2;
-    }
-
-    // Aşırı güçlü birleşik sinyalde 3 gol daha beklentisi.
-    if(bot>=88 && goal>=80 && pressure>=75){
-      expectedMoreGoals=3;
-    }
-
-    const overLine=(totalGoals + expectedMoreGoals - 0.5).toFixed(1).replace(".",",");
-    const dynamicOver=`${overLine} ÜST • Bu maçta ${expectedMoreGoals} gol daha bekleniyor`;
-
-    // KG Var yalnızca henüz gerçekleşmediyse önerilebilir.
-    const bttsAlreadyHappened=(hg>0 && ag>0);
-    const bttsPick=(!bttsAlreadyHappened && btts>=70);
-
-    let botPickText=String(m.bot_pick_text||"").trim();
-    const botPickIsBtts=/KG Var|Karşılıklı Gol/i.test(botPickText);
-
-    // Eğer KG Var artık gerçekleşmişse eski KG Var BOT metnini ekranda tekrar önermeyiz.
-    // Aynı mevcut sinyallerden dinamik ÜST önerisine döner.
-    const validBotPickText=(m.bot_pick_best && botPickText && !(bttsAlreadyHappened && botPickIsBtts))
-      ? botPickText
-      : "";
-
-    const pick=validBotPickText
-      ? validBotPickText
-      : (firstHalfPick ? `İY ${firstHalfLine} ÜST • İY Sinyali ${firstHalf}/100`
-        : bttsPick ? "Karşılıklı Gol Var"
-        : (goal>=65 || bot>=65 || pressure>=65 || m.bot_pick_best) ? dynamicOver
-        : expected ? `${expected} gol bekleniyor`
-        : "Gol için takipte");
-
-    const odd=m.live_odd ? Number(m.live_odd) : null;
-    const oddHtml=odd
-      ? `<div class="odd ${odd>=1.50?"good":"low"}">${odd.toFixed(2)} ${odd>=1.50?"↑":"↓"}</div>`
-      : `<div class="odd">—</div>`;
-
-    const homeLogo=m.home_logo
-      ? `<img class="badge-logo" src="${esc(m.home_logo)}" alt="">`
-      : `<span class="fake-ball">⚽</span>`;
-
-    const awayLogo=m.away_logo
-      ? `<img class="badge-logo" src="${esc(m.away_logo)}" alt="">`
-      : `<span class="fake-ball">⚽</span>`;
-
-    const title=m.bot_pick_best ? pick : (firstHalfPick ? `İY ${firstHalfLine} ÜST` : cat.text);
-    const remaining=m.status==="1H"
-      ? (minute<45 ? `İlk yarı bitimine ~${45-minute} dk` : "İlk yarının son dakikaları")
-      : (m.status==="2H" && minute<90 ? `90. dakikaya ~${90-minute} dk` : "Maç devam ediyor");
-    const level=Math.max(0,Math.min(5,Math.ceil(pressure/20)));
-    const dots=Array.from({length:5},(_,i)=>`<span class="pressure-dot ${i<level?"filled":""}"></span>`).join("");
-    const recorded=Number(currentBotPickStats?.total||0);
-    const performance=recorded>=20
-      ? `🎯 Kayıtlı BOT PICK başarısı: %${Number(currentBotPickStats.success_rate).toFixed(1).replace(".",",")} (${Number(currentBotPickStats.won)}/${recorded})`
-      : recorded>0
-        ? `🎯 Kayıtlı sonuç: ${Number(currentBotPickStats.won)} doğru / ${recorded} seçim (az veri)`
-        : "🎯 Kayıtlı BOT PICK sonucu henüz yok";
-    const recent5=m.momentum_delta_5m||{};
-    const oddDisplay=Number.isFinite(odd) && odd>0
-      ? `<span class="featured-odd"><small>oran</small>${odd.toFixed(2)}</span>`
-      : `<span class="featured-odd unavailable">oran yok</span>`;
-    html+=`
-      <div class="card featured ${m.bot_pick_best?"bot":""}">
-        <div class="featured-head">
-          <div class="featured-title">${m.bot_pick_best?"🧠":cat.icon} ${esc(title)}</div>
-          <div class="featured-status">${m.bot_pick_best?"BOT PICK • ":""}Canlı • ${esc(m.status||"")}</div>
-        </div>
-        <div class="featured-divider"></div>
-        <div class="featured-info">
-          <div>🏆 ${esc(league)}</div>
-          <div class="featured-teams">⚽ ${esc(home)} ${hg} – ${ag} ${esc(away)}</div>
-          <div>🎯 Hedef: <b>${esc(pick)}</b></div>
-          <div>⏱️ ${minute}. dakika | ${esc(remaining)}</div>
-          <div>📌 Baskı: <span class="pressure-dots" aria-label="${level}/5 baskı">${dots}</span> <b>${pressure}/100</b></div>
-          ${m.bot_pick_best ? `<div>${esc(performance)}</div>` : ""}
-          ${m.bot_pick_best ? `<div>⏱️ Son 5 dk: Şut ${Number(recent5.shots||0)} · İsabet ${Number(recent5.target||0)} · Ceza içi ${Number(recent5.inside||0)}</div>` : ""}
-          <div>⚽ Şut ${Number(s.shots||0)} · İsabet ${Number(s.target||0)} · Korner ${Number(s.corners||0)} · Ceza içi ${Number(s.inside||0)}</div>
-        </div>
-        <div class="featured-divider"></div>
-        <div class="featured-foot">
-          <div><div class="play-label">NE OYNANIR?</div><div class="featured-pick">${esc(pick)}</div></div>
-          ${oddDisplay}
-        </div>
-      </div>`;
+    const home=m.home_team||'',away=m.away_team||'';
+    const hg=homeGoalsOf(m),ag=awayGoalsOf(m),minute=Number(m.minute||0);
+    const goal=Number(m.signal||0),pressure=Number(m.momentum_score||0),bot=Number(m.bot_pick_score||0);
+    const fh=Number(m.first_half_signal||0), fhLine=firstHalfMarket(m);
+    const fhActive=Boolean(fhLine && fh>=Number(m.first_half_limit||65));
+    const cat=categoryFor(m), s=m.stats||{},recent=m.momentum_delta_5m||{};
+    const league=leagueLabel(m),score=`${hg} - ${ag}`;
+    const expected=m.match_expected_team||m.expected_team||'';
+    let more=1;if(bot>=78||(goal>=65&&pressure>=65))more=2;
+    if(bot>=88&&goal>=80&&pressure>=75)more=3;
+    const dynamicOver=`${(hg+ag+more-.5).toFixed(1).replace('.',',')} ÜST • Bu maçta ${more} gol daha bekleniyor`;
+    let pick=String(m.bot_pick_text||'').trim();
+    if(!m.bot_pick_best||(hg>0&&ag>0&&/KG Var|Karşılıklı Gol/i.test(pick)))pick='';
+    if(!pick)pick=fhActive?`İY ${fhLine} ÜST`:(Number(m.btts_signal||0)>=70&&!(hg>0&&ag>0))?'Karşılıklı Gol Var':(goal>=65||bot>=65||pressure>=65)?dynamicOver:expected?`${expected} gol bekleniyor`:'Gol için takipte';
+    const suggestion=fhActive?`İY ${fhLine} ÜST`:pick;
+    const signal=Math.max(goal,fhActive?fh:0);
+    const logo=(url)=>url?`<img class="hlogo" src="${esc(url)}" alt="">`:'<span class="hball">⚽</span>';
+    const odd=Number(m.live_odd||0);
+    const dots=Array.from({length:5},(_,i)=>`<i class="${i<Math.ceil(pressure/20)?'on':''}"></i>`).join('');
+    const id=String(m.fixture_id||'');
+    const remaining=m.status==='1H'?`İlk yarı bitimine ~${Math.max(0,45-minute)} dk`:`90. dakikaya ~${Math.max(0,90-minute)} dk`;
+    const reason=[...(fhActive?(m.first_half_reasons||[]):m.reasons||[])].slice(0,4).map(x=>esc(x)).join(' • ');
+    html+=`<article class="hcard">
+      <div class="hmain">
+        <div class="hminute"><strong>${minute}'</strong><span>${m.status==='1H'?'1. Yarı':m.status==='2H'?'2. Yarı':'Canlı'}</span></div>
+        <div class="hteams"><div class="hleague">🏆 ${esc(league)}</div><div class="hteam">${logo(m.home_logo)}<b>${esc(home)}</b></div><div class="hteam">${logo(m.away_logo)}<b>${esc(away)}</b></div></div>
+        <div class="hscore"><strong>${score}</strong><span>⏱️ ${minute}'</span></div>
+        <div class="hbars">${statBar(m,'shots','Şut')}${statBar(m,'target','İsabetli Şut')}${statBar(m,'corners','Korner')}${statBar(m,'inside','Ceza İçi')}</div>
+        <div class="hprediction"><b>${esc(suggestion)}</b><p>${reason||'Canlı istatistikler ve hücum baskısı takip ediliyor.'}</p><span>${pick==='Gol için takipte'?'İzleniyor':`Öneri: ${esc(suggestion)}`}</span>${odd>0?`<small>Oran ${odd.toFixed(2)}</small>`:''}</div>
+        <div class="hsignal"><strong>%${Math.round(signal)}</strong><span>GOL SİNYALİ</span></div>
+        <button class="hexpand" type="button" data-open="${esc(id)}" title="Maç detayları">⌄</button>
+      </div>
+      <details class="hdetails" data-fixture="${esc(id)}" ${openIds.has(id)?'open':''}><summary>⚽ Maç Detayları <span>📊 İstatistikler ve Bot Analizi</span></summary>
+      <div class="hdetailgrid"><div><b>${esc(home)} ${score} ${esc(away)}</b><p>Lig: ${esc(league)} · Dakika: ${minute}'</p><p>⏱️ ${esc(remaining)}</p><p>📌 Baskı: <span class="hdots">${dots}</span> <b>${pressure}/100</b></p><p>Son 5 dk: Şut ${Number(recent.shots||0)} · İsabet ${Number(recent.target||0)} · Ceza içi ${Number(recent.inside||0)}</p><p>Gol beklentisi: ${Number(m.home_goal_signal||0)}/100 ev · ${Number(m.away_goal_signal||0)}/100 dep</p></div>
+      <div><b>📊 İstatistikler ve Bot Analizi</b><div class="hbars detail">${statBar(m,'shots','Şut')}${statBar(m,'target','İsabetli Şut')}${statBar(m,'corners','Korner')}${statBar(m,'inside','Ceza İçi')}</div><p>${reason||'Maç canlı takip ediliyor.'}</p><p>İY sinyali ${fh}/100 · BOT ${bot}/100 · Gol ${goal}/100</p><a class="hperflink" href="/performans">📈 Tahminlerin gerçek sonuçları ve 5/10/15 dk performansı</a></div></div>
+      </details>
+    </article>`;
   }
-
   root.innerHTML=html;
+  root.querySelectorAll('.hexpand').forEach(btn=>btn.onclick=()=>{
+    const detail=btn.closest('.hcard').querySelector('details');detail.open=!detail.open;
+  });
 }
 
 function goalMinuteText(goal,fallback){
@@ -4430,6 +4372,26 @@ function tryNotifications(ms){
   localStorage.setItem("golRadarNotifiedV2",JSON.stringify(saved));
 }
 
+async function loadPerformancePulse(){
+  const box=document.getElementById('performancePulse');
+  try{
+    const r=await fetch('/api/performance',{cache:'no-store'}),d=await r.json();
+    if(!d.ok)throw Error(d.error||'API hatası');
+    const rows=d.summary||[];
+    const total=rows.reduce((n,x)=>n+Number(x.total||0),0);
+    const hit=rows.reduce((n,x)=>n+Number(x.hit_15||0),0);
+    const miss=rows.reduce((n,x)=>n+Number(x.missed||0),0);
+    const pending=rows.reduce((n,x)=>n+Number(x.pending||0),0);
+    const fh=rows.filter(x=>String(x.market).startsWith('İY'));
+    const fhTotal=fh.reduce((n,x)=>n+Number(x.total||0),0);
+    const fhHit=fh.reduce((n,x)=>n+Number(x.hit_15||0),0);
+    const scans=d.scans||[];
+    const last=scans[0];
+    box.textContent=`📊 ${total} sinyal · 15 dk içinde gol: ${hit} · 15 dk golsüz: ${miss} · Bekleyen: ${pending} · İY: ${fhHit}/${fhTotal} · Son arka plan taraması: ${last?.created_at||'Henüz yok'}  |  Detaylar: 📊 Performans`;
+    box.style.cursor='pointer';box.onclick=()=>location.href='/performans';
+  }catch(e){box.textContent='📊 Performans verisi alınamadı: '+e.message;}
+}
+loadPerformancePulse();setInterval(loadPerformancePulse,30000);
 document.getElementById("sortMode").addEventListener("change",renderMatches);
 loadAll();
 setInterval(loadAll,5000);
