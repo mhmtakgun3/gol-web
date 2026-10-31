@@ -3153,6 +3153,68 @@ def prematch_result_market_check(entries: List[Dict[str, Any]], market_code: str
     return True, note
 
 
+# Günün Yıldızları: isteğe bağlı, sınırlı API kullanımı; mevcut analiz motorundan bağımsız.
+@app.route("/api/prematch/stars")
+def api_prematch_stars():
+    day = prematch_day(request.args.get("date", ""))
+    if day is None:
+        return jsonify({"error": "Geçerli maç günü seçiniz."}), 400
+    matches, error = prematch_fixtures(day)
+    if error:
+        return jsonify({"error": error}), 503
+    teams = {}
+    for match in matches or []:
+        for side in ("home", "away"):
+            team = ((match.get("teams") or {}).get(side) or {})
+            tid = safe_int(team.get("id"))
+            if tid and tid not in teams:
+                teams[tid] = {"id": tid, "name": team.get("name"), "logo": team.get("logo")}
+    # Bir istekte aşırı API çağrısı yapılmasını önle; yalnızca ilk 8 takım incelenir.
+    sample = list(teams.values())[:8]
+    leaders = {"goals": None, "corners": None, "shots": None, "fouls": None}
+    checked = 0
+    for team in sample:
+        rows, err = prematch_api_cached(
+            f"stars:form:{team['id']}:{day.isoformat()}", "/fixtures",
+            {"team": team["id"], "last": 8, "timezone": "Europe/Istanbul"}, 21600)
+        if err or not rows:
+            continue
+        finished = [x for x in rows if ((x.get("fixture") or {}).get("status") or {}).get("short") in ("FT", "AET", "PEN") and (x.get("fixture") or {}).get("date", "")[:10] < day.isoformat()][:5]
+        if len(finished) < 5:
+            continue
+        checked += 1
+        total_goals = 0
+        stats = {"corners": [], "shots": [], "fouls": []}
+        for fixture in finished:
+            sides = fixture.get("teams") or {}
+            is_home = safe_int((sides.get("home") or {}).get("id")) == team["id"]
+            total_goals += safe_int((fixture.get("goals") or {}).get("home" if is_home else "away"))
+            fid = safe_int((fixture.get("fixture") or {}).get("id"))
+            if not fid:
+                continue
+            detail, detail_err = prematch_api_cached(
+                f"stars:stats:{fid}", "/fixtures/statistics", {"fixture": fid}, 21600)
+            if detail_err or not detail:
+                continue
+            mine = next((v for v in detail if safe_int((v.get("team") or {}).get("id")) == team["id"]), None)
+            if not mine:
+                continue
+            mapped = {v.get("type"): v.get("value") for v in mine.get("statistics") or []}
+            for key, field in (("corners", "Corner Kicks"), ("shots", "Shots on Goal"), ("fouls", "Fouls")):
+                value = mapped.get(field)
+                if value is not None:
+                    stats[key].append(safe_int(value))
+        candidates = {"goals": (total_goals, 5)}
+        for key, values in stats.items():
+            if len(values) == 5:
+                candidates[key] = (sum(values), 5)
+        for key, (total, count) in candidates.items():
+            if leaders[key] is None or total / count > leaders[key]["average"]:
+                leaders[key] = {"team": team["name"], "logo": team["logo"], "average": round(total/count, 2), "total": total, "games": count}
+    return jsonify({"date": day.isoformat(), "sampled_teams": checked, "eligible_teams": len(teams), "leaders": leaders,
+                    "note": "Yalnızca seçilen ilk 8 takımın son 5 tamamlanmış maçı karşılaştırılır. Eksik istatistikler gösterilmez."})
+
+
 @app.route("/api/prematch/fixtures")
 def api_prematch_fixtures():
     day = prematch_day(request.args.get("date", ""))
@@ -4870,7 +4932,7 @@ body{background:radial-gradient(ellipse at 58% -22%,#122a58 0,transparent 48%),l
 <aside class="pro-sidebar gm-nav" aria-label="Ana navigasyon"><a class="pro-identity" href="/"><span class="pro-logo">⚽</span><span>GOL MERKEZİ<strong>PRO ANALYTICS</strong></span></a><div class="pro-section-label">KONTROL MERKEZİ</div><a href="/">◉ <span>Canlı Gol Merkezi</span></a><a href="/tahmin" class="active">▦ <span>Maç Analizi &amp; Kupon</span></a><a href="/radar">◈ <span>Piyasa Radarı</span></a><div class="pro-section-label">İSTATİSTİKLER</div><a href="#gm-performance">▥ <span>Performans</span></a><a href="#gm-coupon">▤ <span>Kupon Geçmişi</span></a><a href="#gm-coupon">◫ <span>Sanal Bakiye</span></a><div class="pro-section-label">ARAÇLAR</div><a href="#gm-fixtures">☆ <span>Fikstür</span></a><a href="#gm-leagues">▤ <span>Lig Dağılımı</span></a><a href="/radar">⚙ <span>Piyasa Araçları</span></a><div class="pro-sidebar-bottom"><span class="pro-pulse"></span> ANALİZ PLATFORMU<small>Gol Merkezi • Pro Workspace</small></div></aside><div class="wrap">
 <div class="gm-topbar"><div><span class="gm-eyebrow">GOL MERKEZİ <b> / ANALYTICS DASHBOARD</b></span><h1>Analiz Kontrol Merkezi <span class="gm-live-dot"></span></h1><p>Fikstür, futbol analizi ve sanal kupon performansı · Gerçek veriler, şeffaf sonuçlar</p></div><div class="gm-top-actions"><span id="gmToday">PRO ANALYTICS</span><a href="/radar">◈ Piyasa Radarı ↗</a></div></div>
 <div class="gm-kpis" id="gm-performance"><div class="gm-kpi"><div class="gm-kpi-label">🏆 TOPLAM MAÇ <span>↗</span></div><strong id="wsMatchCount">—</strong><div class="gm-kpi-footer">Seçili tarihteki maç sayısı</div></div><div class="gm-kpi"><div class="gm-kpi-label">🎯 ANALİZ EDİLEN <span>↗</span></div><strong id="wsAnalyzedCount">0</strong><div class="gm-kpi-footer">Bu oturumda incelenen maçlar</div></div><div class="gm-kpi"><div class="gm-kpi-label">📈 ANALİZ KAPSAMI</div><strong id="gmCoverage">—</strong><div class="gm-kpi-footer">Günlük analiz oranı</div></div><div class="gm-kpi"><div class="gm-kpi-label">💰 SANAL KÂR / ZARAR <span>↗</span></div><strong id="gmNet">—</strong><div class="gm-kpi-footer" id="gmRoi">Sonuçlanmış kuponlar üzerinden</div></div><div class="gm-kpi"><div class="gm-kpi-label">🌍 KAPSANAN ÜLKE <span>↗</span></div><strong id="wsCountryCount">—</strong><div class="gm-kpi-footer">Günlük fikstür dağılımı</div></div></div>
-<div class="gm-dashboard-grid"><section class="gm-main-col"><div class="gm-card gm-controls"><div class="gm-section-title"><div><span class="gm-eyebrow">MATCH CENTER</span><h2>Günlük Fikstür</h2></div><span class="gm-status"><i></i> VERİ KAYNAĞI: API</span></div><div class="gm-filters"><label>Maç günü <input id="day" type="date" min="{{today}}" max="{{last_day}}" value="{{initial_day}}"></label><button id="load">↻ Fikstürü getir</button><label>Ülke <select id="league" disabled><option value="ALL">Tüm ülkeler</option></select></label><label class="gm-search-label">Ara <input id="wsSearch" type="search" placeholder="Takım veya lig adı…"></label></div></div><div class="gm-card gm-match-panel" id="gm-fixtures"><div class="gm-section-title"><div><span class="gm-eyebrow">FIXTURE EXPLORER</span><h2>Karşılaşmalar</h2></div><span class="gm-chip" id="gmFixtureCount">Fikstür yükleniyor</span></div><p id="state" class="ws-fixture-status">Fikstür yükleniyor…</p><div class="gm-table-head"><span>SAAT / LİG</span><span>KARŞILAŞMA</span><span>BOT TERCİHİ</span><span>ORAN</span><span>GÜVEN</span><span>RİSK</span><span>FORM</span><span>ANALİZ</span></div><div class="grid" id="fixtures"></div></div></section><aside class="gm-right-col"><section class="gm-card gm-league-card" id="gm-leagues"><div class="gm-section-title"><div><span class="gm-eyebrow">MATCH DISTRIBUTION</span><h2>Lig Dağılımı</h2></div><span class="gm-chip">GÜNLÜK</span></div><div id="gmLeagueBars" class="gm-league-bars"><div class="gm-empty">Fikstür yüklendiğinde gösterilecek.</div></div></section><section class="gm-card gm-coupon-card" id="gm-coupon"><div class="gm-section-title"><div><span class="gm-eyebrow">VIRTUAL PORTFOLIO</span><h2>Kupon Laboratuvarı</h2></div><span class="gm-chip">3+ MAÇ</span></div><p class="gm-coupon-explain">Sanal kuponlar ve sonuçlanmış performans. Oranlar doğrulanmadan kupona alınmaz.</p><div class="gm-coupon-tabs"><button type="button" class="gm-tab active" id="gmAutoTab">Otomatik Kupon</button><button type="button" class="gm-tab" id="gmManualTab">Manuel Seçim</button></div><div class="gm-coupon-controls"><label>Kupon sayısı <span>Otomatik · uygun maç sayısına göre</span></label><label>Her kupon tutarı <span>1.000 TL</span></label></div><button id="makeCoupons" type="button" class="gm-create">+ Kupon adaylarını oluştur</button><div id="bankroll" class="bankroll"></div><div id="learningStats" class="learning-stats"></div><div id="couponState" class="coupon-help">Henüz kupon oluşturulmadı.</div><div id="coupons" class="coupons"></div></section><section class="gm-card gm-performance-card"><div class="gm-section-title"><div><span class="gm-eyebrow">PERFORMANCE</span><h2>Günlük Performans</h2></div><span class="gm-chip">Sanal kayıtlar</span></div><div id="gmPerfMini" class="gm-perf-mini"><div><small>Kupon</small><strong>—</strong></div><div><small>Kazanan</small><strong>—</strong></div><div><small>Başarı</small><strong>—</strong></div></div><div class="gm-perf-note">Yalnızca sonuçlanan kuponlar değerlendirilir.</div></section><section class="gm-card gm-donut-card"><div class="gm-section-title"><div><span class="gm-eyebrow">LEAGUE BREAKDOWN</span><h2>Lig Dağılımı</h2></div></div><div class="gm-donut-layout"><div class="gm-donut" id="gmDonut"><span id="gmDonutTotal">—<small>Maç</small></span></div><div id="gmDonutLegend" class="gm-donut-legend"></div></div></section></aside></div><section class="gm-card gm-live-card"><div class="gm-section-title"><div><span class="gm-eyebrow">● LIVE</span><h2>Canlı Skorlar</h2></div><a href="/">Tüm Canlı Maçlar ↗</a></div><div id="gmLiveScores" class="gm-live-scores"><div class="gm-empty">Canlı skorlar yükleniyor…</div></div></section>
+<section class="gm-card" id="gmStarsPanel" style="margin:0 0 18px;padding:18px 20px"><div class="gm-section-title"><div><span class="gm-eyebrow">SON 5 MAÇ · KARŞILAŞTIRMA</span><h2>⭐ Günün Yıldızları</h2></div><button type="button" id="gmStarsLoad" style="padding:8px 12px;font-size:12px">İstatistikleri getir</button></div><p id="gmStarsNote" style="font-size:12px;color:#a4bbce;margin:8px 0 12px">Seçilen günün takımlarından örneklem alınır. Mevcut maç önü tahminlerini etkilemez.</p><div id="gmStarsGrid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px"><div class="gm-empty">İstatistikleri görmek için butona bas.</div></div></section><div class="gm-dashboard-grid"><section class="gm-main-col"><div class="gm-card gm-controls"><div class="gm-section-title"><div><span class="gm-eyebrow">MATCH CENTER</span><h2>Günlük Fikstür</h2></div><span class="gm-status"><i></i> VERİ KAYNAĞI: API</span></div><div class="gm-filters"><label>Maç günü <input id="day" type="date" min="{{today}}" max="{{last_day}}" value="{{initial_day}}"></label><button id="load">↻ Fikstürü getir</button><label>Ülke <select id="league" disabled><option value="ALL">Tüm ülkeler</option></select></label><label class="gm-search-label">Ara <input id="wsSearch" type="search" placeholder="Takım veya lig adı…"></label></div></div><div class="gm-card gm-match-panel" id="gm-fixtures"><div class="gm-section-title"><div><span class="gm-eyebrow">FIXTURE EXPLORER</span><h2>Karşılaşmalar</h2></div><span class="gm-chip" id="gmFixtureCount">Fikstür yükleniyor</span></div><p id="state" class="ws-fixture-status">Fikstür yükleniyor…</p><div class="gm-table-head"><span>SAAT / LİG</span><span>KARŞILAŞMA</span><span>BOT TERCİHİ</span><span>ORAN</span><span>GÜVEN</span><span>RİSK</span><span>FORM</span><span>ANALİZ</span></div><div class="grid" id="fixtures"></div></div></section><aside class="gm-right-col"><section class="gm-card gm-league-card" id="gm-leagues"><div class="gm-section-title"><div><span class="gm-eyebrow">MATCH DISTRIBUTION</span><h2>Lig Dağılımı</h2></div><span class="gm-chip">GÜNLÜK</span></div><div id="gmLeagueBars" class="gm-league-bars"><div class="gm-empty">Fikstür yüklendiğinde gösterilecek.</div></div></section><section class="gm-card gm-coupon-card" id="gm-coupon"><div class="gm-section-title"><div><span class="gm-eyebrow">VIRTUAL PORTFOLIO</span><h2>Kupon Laboratuvarı</h2></div><span class="gm-chip">3+ MAÇ</span></div><p class="gm-coupon-explain">Sanal kuponlar ve sonuçlanmış performans. Oranlar doğrulanmadan kupona alınmaz.</p><div class="gm-coupon-tabs"><button type="button" class="gm-tab active" id="gmAutoTab">Otomatik Kupon</button><button type="button" class="gm-tab" id="gmManualTab">Manuel Seçim</button></div><div class="gm-coupon-controls"><label>Kupon sayısı <span>Otomatik · uygun maç sayısına göre</span></label><label>Her kupon tutarı <span>1.000 TL</span></label></div><button id="makeCoupons" type="button" class="gm-create">+ Kupon adaylarını oluştur</button><div id="bankroll" class="bankroll"></div><div id="learningStats" class="learning-stats"></div><div id="couponState" class="coupon-help">Henüz kupon oluşturulmadı.</div><div id="coupons" class="coupons"></div></section><section class="gm-card gm-performance-card"><div class="gm-section-title"><div><span class="gm-eyebrow">PERFORMANCE</span><h2>Günlük Performans</h2></div><span class="gm-chip">Sanal kayıtlar</span></div><div id="gmPerfMini" class="gm-perf-mini"><div><small>Kupon</small><strong>—</strong></div><div><small>Kazanan</small><strong>—</strong></div><div><small>Başarı</small><strong>—</strong></div></div><div class="gm-perf-note">Yalnızca sonuçlanan kuponlar değerlendirilir.</div></section><section class="gm-card gm-donut-card"><div class="gm-section-title"><div><span class="gm-eyebrow">LEAGUE BREAKDOWN</span><h2>Lig Dağılımı</h2></div></div><div class="gm-donut-layout"><div class="gm-donut" id="gmDonut"><span id="gmDonutTotal">—<small>Maç</small></span></div><div id="gmDonutLegend" class="gm-donut-legend"></div></div></section></aside></div><section class="gm-card gm-live-card"><div class="gm-section-title"><div><span class="gm-eyebrow">● LIVE</span><h2>Canlı Skorlar</h2></div><a href="/">Tüm Canlı Maçlar ↗</a></div><div id="gmLiveScores" class="gm-live-scores"><div class="gm-empty">Canlı skorlar yükleniyor…</div></div></section>
 <script>
 const esc=v=>String(v??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;");
 const day=document.getElementById("day"),state=document.getElementById("state"),root=document.getElementById("fixtures"),leagueSelect=document.getElementById("league");
@@ -5291,6 +5353,17 @@ async function load(){
 leagueSelect.onchange=renderFixtures;
 document.getElementById("wsSearch").addEventListener("input",renderFixtures);
 document.getElementById("makeCoupons").onclick=buildCoupons;
+document.getElementById("gmStarsLoad").onclick=async function(){
+  const button=this, box=document.getElementById("gmStarsGrid"), note=document.getElementById("gmStarsNote");
+  button.disabled=true;button.textContent="İstatistikler yükleniyor…";
+  try{
+    const data=await getJson("/api/prematch/stars?date="+encodeURIComponent(document.getElementById("day").value));
+    const labels=[["goals","⚽ Golcü","gol"],["corners","🚩 Korner","korner"],["fouls","🟨 Agresif","faul"],["shots","🎯 İsabetli","isabetli şut"]];
+    box.innerHTML=labels.map(([key,title,unit])=>{const x=data.leaders?.[key];return `<div style="padding:14px;border:1px solid #294b69;border-radius:12px;background:#101f34"><div style="color:#72e7b3;font-weight:800;font-size:12px">${title}</div>${x?`<div style="display:flex;align-items:center;gap:9px;margin:12px 0"><img src="${esc(x.logo||'')}" alt="" style="width:29px;height:29px;object-fit:contain"><b>${esc(x.team||'')}</b></div><strong style="font-size:21px">${Number(x.average).toLocaleString('tr-TR')}</strong> <small>${unit} / maç</small><div style="font-size:11px;color:#a8b9cd;margin-top:6px">Son ${x.games} maç · toplam ${x.total}</div>`:`<p style="font-size:12px;color:#a8b9cd;margin-top:12px">Yeterli doğrulanmış veri yok</p>`}</div>`}).join('');
+    note.textContent=`${data.sampled_teams||0} takım incelendi (toplam ${data.eligible_teams||0} takım). ${data.note||''}`;
+  }catch(e){box.innerHTML=`<div class="error">${esc(e.message)}</div>`}
+  finally{button.disabled=false;button.textContent="İstatistikleri yenile"}
+};
 document.getElementById("load").onclick=load;load();
 </script></body></html>"""
 
