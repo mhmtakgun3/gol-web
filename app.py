@@ -32,6 +32,7 @@ FIRST_HALF_LIMIT = int(os.getenv("FIRST_HALF_05_LIMIT", "58"))
 FIRST_HALF_15_LIMIT = int(os.getenv("FIRST_HALF_15_LIMIT", "68"))
 BOT_PICK_LIMIT = 78
 BOT_PICK_MINUTE = 55
+LAST_GOAL_SIGNAL_MINUTE = 82  # 83+ dakikalarda yeni gol sinyali yok
 BOT_PICK_CONFIRM_SCANS = 2
 BOT_PICK_LATE_MINUTE = 75
 BOT_PICK_MIN_RECENT_PRESSURE = 45
@@ -302,7 +303,7 @@ def record_signal(item, market, score, reasons):
     minute = safe_int(match.get("minute"), 0)
     hg = safe_int(match.get("home_goals"), 0)
     ag = safe_int(match.get("away_goals"), 0)
-    if not fixture or not minute or safe_int(score) <= 0:
+    if not fixture or not minute or minute > LAST_GOAL_SIGNAL_MINUTE or safe_int(score) <= 0:
         return
     key = f"{fixture}:{hg}-{ag}:{market}"
     try:
@@ -420,8 +421,8 @@ def serialize_matches_for_web() -> List[Dict[str, Any]]:
                 "status": match.get("status"),
                 "home_goals": match.get("home_goals"),
                 "away_goals": match.get("away_goals"),
-                "signal": item.get("current_signal", 0),
-                "signal_active": item.get("current_signal", 0) >= SIGNAL_LIMIT,
+                "signal": (item.get("current_signal", 0) if safe_int(match.get("minute"), 0) <= LAST_GOAL_SIGNAL_MINUTE else 0),
+                "signal_active": (safe_int(match.get("minute"), 0) <= LAST_GOAL_SIGNAL_MINUTE and item.get("current_signal", 0) >= SIGNAL_LIMIT),
                 "reasons": item.get("current_reasons", []),
                 "first_half_signal": item.get("first_half_signal", 0),
                 "first_half_active": (
@@ -450,10 +451,10 @@ def serialize_matches_for_web() -> List[Dict[str, Any]]:
                 "btts_label": item.get("btts_label", "DÜŞÜK"),
                 "period_number": item.get("period_number", 0),
                 "period_started_minute": item.get("period_started_minute"),
-                "bot_pick_score": item.get("bot_pick_score", 0),
+                "bot_pick_score": (item.get("bot_pick_score", 0) if safe_int(match.get("minute"), 0) <= LAST_GOAL_SIGNAL_MINUTE else 0),
                 "bot_pick_text": item.get("bot_pick_text", ""),
                 "bot_pick_reasons": item.get("bot_pick_reasons", []),
-                "bot_pick_best": item.get("bot_pick_best", False),
+                "bot_pick_best": (safe_int(match.get("minute"), 0) <= LAST_GOAL_SIGNAL_MINUTE and item.get("bot_pick_best", False)),
                 "bot_pick_confirm_count": item.get("bot_pick_confirm_count", 0),
                 "bot_pick_confirm_required": BOT_PICK_CONFIRM_SCANS,
                 "bot_pick_ready": item.get("bot_pick_ready", False),
@@ -1417,7 +1418,7 @@ def calculate_bot_pick(
     - skor/dakika senaryosu
     birlikte kullanır.
     """
-    if minute < BOT_PICK_MINUTE:
+    if minute < BOT_PICK_MINUTE or minute > LAST_GOAL_SIGNAL_MINUTE:
         return 0, "", [], 0
 
     shots = evaluation_stats.get("shots", 0)
@@ -1625,7 +1626,8 @@ def finalize_best_bot_pick() -> None:
 
         candidates = [
             item for item in match_memory.values()
-            if item.get("bot_pick_score", 0) >= BOT_PICK_LIMIT
+            if safe_int((item.get("match") or {}).get("minute"), 0) <= LAST_GOAL_SIGNAL_MINUTE
+            and item.get("bot_pick_score", 0) >= BOT_PICK_LIMIT
             and item.get("bot_pick_text")
             and item.get("bot_pick_ready", False)
         ]
@@ -1774,7 +1776,7 @@ def refresh_live_odds_for_signal_cards() -> None:
             match = item.get("match") or {}
             minute = safe_int(match.get("minute"), 0)
             status = str(match.get("status") or "")
-            if item.get("bot_pick_best") or status not in ("1H", "2H"):
+            if item.get("bot_pick_best") or status not in ("1H", "2H") or minute > LAST_GOAL_SIGNAL_MINUTE:
                 continue
 
             home_goals = safe_int(match.get("home_goals"), 0)
@@ -1852,6 +1854,8 @@ def refresh_live_odds_for_signal_cards() -> None:
             item["odds_qualified"] = bool(
                 odd_info and float(odd_info.get("odd") or 0) >= LIVE_ODDS_MIN)
             if not item["odds_qualified"]:
+                continue
+            if safe_int((item.get("match") or {}).get("minute"), 0) > LAST_GOAL_SIGNAL_MINUTE:
                 continue
             match = item.get("match") or {}
             minute = safe_int(match.get("minute"), 0)
