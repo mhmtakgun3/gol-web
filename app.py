@@ -3759,6 +3759,15 @@ def api_matches():
         source = "local_fallback"
         state_age = None
 
+    # Sinyal yalnızca doğrulanmış canlı oran >= 1.50 olduğunda uygundur.
+    # Oran yoksa / hatalıysa sinyal gönderilmez; maç yine listelenir.
+    for match_item in items:
+        try:
+            odd = float(match_item.get("live_odd") or 0)
+        except (TypeError, ValueError):
+            odd = 0.0
+        match_item["signal_allowed"] = bool(odd >= LIVE_ODDS_MIN)
+
     return jsonify({
         "count": len(items),
         "matches": items,
@@ -4413,6 +4422,8 @@ function renderMatches(){
         : "Gol için takipte");
 
     const odd=m.live_odd ? Number(m.live_odd) : null;
+    const eligible=m.signal_allowed === true;
+    const displayPick=eligible ? pick : (odd ? "Oran 1.50 altında • sinyal yok" : "Canlı oran bulunamadı • sinyal yok");
     const oddHtml=odd
       ? `<div class="odd ${odd>=1.50?"good":"low"}">${odd.toFixed(2)} ${odd>=1.50?"↑":"↓"}</div>`
       : `<div class="odd">—</div>`;
@@ -4425,7 +4436,7 @@ function renderMatches(){
       ? `<img class="badge-logo" src="${esc(m.away_logo)}" alt="">`
       : `<span class="fake-ball">⚽</span>`;
 
-    const title=m.bot_pick_best ? pick : (firstHalfPick ? `İY ${firstHalfLine} ÜST` : cat.text);
+    const title=!eligible ? "TAKİP • ORAN FİLTRESİ" : (m.bot_pick_best ? pick : (firstHalfPick ? `İY ${firstHalfLine} ÜST` : cat.text));
     const remaining=m.status==="1H"
       ? (minute<45 ? `İlk yarı bitimine ~${45-minute} dk` : "İlk yarının son dakikaları")
       : (m.status==="2H" && minute<90 ? `90. dakikaya ~${90-minute} dk` : "Maç devam ediyor");
@@ -4451,7 +4462,7 @@ function renderMatches(){
         <div class="featured-info">
           <div>🏆 ${esc(league)}</div>
           <div class="featured-teams">⚽ ${esc(home)} ${hg} – ${ag} ${esc(away)}</div>
-          <div>🎯 Hedef: <b>${esc(pick)}</b></div>
+          <div>🎯 Hedef: <b>${esc(displayPick)}</b></div>
           <div>⏱️ ${minute}. dakika | ${esc(remaining)}</div>
           <div>📌 Baskı: <span class="pressure-dots" aria-label="${level}/5 baskı">${dots}</span> <b>${pressure}/100</b></div>
           ${m.bot_pick_best ? `<div>${esc(performance)}</div>` : ""}
@@ -4460,7 +4471,7 @@ function renderMatches(){
         </div>
         <div class="featured-divider"></div>
         <div class="featured-foot">
-          <div><div class="play-label">NE OYNANIR?</div><div class="featured-pick">${esc(pick)}</div></div>
+          <div><div class="play-label">NE OYNANIR?</div><div class="featured-pick">${esc(displayPick)}</div></div>
           ${oddDisplay}
         </div>
       </div>`;
@@ -4488,7 +4499,7 @@ function liveStatPair(s,key){
 function renderMatches(){
   const root=document.getElementById('matches');
   const all=currentMatches||[];
-  const strong=m=>Math.max(Number(m.signal||0),Number(m.bot_pick_score||0),Number(m.first_half_signal||0));
+  const strong=m=>m.signal_allowed===true?Math.max(Number(m.signal||0),Number(m.bot_pick_score||0),Number(m.first_half_signal||0)):0;
   const signalCount=all.filter(m=>strong(m)>=65).length;
   const veryCount=all.filter(m=>strong(m)>=80).length;
   const k=document.getElementById('liveKpis');
@@ -4510,16 +4521,18 @@ function renderMatches(){
     const pressureDots=Array.from({length:5},(_,j)=>`<span class="pressure-dot ${j<pressureLevel?'filled':''}"></span>`).join('');
     const stats=[['Şut','shots'],['İsabetli Şut','target'],['Korner','corners'],['Ceza İçi','inside']];
     const bars=stats.map(([label,key])=>{const [x,y]=liveStatPair(s,key);return liveMetric(label,x,y)}).join('');
-    const score=Math.max(Number(m.signal||0),Number(m.bot_pick_score||0),Number(m.first_half_signal||0));
+    const rawScore=Math.max(Number(m.signal||0),Number(m.bot_pick_score||0),Number(m.first_half_signal||0));
+    const eligible=m.signal_allowed === true;
+    const score=eligible ? rawScore : 0;
     const cat=categoryFor(m);
     const fh=firstHalfMarket(m);
-    const pick=m.bot_pick_best&&m.bot_pick_text?String(m.bot_pick_text):fh&&Number(m.first_half_signal||0)>=Number(m.first_half_limit||65)?`İY ${fh} ÜST`:Number(m.btts_signal||0)>=70&&!bttsDoneOf(m)?'KG VAR':score>=65?`${(h+a+.5).toFixed(1).replace('.',',')} ÜST`:'Takip ediliyor';
+    const pick=!eligible?(Number(m.live_odd||0)>0?'Oran 1.50 altında • sinyal yok':'Canlı oran yok • sinyal yok'):m.bot_pick_best&&m.bot_pick_text?String(m.bot_pick_text):fh&&Number(m.first_half_signal||0)>=Number(m.first_half_limit||65)?`İY ${fh} ÜST`:Number(m.btts_signal||0)>=70&&!bttsDoneOf(m)?'KG VAR':score>=65?`${(h+a+.5).toFixed(1).replace('.',',')} ÜST`:'Takip ediliyor';
     const strength=score>=80?'very':score>=70?'high':'';
-    const label=score>=80?'ÇOK GÜÇLÜ':score>=65?'GOL SİNYALİ':'TAKİP';
+    const label=!eligible?'ORAN FİLTRESİ':score>=80?'ÇOK GÜÇLÜ':score>=65?'GOL SİNYALİ':'TAKİP';
     const homeLogo=m.home_logo?`<img src="${esc(m.home_logo)}" alt="" loading="lazy">`:'⚽';
     const awayLogo=m.away_logo?`<img src="${esc(m.away_logo)}" alt="" loading="lazy">`:'⚽';
     const reason=Number(m.momentum_score||0)>=65?'Maçta baskı ve hücum hareketliliği yüksek.':'Canlı maç istatistikleri takip ediliyor.';
-    return `<article class="live-match ${open?'open':''}" data-live-id="${esc(id)}"><div class="live-row"><div class="live-minute"><b>${minute}'</b><small>${m.status==='1H'?'1. Yarı':m.status==='2H'?'2. Yarı':esc(m.status||'Canlı')}</small></div><div><div class="live-league">🏆 ${esc(leagueLabel(m))}</div><div class="live-team">${homeLogo}<span>${esc(m.home_team||m.home||'Ev sahibi')}</span></div><div class="live-team">${awayLogo}<span>${esc(m.away_team||m.away||'Deplasman')}</span></div></div><div class="live-score"><strong>${h} - ${a}</strong><small>⏱️ ${minute}'</small></div><div class="live-stats">${bars}</div><div class="live-analysis"><strong>${esc(cat.text)}</strong><p>${esc(reason)}</p><span class="live-pick">Öneri: ${esc(pick)}</span></div><div class="live-signal ${strength}"><strong>%${Math.round(score)}</strong><small>${label}</small></div><button type="button" class="live-expand" data-toggle-live="${esc(id)}" aria-label="Maç detayını ${open?'kapat':'aç'}" aria-expanded="${open}">${open?'⌃':'⌄'}</button></div><div class="live-detail"><div><h3>⚽ Maç Detayları</h3><p><b>${esc(m.home_team||m.home||'Ev sahibi')} ${h} - ${a} ${esc(m.away_team||m.away||'Deplasman')}</b></p><p>Lig: ${esc(leagueLabel(m))} · Dakika: ${minute}'</p><p>Son 5 dk: Şut ${Number(recent.shots||0)} · İsabet ${Number(recent.target||0)} · Ceza içi ${Number(recent.inside||0)}</p><p>Gol beklentisi sinyali: ${Math.round(Number(m.signal||0))}/100</p><div class="live-pressure-old"><b>📌 Baskı:</b> <span class="pressure-dots" aria-label="${pressureLevel}/5 baskı">${pressureDots}</span> <b>${Math.round(pressure)}/100</b></div><p>⏱️ Son 5 dk: Şut ${Number(recent.shots||0)} · İsabet ${Number(recent.target||0)} · Ceza içi ${Number(recent.inside||0)}</p></div><div><h3>📊 İstatistikler ve Bot Analizi</h3>${bars}<p><b>Tercih:</b> ${esc(pick)}</p><p>${esc(reason)} Sinyal puanı istatistiksel bir göstergedir; gerçek gol olasılığı değildir.</p>${Number(m.live_odd||0)>0?`<p>Canlı oran: ${Number(m.live_odd).toFixed(2)}</p>`:''}</div></div></article>`;
+    return `<article class="live-match ${open?'open':''}" data-live-id="${esc(id)}"><div class="live-row"><div class="live-minute"><b>${minute}'</b><small>${m.status==='1H'?'1. Yarı':m.status==='2H'?'2. Yarı':esc(m.status||'Canlı')}</small></div><div><div class="live-league">🏆 ${esc(leagueLabel(m))}</div><div class="live-team">${homeLogo}<span>${esc(m.home_team||m.home||'Ev sahibi')}</span></div><div class="live-team">${awayLogo}<span>${esc(m.away_team||m.away||'Deplasman')}</span></div></div><div class="live-score"><strong>${h} - ${a}</strong><small>⏱️ ${minute}'</small></div><div class="live-stats">${bars}</div><div class="live-analysis"><strong>${esc(cat.text)}</strong><p>${esc(reason)}</p><span class="live-pick">Öneri: ${esc(displayPick)}</span></div><div class="live-signal ${strength}"><strong>%${Math.round(score)}</strong><small>${label}</small></div><button type="button" class="live-expand" data-toggle-live="${esc(id)}" aria-label="Maç detayını ${open?'kapat':'aç'}" aria-expanded="${open}">${open?'⌃':'⌄'}</button></div><div class="live-detail"><div><h3>⚽ Maç Detayları</h3><p><b>${esc(m.home_team||m.home||'Ev sahibi')} ${h} - ${a} ${esc(m.away_team||m.away||'Deplasman')}</b></p><p>Lig: ${esc(leagueLabel(m))} · Dakika: ${minute}'</p><p>Son 5 dk: Şut ${Number(recent.shots||0)} · İsabet ${Number(recent.target||0)} · Ceza içi ${Number(recent.inside||0)}</p><p>Gol beklentisi sinyali: ${Math.round(Number(m.signal||0))}/100</p><div class="live-pressure-old"><b>📌 Baskı:</b> <span class="pressure-dots" aria-label="${pressureLevel}/5 baskı">${pressureDots}</span> <b>${Math.round(pressure)}/100</b></div><p>⏱️ Son 5 dk: Şut ${Number(recent.shots||0)} · İsabet ${Number(recent.target||0)} · Ceza içi ${Number(recent.inside||0)}</p></div><div><h3>📊 İstatistikler ve Bot Analizi</h3>${bars}<p><b>Tercih:</b> ${esc(displayPick)}</p><p>${esc(reason)} Sinyal puanı istatistiksel bir göstergedir; gerçek gol olasılığı değildir.</p>${Number(m.live_odd||0)>0?`<p>Canlı oran: ${Number(m.live_odd).toFixed(2)}</p>`:''}</div></div></article>`;
   }).join('');
   root.querySelectorAll('[data-toggle-live]').forEach(btn=>btn.onclick=()=>{
     const id=btn.dataset.toggleLive;
@@ -4637,6 +4650,8 @@ function tryNotifications(ms){
   for(const m of ms){
     const fixture=m.fixture_id;
     if(!fixture) continue;
+    // 1.50 altı veya doğrulanamayan oran: bildirim gönderme.
+    if(m.signal_allowed !== true) continue;
 
     const score=`${m.home_goals||0}-${m.away_goals||0}`;
     const periodKey=`MATCH:${fixture}:${score}`;
