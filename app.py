@@ -32,7 +32,6 @@ FIRST_HALF_LIMIT = int(os.getenv("FIRST_HALF_05_LIMIT", "58"))
 FIRST_HALF_15_LIMIT = int(os.getenv("FIRST_HALF_15_LIMIT", "68"))
 BOT_PICK_LIMIT = 78
 BOT_PICK_MINUTE = 55
-LAST_GOAL_SIGNAL_MINUTE = 82  # 83+ dakikalarda yeni gol sinyali yok
 BOT_PICK_CONFIRM_SCANS = 2
 BOT_PICK_LATE_MINUTE = 75
 BOT_PICK_MIN_RECENT_PRESSURE = 45
@@ -289,6 +288,9 @@ def perf_db():
         goal_at TEXT, checked_minute INTEGER,
         hit_5 INTEGER DEFAULT 0, hit_10 INTEGER DEFAULT 0, hit_15 INTEGER DEFAULT 0
     )""")
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(signal_events)")}
+    if "pick_text" not in columns:
+        conn.execute("ALTER TABLE signal_events ADD COLUMN pick_text TEXT")
     conn.execute("""CREATE TABLE IF NOT EXISTS scan_events (
         id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, live_count INTEGER,
         eligible_count INTEGER, analyzed_count INTEGER, duration REAL,
@@ -303,50 +305,134 @@ def record_signal(item, market, score, reasons):
     minute = safe_int(match.get("minute"), 0)
     hg = safe_int(match.get("home_goals"), 0)
     ag = safe_int(match.get("away_goals"), 0)
-    if not fixture or not minute or minute > LAST_GOAL_SIGNAL_MINUTE or safe_int(score) <= 0:
+    if not fixture or not minute or safe_int(score) <= 0:
         return
     key = f"{fixture}:{hg}-{ag}:{market}"
     try:
         with perf_db() as db:
             db.execute("""INSERT OR IGNORE INTO signal_events
                 (signal_key,fixture_id,home_team,away_team,market,minute,
-                 home_goals,away_goals,score,reasons,created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                 home_goals,away_goals,score,reasons,created_at,pick_text)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (key,fixture,match.get("home_team"),match.get("away_team"),
                  market,minute,hg,ag,safe_int(score),
-                 json.dumps(reasons or [],ensure_ascii=False),datetime.now().isoformat(timespec="seconds")))
+                 json.dumps(reasons or [],ensure_ascii=False),datetime.now().isoformat(timespec="seconds"),
+                 item.get("bot_pick_text") if market == "BOT PICK" else None))
     except Exception as exc:
         print(f"Performans sinyal kayıt hatası: {exc}",flush=True)
 
 
+def _settle_signal(db, row, won, checked_minute, goal_minute=None):
+    elapsed = max(0, safe_int(checked_minute) - safe_int(row["minute"]))
+    db.execute("""UPDATE signal_events SET result=?,checked_minute=?,goal_minute=?,
+        goal_at=?,hit_5=?,hit_10=?,hit_15=? WHERE id=? AND (result IN ('OPEN','INCOMPLETE') OR (market LIKE 'İY %' AND result='NO_GOAL_15'))""",
+        ("GOAL" if won else "NO_GOAL_15", checked_minute,
+         goal_minute if won else None,
+         datetime.now().isoformat(timespec="seconds") if won else None,
+         int(won and elapsed <= 5), int(won and elapsed <= 10),
+         int(won and elapsed <= 15), row["id"]))
+
+
+def _pick_won(row, final_home, final_away):
+    pick = (row["pick_text"] or "").strip()
+    old_h, old_a = row["home_goals"], row["away_goals"]
+    if pick == "Maçta bir gol daha":
+        return final_home + final_away > old_h + old_a
+    if pick == "KG Var":
+        return final_home > 0 and final_away > 0
+    if pick == f"{row['home_team']} gol atar":
+        return final_home > old_h
+    if pick == f"{row['away_team']} gol atar":
+        return final_away > old_a
+    return None  # Eski kayıtta seçim bilinmiyorsa sonuç uydurma.
+
+
 def update_signal_outcomes(fixture, minute, hg, ag, finished=False):
+    """Canlı veride yalnızca doğrulanabilen 15 dk gol radarını kapat.
+
+    İlk yarı ve BOT PICK pazarları kesin API skoruyla ayrıca sonuçlandırılır.
+    """
     try:
         with perf_db() as db:
-            rows = db.execute("SELECT * FROM signal_events WHERE fixture_id=? AND result='OPEN'",(fixture,)).fetchall()
+            rows = db.execute("SELECT * FROM signal_events WHERE fixture_id=? AND result='OPEN'", (fixture,)).fetchall()
             for row in rows:
-                elapsed = max(0, minute-row["minute"])
-                is_fh = row["market"].startswith("İY")
-                # İY pazarları yalnızca ilk yarı skoru kesin biliniyorsa sonuçlandırılır.
-                goal = hg+ag > row["home_goals"]+row["away_goals"]
-                if row["market"] == "İY 1.5 Üst":
-                    goal = hg+ag >= 2
-                if row["market"] == "BOT PICK":
-                    # BOT PICK takım golü/KG Var olabilir; herhangi golü isabet sayma.
-                    goal = False
-                if goal and (not is_fh or minute <= 45):
-                    db.execute("""UPDATE signal_events SET result='GOAL',goal_minute=?,goal_at=?,
-                        checked_minute=?,hit_5=?,hit_10=?,hit_15=? WHERE id=?""",
-                        (minute,datetime.now().isoformat(timespec="seconds"),minute,
-                         int(elapsed<=5),int(elapsed<=10),int(elapsed<=15),row["id"]))
-                elif (elapsed>=15 or finished or (is_fh and minute>45)) and row["market"] != "BOT PICK":
-                    result = "NO_GOAL_15" if elapsed>=15 and (not is_fh or minute<=45) else "INCOMPLETE"
-                    db.execute("UPDATE signal_events SET result=?,checked_minute=? WHERE id=?",
-                               (result,minute,row["id"]))
-                elif row["market"] == "BOT PICK" and (elapsed>=15 or finished):
-                    db.execute("UPDATE signal_events SET result='INCOMPLETE',checked_minute=? WHERE id=?",
-                               (minute,row["id"]))
+                if row["market"].startswith("İY") or row["market"] == "BOT PICK":
+                    continue
+                elapsed = max(0, minute - row["minute"])
+                if hg + ag > row["home_goals"] + row["away_goals"]:
+                    _settle_signal(db, row, elapsed <= 15, minute, minute if elapsed <= 15 else None)
+                elif elapsed >= 15:
+                    _settle_signal(db, row, False, minute)
+                elif finished:
+                    # Maç canlı listeden çıktı; kesin skor için API mutabakatını bekle.
+                    pass
     except Exception as exc:
-        print(f"Performans sonuç kayıt hatası: {exc}",flush=True)
+        print(f"Performans sonuç kayıt hatası: {exc}", flush=True)
+
+
+_perf_result_last_checked = {}
+_perf_result_lock = threading.Lock()
+
+
+def reconcile_signal_results(limit=8):
+    """Devre/maç sonu skorlarını API'den al; API eksikse sonuç üretme.
+
+    Performans ekranı açıldığında da çalışır; eski INCOMPLETE kayıtlarını düzeltir.
+    """
+    try:
+        with perf_db() as db:
+            pending = db.execute("""SELECT fixture_id, MAX(id) AS newest FROM signal_events
+                WHERE result IN ('OPEN','INCOMPLETE') OR (market LIKE 'İY %' AND result='NO_GOAL_15') GROUP BY fixture_id
+                ORDER BY newest DESC LIMIT 120""").fetchall()
+        now = time.time()
+        selected = []
+        with _perf_result_lock:
+            for row in pending:
+                fid = row["fixture_id"]
+                if now - _perf_result_last_checked.get(fid, 0) >= 300:
+                    _perf_result_last_checked[fid] = now
+                    selected.append(fid)
+                if len(selected) >= limit:
+                    break
+        for fid in selected:
+            data, error = api_get("/fixtures", {"id": fid})
+            if error or not data or not data.get("response"):
+                continue
+            match = data["response"][0]
+            status = ((match.get("fixture") or {}).get("status") or {}).get("short")
+            score = match.get("score") or {}
+            half = score.get("halftime") or {}
+            ht_h, ht_a = half.get("home"), half.get("away")
+            full = score.get("fulltime") or {}
+            ft_h, ft_a = full.get("home"), full.get("away")
+            ended = status in ("FT", "AET", "PEN")
+            if ended and (ft_h is None or ft_a is None):
+                goals = match.get("goals") or {}
+                ft_h, ft_a = goals.get("home"), goals.get("away")
+            with perf_db() as db:
+                rows = db.execute("""SELECT * FROM signal_events WHERE fixture_id=?
+                    AND (result IN ('OPEN','INCOMPLETE') OR (market LIKE 'İY %' AND result='NO_GOAL_15'))""", (fid,)).fetchall()
+                for row in rows:
+                    market = row["market"]
+                    if market.startswith("İY"):
+                        if ht_h is None or ht_a is None:
+                            continue
+                        threshold = 2 if market == "İY 1.5 Üst" else 1 if market == "İY 0.5 Üst" else None
+                        if threshold is None:
+                            continue
+                        # İlk yarı pazarının sonucu yalnızca devre skoru ile belirlenir.
+                        won = int(ht_h) + int(ht_a) >= threshold
+                        _settle_signal(db, row, won, 45, None)
+                    elif market == "BOT PICK" and ended and ft_h is not None and ft_a is not None:
+                        won = _pick_won(row, int(ft_h), int(ft_a))
+                        if won is not None:
+                            _settle_signal(db, row, won, 90, None)
+                    elif market == "Gol Radarı" and ended and ft_h is not None and ft_a is not None:
+                        # Final skor 15 dakikalık zaman penceresini ispatlamaz.
+                        # Canlı izlemdeki kesin sonuçları koru; eksikse uydurma.
+                        pass
+    except Exception as exc:
+        print(f"Performans API sonuç doğrulama hatası: {exc}", flush=True)
 
 
 def record_scan(status):
@@ -364,6 +450,7 @@ def record_scan(status):
 
 
 def performance_data():
+    reconcile_signal_results()
     with perf_db() as db:
         signals = [dict(r) for r in db.execute("SELECT * FROM signal_events ORDER BY id DESC LIMIT 200")]
         scans = [dict(r) for r in db.execute("SELECT * FROM scan_events ORDER BY id DESC LIMIT 80")]
@@ -421,8 +508,8 @@ def serialize_matches_for_web() -> List[Dict[str, Any]]:
                 "status": match.get("status"),
                 "home_goals": match.get("home_goals"),
                 "away_goals": match.get("away_goals"),
-                "signal": (item.get("current_signal", 0) if safe_int(match.get("minute"), 0) <= LAST_GOAL_SIGNAL_MINUTE else 0),
-                "signal_active": (safe_int(match.get("minute"), 0) <= LAST_GOAL_SIGNAL_MINUTE and item.get("current_signal", 0) >= SIGNAL_LIMIT),
+                "signal": item.get("current_signal", 0),
+                "signal_active": item.get("current_signal", 0) >= SIGNAL_LIMIT,
                 "reasons": item.get("current_reasons", []),
                 "first_half_signal": item.get("first_half_signal", 0),
                 "first_half_active": (
@@ -451,10 +538,10 @@ def serialize_matches_for_web() -> List[Dict[str, Any]]:
                 "btts_label": item.get("btts_label", "DÜŞÜK"),
                 "period_number": item.get("period_number", 0),
                 "period_started_minute": item.get("period_started_minute"),
-                "bot_pick_score": (item.get("bot_pick_score", 0) if safe_int(match.get("minute"), 0) <= LAST_GOAL_SIGNAL_MINUTE else 0),
+                "bot_pick_score": item.get("bot_pick_score", 0),
                 "bot_pick_text": item.get("bot_pick_text", ""),
                 "bot_pick_reasons": item.get("bot_pick_reasons", []),
-                "bot_pick_best": (safe_int(match.get("minute"), 0) <= LAST_GOAL_SIGNAL_MINUTE and item.get("bot_pick_best", False)),
+                "bot_pick_best": item.get("bot_pick_best", False),
                 "bot_pick_confirm_count": item.get("bot_pick_confirm_count", 0),
                 "bot_pick_confirm_required": BOT_PICK_CONFIRM_SCANS,
                 "bot_pick_ready": item.get("bot_pick_ready", False),
@@ -1418,7 +1505,7 @@ def calculate_bot_pick(
     - skor/dakika senaryosu
     birlikte kullanır.
     """
-    if minute < BOT_PICK_MINUTE or minute > LAST_GOAL_SIGNAL_MINUTE:
+    if minute < BOT_PICK_MINUTE:
         return 0, "", [], 0
 
     shots = evaluation_stats.get("shots", 0)
@@ -1582,7 +1669,7 @@ def resolve_open_picks_after_goal(
                         elapsed = max(0,minute-row["minute"])
                         db.execute("""UPDATE signal_events SET result=?,goal_minute=?,checked_minute=?,
                             hit_5=?,hit_10=?,hit_15=? WHERE id=?""",
-                            ('GOAL' if result=='WON' else 'INCOMPLETE',minute,minute,
+                            ('GOAL' if result=='WON' else 'NO_GOAL_15',minute,minute,
                              int(result=='WON' and elapsed<=5),int(result=='WON' and elapsed<=10),
                              int(result=='WON' and elapsed<=15),row['id']))
             except Exception as exc:
@@ -1626,8 +1713,7 @@ def finalize_best_bot_pick() -> None:
 
         candidates = [
             item for item in match_memory.values()
-            if safe_int((item.get("match") or {}).get("minute"), 0) <= LAST_GOAL_SIGNAL_MINUTE
-            and item.get("bot_pick_score", 0) >= BOT_PICK_LIMIT
+            if item.get("bot_pick_score", 0) >= BOT_PICK_LIMIT
             and item.get("bot_pick_text")
             and item.get("bot_pick_ready", False)
         ]
@@ -1776,7 +1862,7 @@ def refresh_live_odds_for_signal_cards() -> None:
             match = item.get("match") or {}
             minute = safe_int(match.get("minute"), 0)
             status = str(match.get("status") or "")
-            if item.get("bot_pick_best") or status not in ("1H", "2H") or minute > LAST_GOAL_SIGNAL_MINUTE:
+            if item.get("bot_pick_best") or status not in ("1H", "2H"):
                 continue
 
             home_goals = safe_int(match.get("home_goals"), 0)
@@ -1855,10 +1941,10 @@ def refresh_live_odds_for_signal_cards() -> None:
                 odd_info and float(odd_info.get("odd") or 0) >= LIVE_ODDS_MIN)
             if not item["odds_qualified"]:
                 continue
-            if safe_int((item.get("match") or {}).get("minute"), 0) > LAST_GOAL_SIGNAL_MINUTE:
-                continue
             match = item.get("match") or {}
             minute = safe_int(match.get("minute"), 0)
+            if minute > 82:
+                continue
             home_goals = safe_int(match.get("home_goals"), 0)
             away_goals = safe_int(match.get("away_goals"), 0)
             if snapshot["market_period"] == "first_half":
@@ -3712,10 +3798,10 @@ table{width:100%;border-collapse:collapse;min-width:690px}th,td{text-align:left;
 const esc=x=>String(x??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function load(){try{const r=await fetch('/api/performance',{cache:'no-store'});const d=await r.json();if(!d.ok)throw Error(d.error);
 const sum=d.summary||[],all=sum.reduce((n,x)=>n+x.total,0),hit=sum.reduce((n,x)=>n+x.hit_15,0),miss=sum.reduce((n,x)=>n+x.missed,0),pending=sum.reduce((n,x)=>n+x.pending,0);
-const cards=[['Toplam sinyal',all],['15 dk içinde gol',hit],['15 dk golsüz',miss],['Değerlendirilenlerde isabet',hit+miss?((hit/(hit+miss))*100).toFixed(1)+'%':'—'],['Bekleyen',pending],['Kaydedilen tarama',d.scans.length]];
+const cards=[['Toplam sinyal',all],['Başarılı (15 dk)',hit],['Başarısız',miss],['Değerlendirilenlerde isabet',hit+miss?((hit/(hit+miss))*100).toFixed(1)+'%':'—'],['Bekleyen',pending],['Kaydedilen tarama',d.scans.length]];
 document.getElementById('cards').innerHTML=cards.map(x=>`<div class="card"><div class="muted">${x[0]}</div><div class="value">${x[1]}</div></div>`).join('');
 document.getElementById('summary').innerHTML=sum.map(x=>`<tr><td>${esc(x.market)}</td><td>${x.total}</td><td>${x.hit_5}</td><td>${x.hit_10}</td><td>${x.hit_15}</td><td>${x.missed}</td><td>${x.pending}</td></tr>`).join('')||'<tr><td colspan="7">Henüz sinyal yok</td></tr>';
-const label={GOAL:'⚽ Gol',NO_GOAL_15:'15 dk golsüz',OPEN:'Takipte',INCOMPLETE:'Eksik gözlem'};
+const label={GOAL:'✅ Başarılı',NO_GOAL_15:'❌ Başarısız',OPEN:'Takipte',INCOMPLETE:'Eksik gözlem'};
 document.getElementById('signals').innerHTML=d.signals.map(x=>`<tr><td>${esc(x.home_team)} – ${esc(x.away_team)}</td><td>${esc(x.market)}</td><td>${x.minute}'</td><td>${x.score}</td><td>${label[x.result]||esc(x.result)}</td><td>${x.goal_minute??'—'}</td></tr>`).join('')||'<tr><td colspan="6">Henüz sinyal yok</td></tr>';
 document.getElementById('scans').innerHTML=d.scans.map(x=>`<tr><td>${esc(x.created_at)}</td><td>${x.live_count}</td><td>${x.eligible_count}</td><td>${x.analyzed_count}</td><td>${x.duration}s</td><td class="${x.error?'bad':'good'}">${esc(x.error||'Yok')}</td></tr>`).join('')||'<tr><td colspan="6">Henüz tarama kaydı yok</td></tr>';
 document.getElementById('notice').textContent=d.persistent?'Veritabanı yolu: '+d.storage:'⚠️ Veriler /tmp altında: Render yeniden başlatıldığında silinebilir. Kalıcı disk için GOL_DATA_DIR ayarla.';
