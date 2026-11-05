@@ -2718,6 +2718,86 @@ def prematch_team_form(team_id: int, kickoff: str
     }, None
 
 
+# Maç önü zenginleştirme: yalnızca API'de doğrulanan alanlar kullanılır.
+# Maç bazlı istatistikler uzun, değişken bilgiler kısa süre önbellekte kalır.
+def prematch_team_context(team_id, league_id, season, fixture_id, kickoff):
+    result = {"coverage": {}, "standing": None, "shots_on_goal": None,
+              "shots_total": None, "corners": None, "injuries": None,
+              "squad_size": None, "opponent_strength": None}
+    def fetch(name, path, params, ttl):
+        data, err = prematch_api_cached("extra:" + name + ":" +
+            json.dumps(params, sort_keys=True), path, params, ttl)
+        result["coverage"][name] = "error" if err else ("available" if data else "empty")
+        return data or []
+    standings = fetch("standings", "/standings",
+        {"league": league_id, "season": season}, 21600)
+    league_teams = {}
+    for group in standings:
+        for table in ((group.get("league") or {}).get("standings") or []):
+            for row in table:
+                tid = safe_int(((row.get("team") or {}).get("id")), 0)
+                if tid:
+                    league_teams[tid] = row
+    own = league_teams.get(team_id)
+    if own:
+        result["standing"] = {"rank": own.get("rank"),
+            "points": own.get("points"), "played": ((own.get("all") or {}).get("played")),
+            "league_team_count": len(league_teams)}
+    # Sakatlık listesi: boş liste = bildirilmiş sakatlık yok / kapsama belirsiz.
+    injuries = fetch("injuries", "/injuries", {"fixture": fixture_id, "team": team_id}, 7200)
+    if result["coverage"]["injuries"] != "error":
+        result["injuries"] = len(injuries)
+    squads = fetch("squad", "/players/squads", {"team": team_id}, 86400)
+    if squads and isinstance(squads[0].get("players"), list):
+        result["squad_size"] = len(squads[0]["players"])
+    recent = fetch("recent", "/fixtures", {"team": team_id, "last": 12}, 10800)
+    completed = []
+    for match in recent:
+        fx = match.get("fixture") or {}
+        if ((fx.get("status") or {}).get("short") not in ("FT", "AET", "PEN")
+            or (fx.get("date") or "") >= kickoff):
+            continue
+        completed.append(match)
+    completed = completed[:5]
+    opp_scores = []
+    for match in completed:
+        sides = match.get("teams") or {}
+        h = safe_int((sides.get("home") or {}).get("id"), 0)
+        a = safe_int((sides.get("away") or {}).get("id"), 0)
+        opponent = a if h == team_id else h
+        row = league_teams.get(opponent)
+        if row and len(league_teams) > 1:
+            try:
+                rank = int(row.get("rank"))
+                opp_scores.append(1 - (rank - 1) / (len(league_teams) - 1))
+            except (TypeError, ValueError):
+                pass
+    if opp_scores:
+        result["opponent_strength"] = round(sum(opp_scores) / len(opp_scores), 3)
+        result["opponent_sample"] = len(opp_scores)
+    # Yalnızca son üç maç için istatistik; diğer maçlar istek kotasını şişirmesin.
+    samples = {"shots_on_goal": [], "shots_total": [], "corners": []}
+    for match in completed[:3]:
+        fid = safe_int((match.get("fixture") or {}).get("id"), 0)
+        if not fid: continue
+        stats = fetch("stats", "/fixtures/statistics", {"fixture": fid}, 2592000)
+        own_stats = next((v for v in stats if safe_int((v.get("team") or {}).get("id"),0)==team_id), None)
+        if not own_stats: continue
+        lookup = {str(v.get("type") or "").lower(): v.get("value") for v in own_stats.get("statistics") or []}
+        for key, api_key in (("shots_on_goal", "shots on goal"),
+                             ("shots_total", "total shots"), ("corners", "corner kicks")):
+            try:
+                n = float(lookup.get(api_key))
+                if math.isfinite(n) and n >= 0: samples[key].append(n)
+            except (ValueError, TypeError):
+                pass
+    for key, values in samples.items():
+        if values:
+            result[key] = round(sum(values) / len(values), 2)
+            result[key + "_sample"] = len(values)
+    return result
+
+
 def prematch_h2h(home_id: int, away_id: int, kickoff: str
                  ) -> Tuple[Dict[str, Any], Optional[str]]:
     items, error = prematch_api_cached(
@@ -3578,6 +3658,15 @@ def api_prematch_analyze():
         return None
     from prematch_intelligence import calibrate_with_market
     analysis = calibrate_with_market(analysis, _strength_1x2(odds_entries))
+    league = match.get("league") or {}
+    league_id = safe_int(league.get("id"), 0)
+    season = safe_int(league.get("season"), 0)
+    enrichment = {"home": {}, "away": {}}
+    if league_id and season:
+        enrichment["home"] = prematch_team_context(home_id, league_id, season, fixture_id, fixture.get("date") or "")
+        enrichment["away"] = prematch_team_context(away_id, league_id, season, fixture_id, fixture.get("date") or "")
+    from prematch_intelligence import enrich_with_verified_data
+    analysis = enrich_with_verified_data(analysis, enrichment)
     candidates = []
     for item in analysis["markets"]:
         item = dict(item)
@@ -3628,7 +3717,7 @@ def api_prematch_analyze():
         "candidate_count":len(candidates),"odds_note":note,
         "note":analysis["model_note"],"scenario":analysis["scenario"],"context":analysis.get("context",{}),
         "data_quality":analysis["data_quality"], "web_research":web_research,
-        "strength_context":analysis.get("strength_context",{})})
+        "strength_context":analysis.get("strength_context",{}), "verified_data":enrichment})
 
 
 @app.route("/api/prematch/result")

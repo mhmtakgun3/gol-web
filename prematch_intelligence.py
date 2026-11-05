@@ -222,6 +222,55 @@ def calibrate_with_market(analysis, market_odds):
     analysis['model_note']='Son 5 maç, iç/deplasman formu ve doğrulanmış 1X2 piyasa güç referansı kullanıldı. Kadro değerleri ve ligler arası güç katsayıları henüz doğrulanmadı; olasılıklar kalibre edilmemiş tahminlerdir.'
     return analysis
 
+def enrich_with_verified_data(analysis, data):
+    """Use verified standings/shot production as a conservative strength correction.
+
+    Same-league rank is comparable; cross-league ranks are not. Squad size and
+    injury count are informational only: they do not measure player quality.
+    """
+    home, away = data.get('home') or {}, data.get('away') or {}
+    factors = []
+    for key, weight in [('standing', .12), ('shots_on_goal', .08), ('opponent_strength', .05)]:
+        if key == 'standing':
+            h, a = home.get('standing') or {}, away.get('standing') or {}
+            try:
+                hn, an = int(h['league_team_count']), int(a['league_team_count'])
+                if hn < 2 or an < 2 or hn != an: continue
+                # League ranks across different competitions are not comparable.
+                # Same-league verification is performed in the caller.
+                continue
+            except (ValueError, TypeError, KeyError): continue
+        else:
+            hv, av = home.get(key), away.get(key)
+            if hv is None or av is None: continue
+            if key == 'shots_on_goal' and min(home.get(key+'_sample',0), away.get(key+'_sample',0)) < 2: continue
+            if key == 'opponent_strength' and min(home.get('opponent_sample',0), away.get('opponent_sample',0)) < 2: continue
+            delta = (float(hv)-float(av))/max(float(hv)+float(av),1)
+            factors.append((key, weight*max(-1,min(1,delta))))
+    # The bookmaker-calibrated result model is kept coherent; evidence from
+    # verified shot production is a small additional result-outcome adjustment.
+    shift = max(-.12, min(.12, sum(v for _,v in factors)))
+    if factors and abs(shift) > .0001:
+        old = analysis['markets']
+        home_result = next((m for m in old if m['market']=='HOME'), None)
+        away_result = next((m for m in old if m['market']=='AWAY'), None)
+        if home_result and away_result:
+            # Only report verified factors, avoid changing market probabilities
+            # without rebuilding the full joint score distribution.
+            analysis['verified_strength_signal'] = round(shift,4)
+    coverage = {side: {k: v for k,v in (ctx.get('coverage') or {}).items()}
+                for side,ctx in [('home',home),('away',away)]}
+    analysis['verified_data_coverage'] = coverage
+    parts = []
+    if home.get('shots_on_goal') is not None and away.get('shots_on_goal') is not None:
+        parts.append(f"İsabetli şut (son doğrulanmış maçlar): ev {home['shots_on_goal']}, dep {away['shots_on_goal']}")
+    if home.get('injuries') is not None and away.get('injuries') is not None:
+        parts.append(f"API'de bildirilen eksikler: ev {home['injuries']}, dep {away['injuries']} (kapsama kontrol edilmeli)")
+    if parts:
+        analysis['model_note'] += ' | Ek doğrulanmış gözlemler: ' + '; '.join(parts) + '. Bu gözlemler henüz bahis olasılığını değiştirmez.'
+    return analysis
+
+
 def analyze_match(home, away, h2h=None):
     ha, aa = home.get('all') or {}, away.get('all') or {}
     hv, av = home.get('home') or {}, away.get('away') or {}
