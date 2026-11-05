@@ -3136,6 +3136,7 @@ def prematch_odd_for_market(entries: List[Dict[str, Any]], market_code: str
         "OVER_3_5": ("over", 3.5), "UNDER_3_5": ("under", 3.5),
         "HT_OVER_0_5": ("over", 0.5), "HT_OVER_1_5": ("over", 1.5),
         "HT_UNDER_1_5": ("under", 1.5),
+        "HOME_OVER_0_5": ("over", 0.5), "AWAY_OVER_0_5": ("over", 0.5),
         "HOME_OVER_1_5": ("over", 1.5),
         "AWAY_OVER_1_5": ("over", 1.5),
     }
@@ -3167,8 +3168,8 @@ def prematch_odd_for_market(entries: List[Dict[str, Any]], market_code: str
                     selection = str(value.get("value") or "").strip()
                     normalized = re.sub(r"\s+", "", selection.lower())
                     matches = False
-                    right_total = (is_home_total if market_code == "HOME_OVER_1_5"
-                                   else is_away_total if market_code == "AWAY_OVER_1_5"
+                    right_total = (is_home_total if market_code.startswith("HOME_OVER_")
+                                   else is_away_total if market_code.startswith("AWAY_OVER_")
                                    else is_first_half_total if market_code.startswith("HT_")
                                    else is_total)
                     if market_code in wanted_total and right_total:
@@ -3189,6 +3190,8 @@ def prematch_odd_for_market(entries: List[Dict[str, Any]], market_code: str
                         matches = normalized in ("home/draw", "1x", "homedraw")
                     elif market_code == "DC_X2" and is_double:
                         matches = normalized in ("draw/away", "x2", "drawaway")
+                    elif market_code == "DC_12" and is_double:
+                        matches = normalized in ("home/away", "12", "homeaway")
                     if not matches:
                         continue
                     odd = _float_odd(value.get("odd"))
@@ -3553,8 +3556,9 @@ def api_prematch_analyze():
     candidates = []
     for item in analysis["markets"]:
         item = dict(item)
-        quote = None if item["market"].startswith("BB_") else prematch_odd_for_market(
-            odds_entries or [], item["market"])
+        # BetBuilder ancak API'de TAM birleşik pazarın doğrulanmış oranı varsa oynanabilir.
+        # Tekil bahis oranlarını çarparak sahte birleşik fiyat üretme.
+        quote = prematch_odd_for_market(odds_entries or [], item["market"])
         if quote and item["market"] in ("HOME", "AWAY"):
             valid, _ = prematch_result_market_check(odds_entries or [], item["market"], quote)
             if not valid:
@@ -3566,9 +3570,9 @@ def api_prematch_analyze():
                     value_edge=round(prob-1/odd,4) if odd else None,
                     value_edge_pct=round(100*(prob-1/odd),1) if odd else None,
                     expected_value=round(ev,4) if ev is not None else None,
-                    coupon_eligible=bool(ev is not None and ev >= .04 and prob >= .60 and
-                                         abs(prob - 1/odd) <= .22 and
-                                         analysis["data_quality"] == "good"),
+                    coupon_eligible=bool(ev is not None and ev >= -.06 and prob >= .52 and
+                                         abs(prob - 1/odd) <= .30 and
+                                         analysis["data_quality"] != "poor"),
                     manual_review=not bool(odd and odd >= 1.30),
                     screening_only=False,
                     confidence=analysis["data_quality"],
@@ -5121,15 +5125,15 @@ function historyQuality(pick){
 // Tek başına yüksek olasılık değil, doğrulanmış fiyatın beklenen değeri belirleyici.
 // Ortak karar politikası: tablo ve kuponlar aynı elemeden geçer.
 // Poisson olasılıkları kalibre edilmediğinden ham EV'yi kesin avantaj sayma.
-const GM_MIN_PROB=.60,GM_MIN_ODD=1.30,GM_MIN_EV=.04;
+const GM_MIN_PROB=.52,GM_MIN_ODD=1.30,GM_MIN_EV=-.06;
 function decisionMetrics(p,quality){
   const odd=Number(p?.quote?.odd||p?.odd||0);
   const prob=Number(p?.model_probability??p?.modelProbability??NaN);
-  if(quality!=="good"||!Number.isFinite(prob)||prob<=0||prob>=1||!Number.isFinite(odd)||odd<GM_MIN_ODD)return null;
+  if(quality==="poor"||!Number.isFinite(prob)||prob<=0||prob>=1||!Number.isFinite(odd)||odd<GM_MIN_ODD)return null;
   const implied=1/odd;
   // Yalnızca bir güvenlik kontrolü: tahmin ile fiyat çok ayrışırsa otomatik önerme.
   // Bu değer kalibre edilmiş olasılık değildir.
-  if(Math.abs(prob-implied)>.22)return null;
+  if(Math.abs(prob-implied)>.30)return null;
   const ev=prob*odd-1;
   if(prob<GM_MIN_PROB||ev<GM_MIN_EV)return null;
   return {odd,prob,ev,implied,score:ev + .08*prob};
@@ -5139,42 +5143,38 @@ function marketValueScore(p,quality="good"){
 }
 function bestPricedMarket(picks,quality){
   const eligible=(picks||[]).filter(p=>decisionMetrics(p,quality));
-  // ALT, yalnızca başka uygun market yoksa değerlendirilir.
-  const primary=eligible.filter(p=>!String(p.market||"").includes("UNDER") && p.market!=="BTTS_NO");
-  const choices=primary.length?primary:eligible;
+  // Pazar türüne göre öncelik yok: hepsi aynı değer hesabından geçer.
+  const choices=eligible;
   choices.sort((a,b)=>marketValueScore(b,quality)-marketValueScore(a,quality));
   return choices[0]||null;
 }
 function candidatePool(){
-  // Tek otorite analiz motorudur: kupon motoru kendi marketini uyduramaz.
+  // Her maçta sadece ana tercihe takılma; doğrulanmış fiyatı olan uygun alternatifleri de tara.
+  // Tüm doğrulanmış fiyatlı pazarlar aynı ölçütlerle değerlendirilir.
   const pool=[],stats={matches:analyzedMatches.size,eligible:0,unpriced:0,rejected:0};
   for(const [fixture,item] of analyzedMatches){
     const a=item.analysis||{},quality=a.data_quality||"poor";
-    const picks=Array.isArray(a.suggestions)?a.suggestions:[];
-    const main=picks.find(p=>p?.is_main)||picks[0];
-    if(!main||quality!=="good"){stats.rejected++;continue;}
-    // Analiz PAS dediyse veya ana tahminin doğrulanmış fiyatı yoksa PAS.
-    // Alternatif markete geçip 3,5 ALT kuponu üretme.
-    const odd=Number(main.quote?.odd||0);
-    if(!main.coupon_eligible||!main.price_verified||!Number.isFinite(odd)||odd<GM_MIN_ODD){
-      if(!Number.isFinite(odd)||odd<GM_MIN_ODD)stats.unpriced++;
-      else stats.rejected++;
-      continue;
+    const all=Array.isArray(a.all_suggestions)?a.all_suggestions:[];
+    const picks=all.length?all:(Array.isArray(a.suggestions)?a.suggestions:[]);
+    const allowed=picks.filter(p=>p&&decisionMetrics(p,quality));
+    // ALT/ÜST/KG/MS ayrımı yapmadan bütün fiyatlı pazarları sırala.
+    const options=allowed.sort((a,b)=>marketValueScore(b,quality)-marketValueScore(a,quality));
+    if(!options.length){
+      if(picks.some(p=>Number(p?.quote?.odd||0)<GM_MIN_ODD))stats.unpriced++;
+      stats.rejected++;continue;
     }
-    const prob=Number(main.model_probability);
-    if(!Number.isFinite(prob)||prob<=0||prob>=1){stats.rejected++;continue;}
-    const leg={fixture:Number(fixture),home:item.match.home,away:item.match.away,
+    const legs=options.map(p=>({fixture:Number(fixture),home:item.match.home,away:item.match.away,
       kickoff:item.match.kickoff,country:item.match.country,league:item.match.league,
-      market:main.market,label:main.label,confidence:quality,
-      modelProbability:prob,baseModelProbability:prob,odd,
-      bookmaker:main.quote?.bookmaker||"",explanation:main.explanation||main.reason||"",
-      valueEdge:Number(main.value_edge_pct||0),status:"OPEN"};
-    pool.push({...leg,options:[leg]});
+      market:p.market,label:p.label,confidence:quality,
+      modelProbability:Number(p.model_probability),baseModelProbability:Number(p.model_probability),
+      odd:Number(p.quote.odd),bookmaker:p.quote.bookmaker||"",
+      explanation:p.explanation||p.reason||"",valueEdge:Number(p.value_edge_pct||0),status:"OPEN"}));
+    pool.push({...legs[0],options:legs});
   }
   stats.eligible=pool.length;pool.stats=stats;return pool;
 }
 // v10: Dinamik kupon portföyü. Kupon düzeyinde olasılık çarpımı veya sabit sayı yok.
-const couponStrategyVersionV10="v11-main-pick-only";
+const couponStrategyVersionV10="v12-flexible-priced-options";
 function couponRisk(probability){
   const p=Number(probability||0);
   if(p>=.70)return {key:"safe",label:"GÜÇLÜ ADAY",risk:"GÖRECELİ DÜŞÜK"};
@@ -5257,6 +5257,8 @@ function legResult(market,h,a,hh=null,ha=null){
   if(market==="BB_HOME_TEAM15")return h>a&&h>=2;
   if(market==="BB_AWAY_TEAM15")return a>h&&a>=2;
   if(market==="DC_1X")return h>=a;if(market==="DC_X2")return a>=h;
+  if(market==="DC_12")return h!==a;
+  if(market==="HOME_OVER_0_5")return h>=1;if(market==="AWAY_OVER_0_5")return a>=1;
   if(market==="HOME_OVER_1_5")return h>=2;if(market==="AWAY_OVER_1_5")return a>=2;
   if(market==="BTTS_YES")return h>0&&a>0;if(market==="BTTS_NO")return h===0||a===0;
   if(market==="OVER_1_5")return total>=2;if(market==="OVER_2_5")return total>=3;

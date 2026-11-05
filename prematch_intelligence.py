@@ -146,6 +146,16 @@ RULES = [
  ('HOME','MS 1','result_home',lambda h,a:h>a),
  ('DRAW','MS X','result_draw',lambda h,a:h==a),
  ('AWAY','MS 2','result_away',lambda h,a:h<a),
+ ('DC_1X','1X Çifte Şans','double_chance',lambda h,a:h>=a),
+ ('DC_X2','X2 Çifte Şans','double_chance',lambda h,a:a>=h),
+ ('DC_12','12 Çifte Şans','double_chance',lambda h,a:h!=a),
+ ('HOME_OVER_0_5','Ev 0,5 ÜST','home_goals',lambda h,a:h>=1),
+ ('AWAY_OVER_0_5','Dep 0,5 ÜST','away_goals',lambda h,a:a>=1),
+ ('HOME_WIN_HALF','Ev sahibi bir devre kazanır','half_result',None),
+ ('AWAY_WIN_HALF','Deplasman bir devre kazanır','half_result',None),
+ ('HT_OVER_0_5','İY 0,5 ÜST','half_goals',None),
+ ('HT_OVER_1_5','İY 1,5 ÜST','half_goals',None),
+ ('HT_UNDER_1_5','İY 1,5 ALT','half_goals',None),
  ('OVER_1_5','1,5 ÜST','goals15',lambda h,a:h+a>=2),
  ('OVER_2_5','2,5 ÜST','goals25',lambda h,a:h+a>=3),
  ('UNDER_2_5','2,5 ALT','goals25',lambda h,a:h+a<=2),
@@ -189,8 +199,20 @@ def analyze_match(home, away, h2h=None):
             for h in range(13) for a in range(13)]
     total=sum(p for _,_,p in scores)
     markets=[]
+    # Devre pazarları için ayrı yarı Poisson dağılımı; iki yarı bağımsız
+    # varsayımıdır, kesin ilk yarı oranı veya doğrulanmış başarı değildir.
+    half_scores=[(h,a,math.exp(-(lh+la)/2)*(lh/2)**h*(la/2)**a /
+                  (math.factorial(h)*math.factorial(a))) for h in range(13) for a in range(13)]
+    half_z=sum(v for _,_,v in half_scores)
+    half_home_win=sum(v for h,a,v in half_scores if h>a)/half_z
+    half_away_win=sum(v for h,a,v in half_scores if a>h)/half_z
     for code,label,family,rule in RULES:
-        p=sum(weight for h,a,weight in scores if rule(h,a))/total
+        if code=='HT_OVER_0_5': p=sum(v for h,a,v in half_scores if h+a>=1)/half_z
+        elif code=='HT_OVER_1_5': p=sum(v for h,a,v in half_scores if h+a>=2)/half_z
+        elif code=='HT_UNDER_1_5': p=sum(v for h,a,v in half_scores if h+a<=1)/half_z
+        elif code=='HOME_WIN_HALF': p=1-(1-half_home_win)**2
+        elif code=='AWAY_WIN_HALF': p=1-(1-half_away_win)**2
+        else: p=sum(weight for h,a,weight in scores if rule(h,a))/total
         markets.append({'market':code,'label':label,'family':family,'model_probability':round(p,4),
             'reason':f'Ev gol beklentisi {lh:.2f}, deplasman {la:.2f}. {label} senaryosu için ortak skor dağılımından %{p*100:.1f} hesaplandı. Veri kalitesi: {quality}. Gerçekleşme garantisi değildir.'})
     return {'markets':markets,'data_quality':quality,
@@ -218,92 +240,34 @@ def _scenario_family(market):
 
 
 def choose_markets(candidates, quality):
-    """Choose a match-specific scenario, never a default cheap goal market.
+    """Market-neutral selection: no UNDER/OVER/BTTS/result category bonus.
 
-    Quotes must match the exact market. Unpriced choices are informational only.
-    3,5 ALT remains available in analysis, but is never selected as a betting recommendation.
-    Other under markets are fallback options, not the automatic first choice.
+    Only exact, independently verified bookmaker quotes can enter coupons.
+    Builder markets remain visible for analysis until a matching combined quote exists.
     """
     if not candidates:
         return []
-    by_code = {c['market']: c for c in candidates}
     for c in candidates:
-        prob = float(c.get('model_probability') or 0)
-        c['risk_level'] = risk_level(prob, quality)
-        q = c.get('quote') or {}
-        try:
-            odd = float(q.get('odd') or 0)
-        except (TypeError, ValueError):
-            odd = 0
-        c['price_verified'] = bool(odd >= 1.30 and not c['market'].startswith('BB_'))
-        c['coupon_eligible'] = bool(c['price_verified'] and c.get('coupon_eligible')
-                                    and prob >= .60 and quality == 'good')
-        c['manual_review'] = not c['coupon_eligible']
-
-    # BetBuilder combinations may be a sound *analysis*, but never imply an
-    # executable price unless a matching real quote has been supplied.
-    combined = []
-    for side, code in (('HOME', 'BB_HOME_OVER15'), ('AWAY', 'BB_AWAY_OVER15')):
-        result, builder = by_code.get(side), by_code.get(code)
-        if result and builder and result['model_probability'] >= .54 and builder['model_probability'] >= .43:
-            combined.append(builder)
-    btts, btts_builder = by_code.get('BTTS_YES'), by_code.get('BB_BTTS_OVER25')
-    if btts and btts_builder and btts['model_probability'] >= .54 and btts_builder['model_probability'] >= .40:
-        combined.append(btts_builder)
-
-    # We do not let an easy 1.5-over or 3.5-under market dominate simply
-    # because its raw probability is higher. Prefer a distinct football thesis.
-    primary_codes = ('HOME', 'AWAY', 'BTTS_YES', 'OVER_2_5', 'OVER_3_5',
-                     'HOME_OVER_1_5', 'AWAY_OVER_1_5')
-    meaningful = [by_code[k] for k in primary_codes
-                  if k in by_code and by_code[k]['model_probability'] >= .52]
-    priced = [c for c in meaningful if c['price_verified']]
-
+        p=float(c.get('model_probability') or 0)
+        c['risk_level']=risk_level(p,quality)
+        q=c.get('quote') or {}
+        try: odd=float(q.get('odd') or 0)
+        except (TypeError,ValueError): odd=0
+        c['price_verified']=bool(odd>=1.30)
+        c['coupon_eligible']=bool(c.get('coupon_eligible') and c['price_verified'])
+        c['manual_review']=not c['coupon_eligible']
     def rank(c):
-        prob = float(c['model_probability'])
-        quote = c.get('quote') or {}
-        odd = float(quote.get('odd') or 0)
-        # Market price is a validation gate, not a substitute for the thesis.
-        # This modest quality bonus never fabricates odds or probabilities.
-        return (prob + (.025 if c['market'] in ('HOME', 'AWAY', 'BTTS_YES') else 0)
-                + (.015 if odd >= 1.50 else 0))
-
-    selected = []
-    if priced:
-        selected.append(max(priced, key=rank))
-    elif combined:
-        selected.append(max(combined, key=lambda c: c['model_probability']))
-    elif meaningful:
-        selected.append(max(meaningful, key=rank))
-    else:
-        # 1.5 OVER is an informative fallback only when the match really
-        # points to goals, never the default for every fixture.
-        over15 = by_code.get('OVER_1_5')
-        if over15 and over15['model_probability'] >= .75 and over15['price_verified']:
-            selected.append(over15)
-        else:
-            # The user prefers UNDER only as the last resort.
-            under = [by_code[k] for k in ('UNDER_2_5',) if k in by_code
-                     and by_code[k]['price_verified'] and by_code[k]['model_probability'] >= .68]
-            if under:
-                selected.append(max(under, key=rank))
-
-    if not selected:
-        return []  # Explicit PASS is better than a made-up 'playable' tip.
-
-    main = selected[0]
-    family = _scenario_family(main['market'])
-    alternatives = [c for c in meaningful + combined
-                    if c['market'] != main['market'] and _scenario_family(c['market']) != family]
-    alternatives.sort(key=lambda c:(c['price_verified'], rank(c) if c['price_verified'] else c['model_probability']),reverse=True)
-    if alternatives:
-        selected.append(alternatives[0])
-
-    for i, c in enumerate(selected):
-        c['is_main'] = (i == 0)
-        c['decision_role'] = ('ANA MAÇ SENARYOSU' if i == 0 else 'ALTERNATİF')
-        c['explanation'] = (c.get('explanation') or c.get('reason') or '') + (
-            ' Doğrulanmış 1.30+ oran yok; sadece analiz, otomatik kupona alınmaz.'
-            if not c['price_verified'] else
-            ' Doğrulanmış oran mevcut; kupon uygunluğu ayrıca kontrol edilir.')
+        p=float(c.get('model_probability') or 0)
+        q=c.get('quote') or {}
+        odd=float(q.get('odd') or 0)
+        # Identical objective for every market: price-relative expected value.
+        return (p*odd-1, p) if odd>=1.30 else (-999,p)
+    priced=sorted((c for c in candidates if c['coupon_eligible']),key=rank,reverse=True)
+    informative=sorted((c for c in candidates if not c['coupon_eligible']),
+                       key=lambda c:float(c.get('model_probability') or 0),reverse=True)
+    selected=(priced or informative)[:2]
+    for i,c in enumerate(selected):
+        c['is_main']=i==0
+        c['decision_role']='ANA MAÇ SENARYOSU' if i==0 else 'ALTERNATİF'
+        c['explanation']=(c.get('reason') or '')+(' Doğrulanmış oran yok veya kupon koşullarını karşılamıyor; yalnızca analiz.' if not c['coupon_eligible'] else ' Gerçek oranla değerlendirildi.')
     return selected
