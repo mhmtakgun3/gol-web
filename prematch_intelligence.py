@@ -176,6 +176,52 @@ RULES = [
  ('BB_AWAY_TEAM15','MS 2 + Dep 1,5 ÜST','away_builder',lambda h,a:a>h and a>=2),
 ]
 
+def calibrate_with_market(analysis, market_odds):
+    """Calibrate full-time score scenarios to independently observed 1X2 prices.
+
+    This is a market-strength proxy, NOT verified squad values or an independent
+    prediction. It avoids comparing raw goal averages across unequal leagues.
+    All full-time markets use one coherent reweighted score distribution.
+    """
+    if not market_odds or len(market_odds) != 3:
+        analysis['strength_context']={'status':'unavailable','note':'1X2 piyasa güç referansı eksik; kadro değeri doğrulanamadı.'}
+        return analysis
+    try:
+        raw={k:1/float(market_odds[k]) for k in ('HOME','DRAW','AWAY')}
+        if any(not math.isfinite(v) or v<=0 for v in raw.values()): raise ValueError()
+        norm=sum(raw.values()); target={k:v/norm for k,v in raw.items()}
+    except (ValueError,TypeError,ZeroDivisionError):
+        analysis['strength_context']={'status':'unavailable','note':'1X2 oranları geçersiz.'}
+        return analysis
+    lh=analysis['scenario']['home_expected_goals']; la=analysis['scenario']['away_expected_goals']
+    scores=[(h,a,math.exp(-lh-la)*lh**h*la**a/(math.factorial(h)*math.factorial(a))) for h in range(13) for a in range(13)]
+    groups={'HOME':lambda h,a:h>a,'DRAW':lambda h,a:h==a,'AWAY':lambda h,a:h<a}
+    base={k:sum(p for h,a,p in scores if fn(h,a)) for k,fn in groups.items()}
+    z=sum(base.values()); base={k:v/z for k,v in base.items()}
+    # 70% market consensus + 30% recent-form score model: not a market edge estimator.
+    blend=.70
+    adjusted={k:blend*target[k]+(1-blend)*base[k] for k in groups}
+    weighted=[]
+    for h,a,p in scores:
+        outcome='HOME' if h>a else 'AWAY' if a>h else 'DRAW'
+        weighted.append((h,a,p*adjusted[outcome]/max(base[outcome]*z,1e-12)))
+    total=sum(p for _,_,p in weighted)
+    for m in analysis['markets']:
+        rule=next((r for r in RULES if r[0]==m['market']),None)
+        if not rule or rule[3] is None or m['market'].startswith('HT_'): continue
+        prob=sum(p for h,a,p in weighted if rule[3](h,a))/total
+        m['model_probability']=round(prob,4)
+        m['reason']=(f"Son 5 maçın gol/ev-deplasman verileri ve doğrulanmış 1X2 piyasa güç referansı "
+                     f"birlikte değerlendirildi. {m['label']} senaryosu %{prob*100:.1f}. "
+                     'Piyasa oranları kadro piyasa değeri değildir; sakatlık ve lig gücü ayrıca doğrulanmadı.')
+    analysis['strength_context']={
+        'status':'market_proxy','source':'1X2 bookmaker odds',
+        'market_probabilities':{k:round(v,4) for k,v in target.items()},
+        'adjusted_result_probabilities':{k:round(v,4) for k,v in adjusted.items()},
+        'note':'Takım gücü için piyasa 1X2 olasılıkları referans alındı; kadro piyasa değeri, oyuncu seviyesi ve lig katsayısı doğrudan doğrulanmış değildir. Piyasa verisi kullanıldığı için hesaplanan EV bağımsız model avantajı kanıtı değildir.'}
+    analysis['model_note']='Son 5 maç, iç/deplasman formu ve doğrulanmış 1X2 piyasa güç referansı kullanıldı. Kadro değerleri ve ligler arası güç katsayıları henüz doğrulanmadı; olasılıklar kalibre edilmemiş tahminlerdir.'
+    return analysis
+
 def analyze_match(home, away, h2h=None):
     ha, aa = home.get('all') or {}, away.get('all') or {}
     hv, av = home.get('home') or {}, away.get('away') or {}

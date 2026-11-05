@@ -3553,6 +3553,31 @@ def api_prematch_analyze():
     analysis = analyze_match(home or {}, away or {}, h2h or {})
     web_research = research_match(home_team.get("name") or "", away_team.get("name") or "", fixture.get("date"))
     odds_entries, odds_error = prematch_fixture_odds(fixture_id)
+    # Same bookmaker's complete 1X2 market is required; never mix different
+    # providers' prices or fabricate squad valuations.
+    def _strength_1x2(entries):
+        for entry in entries or []:
+            for bookmaker in entry.get('bookmakers') or []:
+                bk = re.sub(r'[^a-z0-9]', '', str(bookmaker.get('name') or '').lower())
+                if bk not in PREMATCH_BOOKMAKERS:
+                    continue
+                for bet in bookmaker.get('bets') or []:
+                    if str(bet.get('name') or '').strip().lower() not in ('match winner','1x2','full time result','fulltime result'):
+                        continue
+                    values = {}
+                    for val in bet.get('values') or []:
+                        sel = re.sub(r'\s+', '', str(val.get('value') or '').lower())
+                        key = ('HOME' if sel in ('home','1') else
+                               'DRAW' if sel in ('draw','x') else
+                               'AWAY' if sel in ('away','2') else None)
+                        odd = _float_odd(val.get('odd'))
+                        if key and odd and 1.01 <= odd <= 25:
+                            values[key] = odd
+                    if len(values) == 3:
+                        return values
+        return None
+    from prematch_intelligence import calibrate_with_market
+    analysis = calibrate_with_market(analysis, _strength_1x2(odds_entries))
     candidates = []
     for item in analysis["markets"]:
         item = dict(item)
@@ -3602,7 +3627,8 @@ def api_prematch_analyze():
         "lineup_error":lineup_error,"decision":("ANALİZ HAZIR" if chosen else "VERİ YETERSİZ"),
         "candidate_count":len(candidates),"odds_note":note,
         "note":analysis["model_note"],"scenario":analysis["scenario"],"context":analysis.get("context",{}),
-        "data_quality":analysis["data_quality"], "web_research":web_research})
+        "data_quality":analysis["data_quality"], "web_research":web_research,
+        "strength_context":analysis.get("strength_context",{})})
 
 
 @app.route("/api/prematch/result")
