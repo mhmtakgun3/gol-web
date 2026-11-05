@@ -2661,7 +2661,7 @@ def prematch_team_form(team_id: int, kickoff: str
                        ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     # Genel son 8 ile gerçek son 5 iç/dış saha maçını ayrı örneklemlerden al.
     items, error = prematch_api_cached(
-        f"form:{team_id}", "/fixtures",
+        f"form:{team_id}:{kickoff[:10]}", "/fixtures",
         {"team": team_id, "last": 30, "timezone": "Europe/Istanbul"},
         PREMATCH_FORM_CACHE_SECONDS,
     )
@@ -2673,12 +2673,12 @@ def prematch_team_form(team_id: int, kickoff: str
         status = (fixture.get("status") or {}).get("short")
         played_at = fixture.get("date") or ""
         try:
-            match_time = datetime.fromisoformat(played_at)
-            kickoff_time = datetime.fromisoformat(kickoff)
+            match_time = datetime.fromisoformat(played_at.replace("Z", "+00:00")).astimezone(ISTANBUL_TZ)
+            kickoff_time = datetime.fromisoformat(kickoff.replace("Z", "+00:00")).astimezone(ISTANBUL_TZ)
         except (TypeError, ValueError):
             continue
         if (status not in ("FT", "AET", "PEN") or match_time >= kickoff_time
-                or kickoff_time - match_time > timedelta(days=365)):
+                or kickoff_time - match_time > timedelta(days=540)):
             continue
         sides = item.get("teams") or {}
         goals = item.get("goals") or {}
@@ -2705,11 +2705,11 @@ def prematch_team_form(team_id: int, kickoff: str
             "draw": scored == conceded,
         })
     finished.sort(key=lambda x: x["date"], reverse=True)
-    recent = finished[:8]
-    if len(recent) < 5:
-        return {"count": len(recent), "insufficient": True}, None
-    home_five = [x for x in finished if x["venue"] == "home"][:8]
-    away_five = [x for x in finished if x["venue"] == "away"][:8]
+    recent = finished[:5]
+    if len(recent) < 3:
+        return {"count": len(recent), "insufficient": True, "reason": "Son 540 günde yeterli tamamlanmış maç bulunamadı"}, None
+    home_five = [x for x in finished if x["venue"] == "home"][:5]
+    away_five = [x for x in finished if x["venue"] == "away"][:5]
     return {
         "count": len(recent),
         "all": _prematch_metrics(recent),
@@ -2721,7 +2721,7 @@ def prematch_team_form(team_id: int, kickoff: str
 def prematch_h2h(home_id: int, away_id: int, kickoff: str
                  ) -> Tuple[Dict[str, Any], Optional[str]]:
     items, error = prematch_api_cached(
-        f"h2h:{home_id}:{away_id}", "/fixtures/headtohead",
+        f"h2h:{home_id}:{away_id}:{kickoff[:10]}", "/fixtures/headtohead",
         {"h2h": f"{home_id}-{away_id}", "last": 8, "timezone": "Europe/Istanbul"},
         PREMATCH_FORM_CACHE_SECONDS,
     )
@@ -2732,7 +2732,7 @@ def prematch_h2h(home_id: int, away_id: int, kickoff: str
         fixture, teams, goals = item.get("fixture") or {}, item.get("teams") or {}, item.get("goals") or {}
         status, played_at = (fixture.get("status") or {}).get("short"), fixture.get("date") or ""
         try:
-            if datetime.fromisoformat(played_at) >= datetime.fromisoformat(kickoff):
+            if datetime.fromisoformat(played_at.replace("Z", "+00:00")).astimezone(ISTANBUL_TZ) >= datetime.fromisoformat(kickoff.replace("Z", "+00:00")).astimezone(ISTANBUL_TZ):
                 continue
         except (TypeError, ValueError):
             continue
@@ -3572,7 +3572,8 @@ def api_prematch_analyze():
                     expected_value=round(ev,4) if ev is not None else None,
                     coupon_eligible=bool(ev is not None and ev >= -.06 and prob >= .52 and
                                          abs(prob - 1/odd) <= .30 and
-                                         analysis["data_quality"] != "poor"),
+                                         analysis["data_quality"] != "poor" and
+                                         (home or {}).get("count",0)>=3 and (away or {}).get("count",0)>=3),
                     manual_review=not bool(odd and odd >= 1.30),
                     screening_only=False,
                     confidence=analysis["data_quality"],
@@ -3591,6 +3592,10 @@ def api_prematch_analyze():
     return jsonify({
         "id":fixture_id,"home":home_team.get("name"),"away":away_team.get("name"),
         "home_form":home,"away_form":away,"h2h":h2h,"h2h_error":h2h_error,
+        "form_diagnostics":{"home_count":(home or {}).get("count",0),"away_count":(away or {}).get("count",0),
+            "home_reason":(home or {}).get("reason"),"away_reason":(away or {}).get("reason"),
+            "home_venue_count":((home or {}).get("home") or {}).get("count",0),
+            "away_venue_count":((away or {}).get("away") or {}).get("count",0)},
         "suggestions":chosen,"all_suggestions":candidates,"joint_notes":[],
         "lineups":lineups,"lineup_note":("Onaylı kadro mevcut." if lineups.get("confirmed")
             else "Kadrolar henüz kesinleşmedi; model kadro etkisini hesaplamadı."),
@@ -5494,7 +5499,8 @@ function gmCouponPicksForFixture(fixture){
 function gmRenderMatchExplanation(m,a){
   const choices=Array.isArray(a.all_suggestions)&&a.all_suggestions.length?a.all_suggestions:(Array.isArray(a.suggestions)?a.suggestions:[]);
   const main=(a.suggestions||[]).find(p=>p.is_main)||(a.suggestions||[])[0]||null;
-  const ctx=a.context||{};
+  const ctx=a.context||{},diag=a.form_diagnostics||{};
+  const formWarning=(!diag.home_count||!diag.away_count)?`<p class="gm-detail-notice">⚠️ Son maç verisi eksik: ev ${Number(diag.home_count||0)}, deplasman ${Number(diag.away_count||0)} maç. Bu nedenle modelin sonucu güvenilir form karşılaştırması değildir.</p>`:"";
   const pct=(v)=>v==null?'Veri yok':`%${Math.round(Number(v)*100)}`;
   const venueHtml=`<h4>🏟️ İç/dış saha formu ve karşılaşmalar</h4>
     <p>Ev sahibinin evinde yenilmeme: ${pct(ctx.home_home_unbeaten_rate)} (${Number(ctx.home_home_count||0)} maç) · Deplasmanın dış saha galibiyeti: ${pct(ctx.away_away_win_rate)} (${Number(ctx.away_away_count||0)} maç)</p>
@@ -5511,7 +5517,7 @@ function gmRenderMatchExplanation(m,a){
   }).join("");
   return `<div class="gm-detail-head"><strong>📋 ${esc(m.home)} – ${esc(m.away)} · Analiz yorumları</strong><button type="button" class="gm-detail-close">✕ Kapat</button></div>
     <p class="gm-detail-notice">Üst satırda modelin ana tercihi gösterilir. Kupon motoru tüm uygun pazarları ayrıca değerlendirdiği için kupon tercihi farklı olabilir.</p>
-    ${venueHtml}
+    ${formWarning}${venueHtml}
     <h4>🎟️ Kupondaki tercih</h4>${couponHtml}
     <h4>📊 Modelin pazar değerlendirmeleri</h4>${choicesHtml||'<p>Değerlendirilen pazar bulunamadı.</p>'}
     <p class="gm-detail-notice">${esc(a.note||'')} ${esc(a.odds_note||'')} Tahminler kesin sonuç değildir.</p>`;

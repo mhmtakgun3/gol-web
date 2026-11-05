@@ -180,7 +180,7 @@ def analyze_match(home, away, h2h=None):
     ha, aa = home.get('all') or {}, away.get('all') or {}
     hv, av = home.get('home') or {}, away.get('away') or {}
     nh, na, nvh, nva = _count(ha), _count(aa), _count(hv), _count(av)
-    quality = 'good' if min(nh,na)>=8 and min(nvh,nva)>=4 else ('limited' if min(nh,na)>=5 else 'poor')
+    quality = 'good' if min(nh,na)>=5 and min(nvh,nva)>=3 else ('limited' if min(nh,na)>=3 else 'poor')
     # Shrink small samples to league-neutral priors; never mistake missing for 0.
     # Venue samples and all-match samples blend based on observed sample counts.
     def blended(venue, overall, field, prior):
@@ -195,6 +195,32 @@ def analyze_match(home, away, h2h=None):
     hd_g=blended(hv,ha,'conceded',1.15)
     lh=max(.35,min(3.0,(ha_g*ad_g)**.5))
     la=max(.35,min(3.0,(aa_g*hd_g)**.5))
+    # Son maçların iç/dış saha formu zaten gol beklentisine dahildir.
+    # İkili rekabet az sayıda maçtan oluşabileceğinden sadece küçük,
+    # örneklemle sınırlı bir düzeltme yap; geçmiş karşılaşmaları kesin kanıt sayma.
+    head=(h2h or {}).get('all') or {}
+    hn=_count(head)
+    if hn>=3:
+        hw=_metric(head,'wins',0)/hn
+        aw=_metric(head,'losses',0)/hn
+        weight=min(.08, .012*hn)
+        shift=max(-1.,min(1.,hw-aw))*weight
+        lh=max(.35,min(3.,lh*(1+shift)))
+        la=max(.35,min(3.,la*(1-shift)))
+    context={
+        'home_home_count':nvh,'away_away_count':nva,
+        'home_home_win_rate':round(_metric(hv,'wins',0)/nvh,3) if nvh else None,
+        'away_away_win_rate':round(_metric(av,'wins',0)/nva,3) if nva else None,
+        'home_home_unbeaten_rate':round(_metric(hv,'unbeaten',0)/nvh,3) if nvh else None,
+        'away_away_unbeaten_rate':round(_metric(av,'unbeaten',0)/nva,3) if nva else None,
+        'home_home_scored':round(_metric(hv,'scored',0),2) if nvh else None,'away_away_scored':round(_metric(av,'scored',0),2) if nva else None,
+        'home_home_conceded':round(_metric(hv,'conceded',0),2) if nvh else None,'away_away_conceded':round(_metric(av,'conceded',0),2) if nva else None,
+        'h2h_count':hn,'h2h_home_wins':int(_metric(head,'wins',0)),
+        'h2h_draws':int(_metric(head,'draws',0)),
+        'h2h_away_wins':int(_metric(head,'losses',0)),
+        'lineup_in_model':False,'opponent_strength_in_model':False,
+        'shots_corners_in_model':False,
+    }
     scores=[(h,a,math.exp(-lh-la)*lh**h*la**a/(math.factorial(h)*math.factorial(a)))
             for h in range(13) for a in range(13)]
     total=sum(p for _,_,p in scores)
@@ -215,9 +241,9 @@ def analyze_match(home, away, h2h=None):
         else: p=sum(weight for h,a,weight in scores if rule(h,a))/total
         markets.append({'market':code,'label':label,'family':family,'model_probability':round(p,4),
             'reason':f'Ev gol beklentisi {lh:.2f}, deplasman {la:.2f}. {label} senaryosu için ortak skor dağılımından %{p*100:.1f} hesaplandı. Veri kalitesi: {quality}. Gerçekleşme garantisi değildir.'})
-    return {'markets':markets,'data_quality':quality,
+    return {'markets':markets,'context':context,'data_quality':quality,
         'scenario':{'home_expected_goals':round(lh,2),'away_expected_goals':round(la,2)},
-        'model_note':'Form örneklemine göre daraltılmış ortak Poisson modeli; rakip gücü, kadro ve lig bazlı kalibrasyon henüz yok. Haber başlıkları doğrulanmadan modele katılmaz.'}
+        'model_note':'Son 5 genel ve iç/dış saha formu hesaba katılır; yeterli H2H varsa sınırlı ağırlık verilir. Rakip gücü, güncel kadro, oyun tarzı/şut ve lig kalibrasyonu modele dahil değildir; bunlar doğrulanmadan güçlü güven iddiası kurulamaz.'}
 
 def risk_level(prob, quality):
     """Risk is an uncertainty label, never a validated win probability."""
