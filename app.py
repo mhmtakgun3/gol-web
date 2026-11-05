@@ -5038,6 +5038,17 @@ body{background:radial-gradient(ellipse at 58% -22%,#122a58 0,transparent 48%),l
 @media(max-width:1450px){.gm-dashboard-grid{grid-template-columns:minmax(0,1fr) 280px!important}.gm-table-head,.gm-match-panel .match{grid-template-columns:68px minmax(165px,1fr) 83px 39px 45px 43px 35px 62px!important;gap:3px!important}.gm-team b{font-size:9px!important}}
 @media(max-width:1180px){.gm-kpis{grid-template-columns:repeat(3,minmax(0,1fr))!important}.gm-dashboard-grid{grid-template-columns:1fr!important}.gm-right-col{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))}.gm-donut-card{grid-column:1/-1}}
 @media(max-width:760px){.gm-kpis{grid-template-columns:repeat(2,minmax(0,1fr))!important}.gm-right-col{grid-template-columns:1fr!important}.gm-table-head{display:none!important}.gm-match-panel .match{grid-template-columns:1fr auto!important}.gm-match-panel .gm-market,.gm-match-panel .gm-price,.gm-match-panel .gm-confidence,.gm-match-panel .gm-risk,.gm-match-panel .gm-form{display:none!important}}
+
+/* Prematch match explanation expansion - isolated from existing layout */
+.gm-match-panel .gm-detail-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.gm-match-panel .gm-detail-head strong{font-size:14px;color:#e9f3ff}
+.gm-match-panel .gm-detail-close{background:#22365b!important;color:#e9f3ff!important;border:1px solid #3b527b!important}
+.gm-match-panel .gm-detail-notice{font-size:11px;color:#a9b9d4;line-height:1.6;margin:12px 0}
+.gm-match-panel .analysis h4{margin:16px 0 8px;font-size:12px;color:#6be5cc}
+.gm-match-panel .gm-detail-choice{padding:10px 12px;margin:7px 0;background:#122341;border:1px solid #2b4266;border-radius:8px;font-size:12px;line-height:1.65}
+.gm-match-panel .gm-detail-choice div{color:#b9c8e0;font-size:11px;margin-top:3px}
+.gm-match-panel .gm-detail-numbers{float:right;color:#d2e6ff;font-size:11px;margin-left:10px}
+.gm-match-panel .gm-detail-tag{font-size:9px;color:#6be5cc;margin-left:8px}
 </style></head><body>
 <aside class="pro-sidebar gm-nav" aria-label="Ana navigasyon"><a class="pro-identity" href="/"><span class="pro-logo">⚽</span><span>GOL MERKEZİ<strong>PRO ANALYTICS</strong></span></a><div class="pro-section-label">KONTROL MERKEZİ</div><a href="/">◉ <span>Canlı Gol Merkezi</span></a><a href="/tahmin" class="active">▦ <span>Maç Analizi &amp; Kupon</span></a><a href="/radar">◈ <span>Piyasa Radarı</span></a><div class="pro-section-label">İSTATİSTİKLER</div><a href="#gm-performance">▥ <span>Performans</span></a><a href="#gm-coupon">▤ <span>Kupon Geçmişi</span></a><a href="#gm-coupon">◫ <span>Sanal Bakiye</span></a><div class="pro-section-label">ARAÇLAR</div><a href="#gm-fixtures">☆ <span>Fikstür</span></a><a href="#gm-leagues">▤ <span>Lig Dağılımı</span></a><a href="/radar">⚙ <span>Piyasa Araçları</span></a><div class="pro-sidebar-bottom"><span class="pro-pulse"></span> ANALİZ PLATFORMU<small>Gol Merkezi • Pro Workspace</small></div></aside><div class="wrap">
 <div class="gm-topbar"><div><span class="gm-eyebrow">GOL MERKEZİ <b> / ANALYTICS DASHBOARD</b></span><h1>Analiz Kontrol Merkezi <span class="gm-live-dot"></span></h1><p>Fikstür, futbol analizi ve sanal kupon performansı · Gerçek veriler, şeffaf sonuçlar</p></div><div class="gm-top-actions"><span id="gmToday">PRO ANALYTICS</span><a href="/radar">◈ Piyasa Radarı ↗</a></div></div>
@@ -5341,6 +5352,11 @@ function renderCoupons(coupons){
   const root=document.getElementById("coupons"),store=couponStore();root.innerHTML="";
   coupons=(coupons||[]).filter(c=>c.status!=="VOID");
   renderBankroll(store);
+  for(const [fixture,item] of analyzedMatches){
+    const card=[...document.querySelectorAll("#fixtures .match")].find(el=>Number(el.dataset.fixture)===Number(fixture));
+    const detail=card?.querySelector(".analysis");
+    if(detail&&!detail.hidden){detail.innerHTML=gmRenderMatchExplanation(item.match,item.analysis);detail.querySelector(".gm-detail-close").onclick=()=>{detail.hidden=true};}
+  }
   let won=0,lost=0,legWon=0,legLost=0;
   for(const list of Object.values(store))for(const c of list||[]){
     if(c.strategyVersion!==couponStrategyVersionV10)continue;
@@ -5382,6 +5398,27 @@ refreshProLive();setInterval(refreshProLive,60000);
 document.getElementById("gmManualTab").addEventListener("click",()=>{document.getElementById("gmManualTab").classList.add("active");document.getElementById("gmAutoTab").classList.remove("active");document.getElementById("gm-fixtures").scrollIntoView({behavior:"smooth"});});
 document.getElementById("gmAutoTab").addEventListener("click",()=>{document.getElementById("gmAutoTab").classList.add("active");document.getElementById("gmManualTab").classList.remove("active");});
 function updateCoverage(){const n=loadedMatches.length;document.getElementById("gmCoverage").textContent=n?`%${(100*analyzedMatches.size/n).toFixed(0)}`:"—";}
+function gmCouponPicksForFixture(fixture){
+  const all=couponStore()[loadedDate]||[];
+  return all.filter(c=>c.status!=="VOID").flatMap(c=>(c.legs||[]).filter(l=>Number(l.fixture)===Number(fixture)).map(l=>({...l,couponStatus:c.status||"OPEN"})));
+}
+function gmRenderMatchExplanation(m,a){
+  const choices=Array.isArray(a.all_suggestions)&&a.all_suggestions.length?a.all_suggestions:(Array.isArray(a.suggestions)?a.suggestions:[]);
+  const main=(a.suggestions||[]).find(p=>p.is_main)||(a.suggestions||[])[0]||null;
+  const coupons=gmCouponPicksForFixture(m.id);
+  const couponHtml=coupons.length?coupons.map(l=>`<div class="gm-detail-choice"><b>${esc(l.label||l.market)}</b> · ${Number(l.odd||0).toFixed(2)} oran · ${esc(l.bookmaker||"Kaynak yok")}<div>${esc(l.explanation||"Kupon seçim gerekçesi kayıtlı değil.")}</div></div>`).join(""):'<p>Bu maç henüz bir kupona eklenmemiş. Kupon oluşturulduktan sonra buradaki detay güncellenir.</p>';
+  const ordered=[...choices].sort((x,y)=>Number(y.model_probability||0)-Number(x.model_probability||0));
+  const choicesHtml=ordered.slice(0,12).map(p=>{
+    const odd=Number(p.quote?.odd||0),prob=Number(p.model_probability||0);
+    const isMain=main&&p.market===main.market;
+    return `<div class="gm-detail-choice"><b>${esc(p.label||p.market||"Pazar")}</b>${isMain?' <span class="gm-detail-tag">EKRANDAKİ TERCİH</span>':''}<span class="gm-detail-numbers">${odd>=1.30?odd.toFixed(2)+' oran':'Oran doğrulanmadı'} · Model %${(prob<=1?prob*100:prob).toFixed(0)}</span><div>${esc(p.explanation||p.reason||"Bu pazar için ayrıntılı gerekçe sağlanmadı.")}</div></div>`;
+  }).join("");
+  return `<div class="gm-detail-head"><strong>📋 ${esc(m.home)} – ${esc(m.away)} · Analiz yorumları</strong><button type="button" class="gm-detail-close">✕ Kapat</button></div>
+    <p class="gm-detail-notice">Üst satırda modelin ana tercihi gösterilir. Kupon motoru tüm uygun pazarları ayrıca değerlendirdiği için kupon tercihi farklı olabilir.</p>
+    <h4>🎟️ Kupondaki tercih</h4>${couponHtml}
+    <h4>📊 Modelin pazar değerlendirmeleri</h4>${choicesHtml||'<p>Değerlendirilen pazar bulunamadı.</p>'}
+    <p class="gm-detail-notice">${esc(a.note||'')} ${esc(a.odds_note||'')} Tahminler kesin sonuç değildir.</p>`;
+}
 function renderFixtures(){
   const selected=loadedDate;
   const countryFiltered=leagueSelect.value==="ALL" ? loadedMatches
@@ -5394,11 +5431,25 @@ function renderFixtures(){
     : "Seçilen ligde başlamamış maç bulunamadı.";
   root.innerHTML="";
   for(const m of filtered){
-      const card=document.createElement("article");card.className="match";
+      const card=document.createElement("article");card.className="match";card.dataset.fixture=String(m.id);
       const logo=(u,n)=>typeof u==="string"&&/^https:\/\/[a-z0-9.-]+\//i.test(u)?`<img class="gm-team-logo" src="${esc(u)}" alt="${esc(n)} logosu" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display='none'">`:`<span class="gm-team-placeholder">⚽</span>`;
       card.innerHTML=`<div class="gm-match-time"><b>${esc(shownTime(m.kickoff))}</b><small>${esc(m.league||m.country||"")}</small></div><div class="gm-teams"><span class="gm-team">${logo(m.home_logo,m.home)}<b>${esc(m.home)}</b></span><span class="gm-vs">—</span><span class="gm-team">${logo(m.away_logo,m.away)}<b>${esc(m.away)}</b></span></div><span class="gm-market" data-market>Analiz bekliyor</span><span class="gm-price" data-price>—</span><span class="gm-confidence" data-confidence>—</span><span class="gm-risk" data-risk>—</span><span class="gm-form" data-form>—</span><button type="button" class="analyze-btn">Analiz et →</button><div class="analysis" hidden></div>`;
       const button=card.querySelector(".analyze-btn"),box=card.querySelector(".analysis");
+      const showDetails=()=>{
+        const saved=analyzedMatches.get(Number(m.id));
+        if(!saved)return;
+        if(!box.hidden){box.hidden=true;return;}
+        box.innerHTML=gmRenderMatchExplanation(m,saved.analysis);
+        box.hidden=false;
+        box.querySelector(".gm-detail-close").onclick=()=>{box.hidden=true};
+      };
+      card.querySelector(".gm-teams").style.cursor="pointer";
+      card.querySelector(".gm-teams").title="Maç analiz yorumlarını göster";
+      card.querySelector(".gm-teams").onclick=showDetails;
+      card.querySelector("[data-market]").style.cursor="pointer";
+      card.querySelector("[data-market]").onclick=showDetails;
       button.onclick=async()=>{
+        if(analyzedMatches.has(Number(m.id))){showDetails();return;}
         button.disabled=true;button.textContent="Analiz ediliyor…";box.hidden=true;box.textContent="";
         try{
           const a=await getJson("/api/prematch/analyze?date="+encodeURIComponent(selected)+"&fixture="+encodeURIComponent(m.id));
@@ -5413,16 +5464,10 @@ function renderFixtures(){
           card.querySelector("[data-price]").textContent=primary?.quote&&Number(primary.quote.odd)>=1.30?Number(primary.quote.odd).toFixed(2):"—";
           const prob=primary?Number(primary.model_probability):NaN;card.querySelector("[data-confidence]").textContent=Number.isFinite(prob)?`${(prob<=1?prob*100:prob).toFixed(0)}%`:"—";
           const risk=Number.isFinite(prob)?(prob<=1?prob*100:prob):NaN;card.querySelector("[data-risk]").textContent=Number.isFinite(risk)?(risk>=75?"Düşük":risk>=60?"Orta":"Yüksek"):"Pas";
-          box.hidden=true; // Sonuç tabloda kalır, detay ekranı kendiliğinden açılmaz.
-          button.textContent="Yeniden analiz et";
-          box.innerHTML=`<div class="gm-decision"><div class="gm-decision-label">BOT ANALİZİ</div><div class="gm-decision-top"><strong>${esc(primary?.label||"Uygun tercih bulunamadı")}</strong><span class="gm-odd">${primary?.quote&&Number(primary.quote.odd)>=1.30?Number(primary.quote.odd).toFixed(2)+" ORAN":"ORAN DOĞRULANMADI"}</span></div><div class="gm-decision-meta"><span>${esc(primary?.decision_role||"Model değerlendirmesi")}</span><span>${esc(primary?.quote?.bookmaker||"Fiyat kaynağı yok")}</span></div><p>Maç istatistikleri ve piyasa fiyatları arka planda değerlendirildi. Model tahminleri kesin sonuç değildir.</p><button type="button" class="close-analysis">✕ Kapat</button></div>`;
-          box.querySelector(".close-analysis").onclick=()=>{
-            // Analizi gizlemek sonuçları ve kupon adaylarını silmez.
-            box.hidden=true;
-            box.innerHTML="";
-            button.disabled=false;
-            button.textContent="Bu maçı tekrar analiz et";
-          };
+          button.textContent="Yorumları göster";
+          box.innerHTML=gmRenderMatchExplanation(m,a);
+          box.hidden=false;
+          box.querySelector(".gm-detail-close").onclick=()=>{box.hidden=true};
         }catch(e){box.hidden=false;box.innerHTML='<span class="error">'+esc(e.message)+'</span>'}
         finally{button.disabled=false}
       };
