@@ -221,7 +221,8 @@ def choose_markets(candidates, quality):
     """Choose a match-specific scenario, never a default cheap goal market.
 
     Quotes must match the exact market. Unpriced choices are informational only.
-    Under markets are fallback options, not the automatic first choice.
+    3,5 ALT remains available in analysis, but is never selected as a betting recommendation.
+    Other under markets are fallback options, not the automatic first choice.
     """
     if not candidates:
         return []
@@ -282,7 +283,7 @@ def choose_markets(candidates, quality):
             selected.append(over15)
         else:
             # The user prefers UNDER only as the last resort.
-            under = [by_code[k] for k in ('UNDER_2_5', 'UNDER_3_5') if k in by_code
+            under = [by_code[k] for k in ('UNDER_2_5',) if k in by_code
                      and by_code[k]['price_verified'] and by_code[k]['model_probability'] >= .68]
             if under:
                 selected.append(max(under, key=rank))
