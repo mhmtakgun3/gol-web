@@ -326,7 +326,7 @@ def record_signal(item, market, score, reasons):
 def _settle_signal(db, row, won, checked_minute, goal_minute=None):
     elapsed = max(0, safe_int(checked_minute) - safe_int(row["minute"]))
     db.execute("""UPDATE signal_events SET result=?,checked_minute=?,goal_minute=?,
-        goal_at=?,hit_5=?,hit_10=?,hit_15=? WHERE id=? AND (result IN ('OPEN','INCOMPLETE') OR (market LIKE 'İY %' AND result='NO_GOAL_15'))""",
+        goal_at=?,hit_5=?,hit_10=?,hit_15=? WHERE id=? AND (result IN ('OPEN','INCOMPLETE') OR (market LIKE 'İY %' AND result='NO_GOAL_15') OR (market='Gol Radarı' AND result='NO_GOAL_15'))""",
         ("GOAL" if won else "NO_GOAL_15", checked_minute,
          goal_minute if won else None,
          datetime.now().isoformat(timespec="seconds") if won else None,
@@ -349,10 +349,7 @@ def _pick_won(row, final_home, final_away):
 
 
 def update_signal_outcomes(fixture, minute, hg, ag, finished=False):
-    """Canlı veride yalnızca doğrulanabilen 15 dk gol radarını kapat.
-
-    İlk yarı ve BOT PICK pazarları kesin API skoruyla ayrıca sonuçlandırılır.
-    """
+    """Gol Radarını maç bitene kadar açık tut; her sonraki gol başarıdır."""
     try:
         with perf_db() as db:
             rows = db.execute("SELECT * FROM signal_events WHERE fixture_id=? AND result='OPEN'", (fixture,)).fetchall()
@@ -361,9 +358,7 @@ def update_signal_outcomes(fixture, minute, hg, ag, finished=False):
                     continue
                 elapsed = max(0, minute - row["minute"])
                 if hg + ag > row["home_goals"] + row["away_goals"]:
-                    _settle_signal(db, row, elapsed <= 15, minute, minute if elapsed <= 15 else None)
-                elif elapsed >= 15:
-                    _settle_signal(db, row, False, minute)
+                    _settle_signal(db, row, True, minute, minute)
                 elif finished:
                     # Maç canlı listeden çıktı; kesin skor için API mutabakatını bekle.
                     pass
@@ -383,7 +378,7 @@ def reconcile_signal_results(limit=8):
     try:
         with perf_db() as db:
             pending = db.execute("""SELECT fixture_id, MAX(id) AS newest FROM signal_events
-                WHERE result IN ('OPEN','INCOMPLETE') OR (market LIKE 'İY %' AND result='NO_GOAL_15') GROUP BY fixture_id
+                WHERE result IN ('OPEN','INCOMPLETE') OR (market LIKE 'İY %' AND result='NO_GOAL_15') OR (market='Gol Radarı' AND result='NO_GOAL_15') GROUP BY fixture_id
                 ORDER BY newest DESC LIMIT 120""").fetchall()
         now = time.time()
         selected = []
@@ -412,7 +407,7 @@ def reconcile_signal_results(limit=8):
                 ft_h, ft_a = goals.get("home"), goals.get("away")
             with perf_db() as db:
                 rows = db.execute("""SELECT * FROM signal_events WHERE fixture_id=?
-                    AND (result IN ('OPEN','INCOMPLETE') OR (market LIKE 'İY %' AND result='NO_GOAL_15'))""", (fid,)).fetchall()
+                    AND (result IN ('OPEN','INCOMPLETE') OR (market LIKE 'İY %' AND result='NO_GOAL_15') OR (market='Gol Radarı' AND result='NO_GOAL_15'))""", (fid,)).fetchall()
                 for row in rows:
                     market = row["market"]
                     if market.startswith("İY"):
@@ -428,10 +423,39 @@ def reconcile_signal_results(limit=8):
                         won = _pick_won(row, int(ft_h), int(ft_a))
                         if won is not None:
                             _settle_signal(db, row, won, 90, None)
-                    elif market == "Gol Radarı" and ended and ft_h is not None and ft_a is not None:
-                        # Final skor 15 dakikalık zaman penceresini ispatlamaz.
-                        # Canlı izlemdeki kesin sonuçları koru; eksikse uydurma.
-                        pass
+                    elif market == "Gol Radarı":
+                        # Eski 15 dakika kayıplarını da olay dakikalarından yeniden değerlendir.
+                        # Skor toplamı tek başına golün sinyalden önce/sonra olduğunu kanıtlamaz.
+                        if not ended:
+                            continue
+                        events_data, events_error = api_get("/fixtures/events", {"fixture": fid})
+                        if events_error or not isinstance(events_data, dict):
+                            continue  # Kanıt olmadan başarısız sayma.
+                        events = events_data.get("response")
+                        if not isinstance(events, list):
+                            continue
+                        goal_minutes = []
+                        for event in events:
+                            if event.get("type") != "Goal":
+                                continue
+                            detail = (event.get("detail") or "").lower()
+                            if "missed penalty" in detail or "disallowed" in detail or "cancelled" in detail:
+                                continue
+                            tm = event.get("time") or {}
+                            base = tm.get("elapsed")
+                            if base is None:
+                                continue
+                            event_minute = safe_int(base) + safe_int(tm.get("extra"))
+                            if event_minute > safe_int(row["minute"]):
+                                goal_minutes.append(event_minute)
+                        if goal_minutes:
+                            first_goal = min(goal_minutes)
+                            _settle_signal(db, row, True, first_goal, first_goal)
+                        elif ft_h is not None and ft_a is not None:
+                            # Olay akışı eksikse yalnızca skor eşitliği gol olmadığını kanıtlar.
+                            if int(ft_h) + int(ft_a) == row["home_goals"] + row["away_goals"]:
+                                _settle_signal(db, row, False, 90)
+                            # Skor artmış ama gol olayı eksikse kanıtsız sonuç yazma.
     except Exception as exc:
         print(f"Performans API sonuç doğrulama hatası: {exc}", flush=True)
 
